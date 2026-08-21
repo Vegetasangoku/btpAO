@@ -25,6 +25,8 @@ import {
   HardDrive,
 } from 'lucide-react';
 import { supabase } from '@/lib/supabase/client';
+import { api } from '@/lib/api';
+import { LLM_MODEL_TIERS } from '@/lib/types';
 
 interface TenantDetail {
   id: string;
@@ -37,6 +39,8 @@ interface TenantDetail {
   used_this_month?: number;
   llm_provider?: string;
   llm_model?: string;
+  llm_model_tier?: string;
+  branding_config?: any;
   model_routing_config?: {
     extraction_gonogo?: { provider: string; model: string };
     redaction_memoire?: { provider: string; model: string };
@@ -65,12 +69,13 @@ interface TenantDocument {
 
 export default function TenantDetailPage() {
   const params = useParams();
-  const router = useRouter();
-  const tenantId = params.id as string;
+  const rawId = params?.id;
+  const tenantId = Array.isArray(rawId) ? rawId[0] : (rawId as string);
 
-  const [activeTab, setActiveTab] = useState<'info' | 'routing' | 'rag' | 'memory' | 'economic'>('rag');
+  const [activeTab, setActiveTab] = useState<'info' | 'routing' | 'rag' | 'memory' | 'economic'>('routing');
   const [tenant, setTenant] = useState<TenantDetail | null>(null);
   const [settings, setSettings] = useState<TenantSettings | null>(null);
+  const [modelTier, setModelTier] = useState<string>('inherit');
   const [documents, setDocuments] = useState<TenantDocument[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -87,44 +92,63 @@ export default function TenantDetailPage() {
 
   useEffect(() => {
     async function loadData() {
+      if (!tenantId) return;
       setLoading(true);
       try {
-        // 1. Tenant info
-        const { data: tenantData, error: tenantErr } = await supabase
-          .from('tenants')
-          .select('*')
-          .eq('id', tenantId)
-          .single();
-
-        if (tenantErr) throw tenantErr;
-        setTenant(tenantData);
-
-        // 2. Settings & Memory
-        const { data: settingsData } = await supabase
-          .from('tenants_settings')
-          .select('*')
-          .eq('tenant_id', tenantId)
-          .single();
-
-        if (settingsData) {
-          setSettings(settingsData);
-        } else {
-          setSettings({
-            custom_system_prompt: `Vous êtes l'ingénieur d'études BTP principal de ${tenantData?.name}.`,
-            system_prompt_memory: `- Mettre en avant la certification Qualibat.\n- Majorer de 5% pour Île-de-France.`,
-            taux_inflation_pct: 3.5,
-            marge_cible_pct: 12.0,
-          });
+        console.log('[TenantDetailPage] Loading data for tenantId:', tenantId);
+        // 1. Tenant info from backend API with fallback
+        let loadedTenant: any = null;
+        try {
+          loadedTenant = await api.getTenantDetail(tenantId);
+          console.log('[TenantDetailPage] api.getTenantDetail result:', loadedTenant);
+        } catch (apiErr) {
+          console.warn('[TenantDetailPage] api.getTenantDetail failed:', apiErr);
+          try {
+            const { data: tenantData } = await supabase
+              .from('tenants')
+              .select('*')
+              .eq('id', tenantId)
+              .maybeSingle();
+            loadedTenant = tenantData;
+          } catch {}
         }
 
-        // 3. Documents RAG
-        const { data: docsData } = await supabase
-          .from('tenant_documents')
-          .select('*')
-          .eq('tenant_id', tenantId)
-          .order('created_at', { ascending: false });
 
-        setDocuments(docsData || []);
+        if (loadedTenant) {
+          setTenant(loadedTenant);
+          setModelTier(loadedTenant.llm_model_tier || loadedTenant.branding_config?.llm_model_tier || 'inherit');
+        }
+
+        // 2. Settings & Memory (resilient fallback)
+        try {
+          const { data: settingsData } = await supabase
+            .from('tenants_settings')
+            .select('*')
+            .eq('tenant_id', tenantId)
+            .maybeSingle();
+
+          if (settingsData) {
+            setSettings(settingsData);
+          } else {
+            setSettings({
+              custom_system_prompt: `Vous êtes l'ingénieur d'études BTP principal de ${loadedTenant?.name || 'l\'entreprise'}.`,
+              system_prompt_memory: `- Mettre en avant la certification Qualibat.\n- Majorer de 5% pour Île-de-France.`,
+              taux_inflation_pct: 3.5,
+              marge_cible_pct: 12.0,
+            });
+          }
+        } catch {}
+
+        // 3. Documents RAG (resilient fallback)
+        try {
+          const { data: docsData } = await supabase
+            .from('tenant_documents')
+            .select('*')
+            .eq('tenant_id', tenantId)
+            .order('created_at', { ascending: false });
+
+          setDocuments(docsData || []);
+        } catch {}
       } catch (err) {
         console.error('Erreur chargement client:', err);
       } finally {
@@ -132,8 +156,10 @@ export default function TenantDetailPage() {
       }
     }
 
+
     if (tenantId) loadData();
   }, [tenantId]);
+
 
   async function handleAdminFileUpload(files: FileList | null) {
     if (!files || files.length === 0 || !tenantId) return;
@@ -212,20 +238,40 @@ export default function TenantDetailPage() {
     setSaving(true);
 
     try {
-      // 1. Update tenants table
-      const { error: tErr } = await supabase
-        .from('tenants')
-        .update({
+      // 1. Update tenants table & model tier via API
+      try {
+        await api.updateTenant(tenantId, {
           name: tenant.name,
           siret: tenant.siret,
           contact_email: tenant.contact_email,
           plan: tenant.plan,
-          monthly_limit: tenant.monthly_limit,
-          model_routing_config: tenant.model_routing_config,
-        })
-        .eq('id', tenantId);
+          llm_model_tier: modelTier,
+          branding_config: {
+            ...(tenant.branding_config || {}),
+            llm_model_tier: modelTier,
+            model_routing_config: tenant.model_routing_config,
+          },
+        });
+      } catch (apiErr) {
+        const { error: tErr } = await supabase
+          .from('tenants')
+          .update({
+            name: tenant.name,
+            siret: tenant.siret,
+            contact_email: tenant.contact_email,
+            plan: tenant.plan,
+            monthly_limit: tenant.monthly_limit,
+            model_routing_config: tenant.model_routing_config,
+            branding_config: {
+              ...(tenant.branding_config || {}),
+              llm_model_tier: modelTier,
+            },
+          })
+          .eq('id', tenantId);
 
-      if (tErr) throw tErr;
+        if (tErr) throw tErr;
+      }
+
 
       // 2. Update tenants_settings & Memory
       if (settings) {
@@ -521,15 +567,60 @@ export default function TenantDetailPage() {
       {activeTab === 'routing' && (
         <form onSubmit={handleSave} className="space-y-6">
           <div>
-            <h2 className="text-base font-bold text-white">Moteurs d'Intelligence Artificielle Assignés</h2>
+            <h2 className="text-base font-bold text-white">Moteurs d'Intelligence Artificielle & Modèle Assigné</h2>
             <p className="text-xs text-slate-400">
-              Définissez le modèle spécifique pour chaque tâche de réponse à l'appel d'offres.
+              Définissez le niveau d'intelligence artificielle alloué à cette entreprise cliente (override spécifique ou héritage).
             </p>
+          </div>
+
+          {/* Level 2: Per-Client Model Tier Selection */}
+          <div className="p-6 rounded-3xl bg-slate-900/90 border border-slate-800 space-y-4 shadow-xl">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                  <Cpu className="w-4 h-4 text-sky-400" />
+                  <span>Modèle IA Assigné (Override Client)</span>
+                </h3>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Choisissez le palier de performance et de coût pour les générations de cette entreprise.
+                </p>
+              </div>
+              <span className={`text-[10px] font-bold px-2.5 py-1 rounded border ${
+                modelTier === 'inherit' 
+                  ? 'bg-slate-800 text-slate-300 border-slate-700' 
+                  : 'bg-rose-500/10 text-rose-300 border-rose-500/30'
+              }`}>
+                {modelTier === 'inherit' ? 'Mode Hérité (Plateforme)' : 'Override Spécifique'}
+              </span>
+            </div>
+
+            <div className="space-y-2">
+              <label htmlFor="tenant-model-tier-select" className="block text-xs font-bold text-slate-200">
+                Palier de Modèle IA
+              </label>
+              <select
+                id="tenant-model-tier-select"
+                value={modelTier}
+                onChange={(e) => setModelTier(e.target.value)}
+                className="w-full px-4 py-3 rounded-xl bg-slate-950 border border-slate-800 focus:border-rose-500 text-xs text-white font-medium focus:outline-none cursor-pointer"
+              >
+                <option value="inherit">Hériter du réglage général (par défaut)</option>
+                {LLM_MODEL_TIERS.map((tier) => (
+                  <option key={tier.id} value={tier.id}>
+                    {tier.display_label}
+                  </option>
+                ))}
+              </select>
+              <p className="text-[11px] text-slate-500">
+                Si "Hériter du réglage général" est sélectionné, le client utilise instantanément le modèle global défini par le super-admin.
+              </p>
+            </div>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <div className="p-4 rounded-2xl bg-slate-950/80 border border-slate-800 space-y-2">
               <label className="block text-xs font-bold text-slate-200">1. Synthèse DCE & Go/No-Go</label>
+
               <select
                 value={currentGoNoGo}
                 onChange={(e) => {

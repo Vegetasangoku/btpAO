@@ -40,20 +40,24 @@ export async function middleware(request: NextRequest) {
   if (!effectiveUser && process.env.NODE_ENV !== 'production' && Boolean(configuredE2ESecret)) {
     const e2eSecret = request.headers.get('x-e2e-secret') || request.cookies.get('btp_e2e_secret')?.value;
     if (e2eSecret && e2eSecret === configuredE2ESecret) {
+      const isAdmin = request.headers.get('x-e2e-admin') === 'true' || request.cookies.get('btp_e2e_admin')?.value === 'true';
       effectiveUser = {
-        id: '22222222-2222-2222-2222-222222222222',
-        email: 'conducteur.travaux@eiffabtp-demo.fr',
+        id: isAdmin ? '99999999-9999-9999-9999-999999999999' : '22222222-2222-2222-2222-222222222222',
+        email: isAdmin ? 'charbelakl@gmail.com' : 'conducteur.travaux@eiffabtp-demo.fr',
         app_metadata: {
           tenant_id: '11111111-1111-1111-1111-111111111111',
-          role: 'owner',
+          role: isAdmin ? 'super_admin' : 'owner',
+          is_platform_admin: isAdmin,
         },
         user_metadata: {
           tenant_id: '11111111-1111-1111-1111-111111111111',
-          role: 'owner',
+          role: isAdmin ? 'super_admin' : 'owner',
+          is_platform_admin: isAdmin,
         },
       } as any;
     }
   }
+
 
 
   const pathname = request.nextUrl.pathname;

@@ -31,6 +31,7 @@ import {
 } from 'lucide-react';
 import { supabase } from '@/lib/supabase/client';
 import { api } from '@/lib/api';
+import { LLM_MODEL_TIERS } from '@/lib/types';
 
 
 interface Tenant {
@@ -45,6 +46,7 @@ interface Tenant {
   used_this_month?: number;
   llm_provider?: string;
   llm_model?: string;
+  llm_model_tier?: string;
   model_routing_config?: {
     extraction_gonogo?: { provider: string; model: string };
     redaction_memoire?: { provider: string; model: string };
@@ -61,10 +63,11 @@ export default function SuperAdminPage() {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [isCreating, setIsCreating] = useState(false);
 
-  // Master LLM Keys State
+  // Master LLM Keys & Platform Default Model State
   const [anthropicKey, setAnthropicKey] = useState('');
   const [openaiKey, setOpenaiKey] = useState('');
   const [mistralKey, setMistralKey] = useState('');
+  const [platformDefaultTier, setPlatformDefaultTier] = useState('equilibre');
   const [keyStatus, setKeyStatus] = useState<any>(null);
   const [isSavingKeys, setIsSavingKeys] = useState(false);
 
@@ -89,6 +92,7 @@ export default function SuperAdminPage() {
   const [newTenantSiret, setNewTenantSiret] = useState('');
   const [newTenantEmail, setNewTenantEmail] = useState('');
   const [newTenantPlan, setNewTenantPlan] = useState('pro');
+  const [newTenantModelTier, setNewTenantModelTier] = useState('inherit');
   const [newTenantModel, setNewTenantModel] = useState('claude-3-5-sonnet-20241022');
 
   const AVAILABLE_MODELS = [
@@ -134,6 +138,9 @@ export default function SuperAdminPage() {
       if (res.ok) {
         const data = await res.json();
         setKeyStatus(data);
+        if (data.default_llm_tier) {
+          setPlatformDefaultTier(data.default_llm_tier);
+        }
       }
     } catch (e) {
       console.warn('[Admin] Fetch master keys notice:', e);
@@ -175,6 +182,7 @@ export default function SuperAdminPage() {
           anthropic_api_key: anthropicKey || undefined,
           openai_api_key: openaiKey || undefined,
           mistral_api_key: mistralKey || undefined,
+          default_llm_tier: platformDefaultTier,
         }),
       });
       if (res.ok) {
@@ -191,6 +199,7 @@ export default function SuperAdminPage() {
       setIsSavingKeys(false);
     }
   }
+
 
   async function handleSaveSystemPrompt() {
     if (!selectedTenantForPrompt) return;
@@ -229,13 +238,9 @@ export default function SuperAdminPage() {
         contact_email: newTenantEmail || undefined,
         plan: newTenantPlan,
         country_code: 'FR',
-        llm_provider: newTenantModel.includes('claude') ? 'anthropic' : newTenantModel.includes('gpt') ? 'openai' : 'google',
-        llm_model: newTenantModel,
-        model_routing_config: {
-          extraction_gonogo: { provider: 'Anthropic', model: 'claude-3-5-sonnet-20241022' },
-          redaction_memoire: { provider: 'Anthropic', model: newTenantModel },
-          analyse_prix: { provider: 'Mistral AI', model: 'mistral-large-2407' },
-        },
+        llm_model_tier: newTenantModelTier,
+        llm_provider: 'anthropic',
+        llm_model: newTenantModelTier !== 'inherit' ? newTenantModelTier : undefined,
       });
 
       if (created) {
@@ -244,12 +249,14 @@ export default function SuperAdminPage() {
         setNewTenantName('');
         setNewTenantSiret('');
         setNewTenantEmail('');
+        setNewTenantModelTier('inherit');
       }
     } catch (err: any) {
       alert('Erreur lors de la création : ' + err.message);
     } finally {
       setIsCreating(false);
     }
+
   }
 
 
@@ -379,6 +386,34 @@ export default function SuperAdminPage() {
             </div>
 
             <form onSubmit={handleSaveMasterKeys} className="space-y-5">
+              {/* Platform Default LLM Model Tier Selection */}
+              <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-2">
+                <div className="flex items-center justify-between">
+                  <label htmlFor="platform-default-tier-select" className="text-xs font-bold text-white flex items-center gap-2">
+                    <Cpu className="w-4 h-4 text-sky-400" />
+                    <span>Modèle par défaut de la plateforme</span>
+                  </label>
+                  <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-sky-500/10 text-sky-300 border border-sky-500/20">
+                    Niveau Global
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-400">
+                  C'est la valeur utilisée pour tout tenant qui n'a pas de réglage spécifique. Toi seul peux la changer, et le changement s'applique immédiatement à tous les tenants sans réglage individuel.
+                </p>
+                <select
+                  id="platform-default-tier-select"
+                  value={platformDefaultTier}
+                  onChange={(e) => setPlatformDefaultTier(e.target.value)}
+                  className="w-full px-4 py-3 rounded-xl bg-slate-900 border border-slate-800 focus:border-rose-500 text-xs text-white font-medium focus:outline-none cursor-pointer"
+                >
+                  {LLM_MODEL_TIERS.map((tier) => (
+                    <option key={tier.id} value={tier.id}>
+                      {tier.display_label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
               {/* Anthropic Key */}
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between">
@@ -449,12 +484,13 @@ export default function SuperAdminPage() {
                 <button
                   type="submit"
                   disabled={isSavingKeys}
-                  className="flex items-center gap-2 px-6 py-3 rounded-2xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold shadow-lg shadow-rose-900/30 transition-all disabled:opacity-50"
+                  className="flex items-center gap-2 px-6 py-3 rounded-2xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold shadow-lg shadow-rose-900/30 transition-all disabled:opacity-50 cursor-pointer"
                 >
                   <Save className="w-4 h-4" />
-                  <span>{isSavingKeys ? "Enregistrement sécurisé..." : "Enregistrer les Clés Master"}</span>
+                  <span>{isSavingKeys ? "Enregistrement sécurisé..." : "Enregistrer les Paramètres & Clés Master"}</span>
                 </button>
               </div>
+
             </form>
           </div>
         </div>
@@ -787,34 +823,41 @@ export default function SuperAdminPage() {
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-3">
                 <div>
-                  <label className="block text-xs font-bold text-slate-300 mb-1">Forfait</label>
+                  <label className="block text-xs font-bold text-slate-300 mb-1">Forfait d'Abonnement</label>
                   <select
                     value={newTenantPlan}
                     onChange={(e) => setNewTenantPlan(e.target.value)}
-                    className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs text-white focus:outline-none"
+                    className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs text-white focus:outline-none cursor-pointer"
                   >
-                    <option value="starter">Starter (3 DCE)</option>
-                    <option value="pro">Pro BTP (15 DCE)</option>
-                    <option value="enterprise">Entreprise (Illimité)</option>
+                    <option value="starter">Starter BTP (3 DCE / mois)</option>
+                    <option value="pro">Pro BTP (15 DCE / mois)</option>
+                    <option value="enterprise">Entreprise (Sur-mesure)</option>
                   </select>
                 </div>
 
                 <div>
-                  <label className="block text-xs font-bold text-slate-300 mb-1">Moteur IA Principal</label>
+                  <label className="block text-xs font-bold text-slate-300 mb-1">Modèle IA Assigné (Override Client)</label>
                   <select
-                    value={newTenantModel}
-                    onChange={(e) => setNewTenantModel(e.target.value)}
-                    className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs text-white focus:outline-none"
+                    id="new-tenant-tier-select"
+                    value={newTenantModelTier}
+                    onChange={(e) => setNewTenantModelTier(e.target.value)}
+                    className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs text-white focus:outline-none cursor-pointer"
                   >
-                    <option value="claude-3-5-sonnet-20241022">Claude 3.5 Sonnet</option>
-                    <option value="gpt-4o">GPT-4o</option>
-                    <option value="gemini-1.5-pro">Gemini 1.5 Pro</option>
-                    <option value="mistral-large-2407">Mistral Large 2</option>
+                    <option value="inherit">Hériter du réglage général (par défaut)</option>
+                    {LLM_MODEL_TIERS.map((tier) => (
+                      <option key={tier.id} value={tier.id}>
+                        {tier.display_label}
+                      </option>
+                    ))}
                   </select>
+                  <p className="text-[10px] text-slate-500 mt-1">
+                    Laissez sur "Hériter" pour suivre automatiquement le modèle par défaut de la plateforme.
+                  </p>
                 </div>
               </div>
+
 
               <div className="flex gap-2 pt-2">
                 <button

@@ -38,16 +38,18 @@ async function fetcher<T>(endpoint: string, options: RequestInit = {}): Promise<
         headers.set('X-Tenant-ID', DEMO_TENANT_ID);
       }
     } else {
-      // Local dev token fallback to ensure local backend queries succeed
-      const LOCAL_DEV_TOKEN = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMTExMTExMS1hYWFhLWFhYWEtYWFhYS1hYWFhYWFhYWFhYWEiLCJlbWFpbCI6ImRpcmVjdGV1ckBlaWZmYWJ0cC5mciIsImF1ZCI6ImF1dGhlbnRpY2F0ZWQiLCJyb2xlIjoiYXV0aGVudGljYXRlZCIsImFwcF9tZXRhZGF0YSI6eyJ0ZW5hbnRfaWQiOiIxMTExMTExMS0xMTExLTExMTEtMTExMS0xMTExMTExMTExMTEiLCJyb2xlIjoib3duZXIifSwidXNlcl9tZXRhZGF0YSI6eyJ0ZW5hbnRfaWQiOiIxMTExMTExMS0xMTExLTExMTEtMTExMS0xMTExMTExMTExMTEiLCJyb2xlIjoib3duZXIifX0.XM-XVexbsiIzyUqu25d8MlZvH0NCuaGhr8vM9H9EzTs';
+      // Local dev super_admin token fallback to ensure local backend queries succeed
+      const LOCAL_DEV_TOKEN = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI5OTk5OTk5OS05OTk5LTk5OTktOTk5OS05OTk5OTk5OTk5OTkiLCJlbWFpbCI6ImNoYXJiZWxha2xAZ21haWwuY29tIiwiYXVkIjoiYXV0aGVudGljYXRlZCIsInJvbGUiOiJhdXRoZW50aWNhdGVkIiwiYXBwX21ldGFkYXRhIjp7InJvbGUiOiJzdXBlcl9hZG1pbiIsImlzX3BsYXRmb3JtX2FkbWluIjp0cnVlLCJ0ZW5hbnRfaWQiOiIxMTExMTExMS0xMTExLTExMTEtMTExMS0xMTExMTExMTExMTEifSwidXNlcl9tZXRhZGF0YSI6eyJyb2xlIjoic3VwZXJfYWRtaW4iLCJpc19wbGF0Zm9ybV9hZG1pbiI6dHJ1ZSwidGVuYW50X2lkIjoiMTExMTExMTEtMTExMS0xMTExLTExMTEtMTExMTExMTExMTExIn19.TvImy6ESPb--NZV5LARjcCXglI_TjyXCBBrBHamHdVs';
       headers.set('Authorization', `Bearer ${LOCAL_DEV_TOKEN}`);
       headers.set('X-Tenant-ID', DEMO_TENANT_ID);
     }
   } catch {
-    const LOCAL_DEV_TOKEN = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMTExMTExMS1hYWFhLWFhYWEtYWFhYS1hYWFhYWFhYWFhYWEiLCJlbWFpbCI6ImRpcmVjdGV1ckBlaWZmYWJ0cC5mciIsImF1ZCI6ImF1dGhlbnRpY2F0ZWQiLCJyb2xlIjoiYXV0aGVudGljYXRlZCIsImFwcF9tZXRhZGF0YSI6eyJ0ZW5hbnRfaWQiOiIxMTExMTExMS0xMTExLTExMTEtMTExMS0xMTExMTExMTExMTEiLCJyb2xlIjoib3duZXIifSwidXNlcl9tZXRhZGF0YSI6eyJ0ZW5hbnRfaWQiOiIxMTExMTExMS0xMTExLTExMTEtMTExMS0xMTExMTExMTExMTEiLCJyb2xlIjoib3duZXIifX0.XM-XVexbsiIzyUqu25d8MlZvH0NCuaGhr8vM9H9EzTs';
+    const LOCAL_DEV_TOKEN = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI5OTk5OTk5OS05OTk5LTk5OTktOTk5OS05OTk5OTk5OTk5OTkiLCJlbWFpbCI6ImNoYXJiZWxha2xAZ21haWwuY29tIiwiYXVkIjoiYXV0aGVudGljYXRlZCIsInJvbGUiOiJhdXRoZW50aWNhdGVkIiwiYXBwX21ldGFkYXRhIjp7InJvbGUiOiJzdXBlcl9hZG1pbiIsImlzX3BsYXRmb3JtX2FkbWluIjp0cnVlLCJ0ZW5hbnRfaWQiOiIxMTExMTExMS0xMTExLTExMTEtMTExMS0xMTExMTExMTExMTEifSwidXNlcl9tZXRhZGF0YSI6eyJyb2xlIjoic3VwZXJfYWRtaW4iLCJpc19wbGF0Zm9ybV9hZG1pbiI6dHJ1ZSwidGVuYW50X2lkIjoiMTExMTExMTEtMTExMS0xMTExLTExMTEtMTExMTExMTExMTExIn19.TvImy6ESPb--NZV5LARjcCXglI_TjyXCBBrBHamHdVs';
     headers.set('Authorization', `Bearer ${LOCAL_DEV_TOKEN}`);
     headers.set('X-Tenant-ID', DEMO_TENANT_ID);
   }
+
+
 
 
 
@@ -231,10 +233,27 @@ export const api = {
     }),
 
 
-  // Super-Admin Tenant Management
+  // Super-Admin Tenant Management & Model Settings
   getTenants: () => fetcher<Tenant[]>('/admin/tenants'),
+  getTenantDetail: (tenantId: string) => fetcher<any>(`/admin/tenants/${tenantId}`),
   createTenant: (data: CreateTenantInput) =>
     fetcher<Tenant>('/admin/tenants', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  updateTenant: (tenantId: string, data: any) =>
+    fetcher<any>(`/admin/tenants/${tenantId}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+  getPlatformLLMKeys: () => fetcher<any>('/admin/llm-keys'),
+  updatePlatformLLMKeys: (data: {
+    anthropic_api_key?: string;
+    openai_api_key?: string;
+    mistral_api_key?: string;
+    default_llm_tier?: string;
+  }) =>
+    fetcher<any>('/admin/llm-keys', {
       method: 'POST',
       body: JSON.stringify(data),
     }),
@@ -260,6 +279,7 @@ export const api = {
       method: 'POST',
     }),
 };
+
 
 
 

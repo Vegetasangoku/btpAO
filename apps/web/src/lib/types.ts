@@ -12,6 +12,33 @@ export interface TenantBranding {
   footer_text: string;
 }
 
+export const LLM_MODEL_TIERS = [
+  {
+    id: 'economique',
+    name: 'Économique — Claude Haiku 4.5',
+    pricing: '≈ 1 $ / 5 $ par million de tokens',
+    display_label: 'Économique — Claude Haiku 4.5 (≈ 1 $ / 5 $ par million de tokens)',
+  },
+  {
+    id: 'equilibre',
+    name: 'Équilibré — Claude Sonnet 5',
+    pricing: '≈ 2 $ / 10 $ par million de tokens',
+    display_label: 'Équilibré — Claude Sonnet 5 (≈ 2 $ / 10 $ par million de tokens)',
+  },
+  {
+    id: 'avance',
+    name: 'Avancé — Claude Opus 5',
+    pricing: '≈ 5 $ / 25 $ par million de tokens',
+    display_label: 'Avancé — Claude Opus 5 (≈ 5 $ / 25 $ par million de tokens)',
+  },
+  {
+    id: 'maximum',
+    name: 'Maximum — Claude Fable 5',
+    pricing: '≈ 10 $ / 50 $ par million de tokens',
+    display_label: 'Maximum — Claude Fable 5 (≈ 10 $ / 50 $ par million de tokens)',
+  },
+] as const;
+
 export interface Tenant {
   id: string;
   name: string;
@@ -22,6 +49,7 @@ export interface Tenant {
   contact_email?: string;
   llm_provider?: string;
   llm_model?: string;
+  llm_model_tier?: string;
   users_count?: number;
   projects_count?: number;
   active_projects_count?: number;
@@ -41,9 +69,23 @@ export interface CreateTenantInput {
   country_code?: string;
   llm_provider?: string;
   llm_model?: string;
+  llm_model_tier?: string;
   model_routing_config?: any;
   branding_config?: any;
 }
+
+export interface UpdateTenantInput {
+  name?: string;
+  siret?: string;
+  contact_email?: string;
+  plan?: string;
+  country_code?: string;
+  llm_provider?: string;
+  llm_model?: string;
+  llm_model_tier?: string;
+  branding_config?: any;
+}
+
 
 
 export interface UserProfile {

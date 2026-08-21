@@ -30,8 +30,9 @@ def create_token(user_id: str, tenant_id: str) -> str:
     return jwt.encode(claims, JWT_SECRET, algorithm="HS256")
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture(autouse=True, scope="function")
 def setup_gdpr_test_users():
+
     conn = psycopg2.connect(dbname="postgres")
     cur = conn.cursor()
 
@@ -150,7 +151,8 @@ def test_gdpr_execute_expired_purge_security():
 
 def test_gdpr_execute_expired_purge_via_cron_secret_and_celery():
     client = TestClient(app)
-    cron_secret = settings.CRON_PURGE_SECRET or "btp-cron-purge-secret-secure-prod-2026"
+    cron_secret = "btp-cron-purge-secret-secure-prod-2026"
+    settings.CRON_PURGE_SECRET = cron_secret
 
     # Call with valid X-Cron-Secret header
     res = client.post(
@@ -158,6 +160,7 @@ def test_gdpr_execute_expired_purge_via_cron_secret_and_celery():
         headers={"X-Cron-Secret": cron_secret}
     )
     assert res.status_code == 200
+
     data = res.json()
     assert data["success"] is True
     assert data["purged_accounts_count"] >= 1

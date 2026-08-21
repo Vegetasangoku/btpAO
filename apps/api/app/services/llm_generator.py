@@ -85,10 +85,12 @@ class LLMGeneratorService:
         regulatory_profile: Optional[Dict[str, Any]] = None,
         tenant_system_prompt: Optional[str] = None,
         custom_instructions: Optional[str] = None,
+        llm_model: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Generates a high-value BTP technical memo section using RAG context + chantier decisions + web enrichment + tenant experience learnings + country regulatory profile + tenant custom system prompt.
         Strictly requires a valid regulatory_profile (No silent fallback).
+        Uses tenant-specified or platform-default LLM model.
         """
         if regulatory_profile is None:
             raise ValueError("regulatory_profile est requis — aucun défaut silencieux autorisé")
@@ -96,6 +98,10 @@ class LLMGeneratorService:
         reg = regulatory_profile
         web_sources = rag_web_sources or []
         learnings_list = tenant_learnings or []
+        target_model = llm_model or self.default_model
+
+        print(f"[LLMGenerator] Executing memo generation using LLM model: '{target_model}'")
+
 
 
         # Build prompt context
@@ -177,7 +183,7 @@ Génère une réponse au format JSON strict avec la structure suivante :
         if settings.ANTHROPIC_API_KEY or settings.MISTRAL_API_KEY or settings.OPENAI_API_KEY:
             try:
                 response = litellm.completion(
-                    model=self.default_model,
+                    model=target_model,
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt},
@@ -188,12 +194,13 @@ Génère une réponse au format JSON strict avec la structure suivante :
                 )
                 raw_content = response.choices[0].message.content
                 parsed = json.loads(raw_content)
+                parsed["model_used"] = target_model
                 return parsed
             except Exception as e:
-                print(f"[LLMGenerator] LiteLLM call notice: {e}, falling back to intelligent BTP template engine.")
+                print(f"[LLMGenerator] LiteLLM call notice with model '{target_model}': {e}, falling back to intelligent BTP template engine.")
 
         # 2. Resilient BTP Domain Template Engine with Citations, Learnings & Anti-Hallucination
-        return self._generate_specialized_btp_section(
+        res = self._generate_specialized_btp_section(
             section_key=section_key,
             section_title=section_title,
             decision_form=decision_form,
@@ -205,6 +212,9 @@ Génère une réponse au format JSON strict avec la structure suivante :
             regulatory_profile=reg,
             custom_instructions=custom_instructions,
         )
+        res["model_used"] = target_model
+        return res
+
 
     def _generate_specialized_btp_section(
         self,

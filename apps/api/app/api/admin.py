@@ -25,6 +25,7 @@ from app.models.entities import (
     TenantSubscription,
     User,
 )
+from app.services.model_routing_service import model_routing_service, LLM_MODEL_TIERS
 
 router = APIRouter(
     prefix="/admin",
@@ -42,7 +43,20 @@ class CreateTenantPayload(BaseModel):
     country_code: Optional[str] = "FR"
     llm_provider: Optional[str] = "anthropic"
     llm_model: Optional[str] = "claude-3-5-sonnet-20241022"
+    llm_model_tier: Optional[str] = "inherit"
     model_routing_config: Optional[Dict[str, Any]] = None
+    branding_config: Optional[Dict[str, Any]] = None
+
+
+class UpdateTenantPayload(BaseModel):
+    name: Optional[str] = None
+    siret: Optional[str] = None
+    contact_email: Optional[str] = None
+    plan: Optional[str] = None
+    country_code: Optional[str] = None
+    llm_model_tier: Optional[str] = None
+    llm_provider: Optional[str] = None
+    llm_model: Optional[str] = None
     branding_config: Optional[Dict[str, Any]] = None
 
 
@@ -50,6 +64,7 @@ class LLMKeysPayload(BaseModel):
     anthropic_api_key: Optional[str] = None
     openai_api_key: Optional[str] = None
     mistral_api_key: Optional[str] = None
+    default_llm_tier: Optional[str] = None
 
 
 
@@ -63,6 +78,7 @@ class ModelRoutingPayload(BaseModel):
 class SystemPromptPayload(BaseModel):
     tenant_id: str
     system_prompt: str
+
 
 
 async def _record_audit_log(
@@ -156,6 +172,7 @@ async def list_tenants(
             "contact_email": branding.get("contact_email") or "",
             "llm_provider": branding.get("llm_provider") or "anthropic",
             "llm_model": branding.get("llm_model") or "claude-3-5-sonnet-20241022",
+            "llm_model_tier": branding.get("llm_model_tier") or "inherit",
             "branding_config": branding,
             "users_count": int(users_count),
             "projects_count": int(projects_count),
@@ -185,7 +202,7 @@ async def create_tenant(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Creates a new client tenant with country regulatory profile and initial subscription.
+    Creates a new client tenant with country regulatory profile, model tier and initial subscription.
     """
     import random
     import re
@@ -212,6 +229,7 @@ async def create_tenant(
         branding["llm_provider"] = payload.llm_provider
     if payload.llm_model:
         branding["llm_model"] = payload.llm_model
+    branding["llm_model_tier"] = payload.llm_model_tier or "inherit"
     if payload.model_routing_config:
         branding["model_routing_config"] = payload.model_routing_config
 
@@ -231,7 +249,6 @@ async def create_tenant(
         updated_at=datetime.utcnow(),
     )
     db.add(new_tenant)
-
 
     # Set PostgreSQL tenant context so initial subscription and audit log pass RLS
     await db.execute(
@@ -260,8 +277,6 @@ async def create_tenant(
     )
     db.add(sub)
 
-
-
     await _record_audit_log(
         db=db,
         admin_user=admin_user,
@@ -275,6 +290,7 @@ async def create_tenant(
             "country_code": country,
             "siret": payload.siret,
             "contact_email": payload.contact_email,
+            "llm_model_tier": payload.llm_model_tier or "inherit",
         },
         ip_address=request.client.host if request.client else None,
     )
@@ -289,8 +305,8 @@ async def create_tenant(
         "siret": new_tenant.siret or "",
         "contact_email": branding.get("contact_email") or "",
         "llm_provider": branding.get("llm_provider") or "anthropic",
-
         "llm_model": branding.get("llm_model") or "claude-3-5-sonnet-20241022",
+        "llm_model_tier": branding.get("llm_model_tier") or "inherit",
         "branding_config": branding,
         "users_count": 0,
         "projects_count": 0,
@@ -302,13 +318,125 @@ async def create_tenant(
     }
 
 
+@router.get("/tenants/{tenant_id}")
+async def get_tenant_detail(
+    tenant_id: str,
+    request: Request,
+    admin_user: CurrentTenantUser = Depends(require_platform_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Returns single tenant details with resolved model tier."""
+    try:
+        t_uuid = uuid.UUID(tenant_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid tenant UUID")
+
+    stmt = select(Tenant).where(Tenant.id == t_uuid)
+    res = await db.execute(stmt)
+    tenant = res.scalar_one_or_none()
+    if not tenant:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found")
+
+    branding = tenant.branding_config or {}
+    resolved_model_info = await model_routing_service.resolve_model_for_tenant(db=db, tenant_id=t_uuid)
+
+    return {
+        "id": str(tenant.id),
+        "name": tenant.name,
+        "slug": tenant.slug,
+        "plan": tenant.plan,
+        "country_code": tenant.country_code or "FR",
+        "siret": tenant.siret or "",
+        "contact_email": branding.get("contact_email") or "",
+        "llm_provider": branding.get("llm_provider") or "anthropic",
+        "llm_model": branding.get("llm_model") or "claude-3-5-sonnet-20241022",
+        "llm_model_tier": branding.get("llm_model_tier") or "inherit",
+        "resolved_model_info": resolved_model_info,
+        "branding_config": branding,
+        "created_at": tenant.created_at.isoformat() if tenant.created_at else None,
+        "updated_at": tenant.updated_at.isoformat() if tenant.updated_at else None,
+    }
+
+
+@router.put("/tenants/{tenant_id}")
+async def update_tenant_admin(
+    tenant_id: str,
+    payload: UpdateTenantPayload,
+    request: Request,
+    admin_user: CurrentTenantUser = Depends(require_platform_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Updates tenant details, plan, country, and model tier override."""
+    try:
+        t_uuid = uuid.UUID(tenant_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid tenant UUID")
+
+    stmt = select(Tenant).where(Tenant.id == t_uuid)
+    res = await db.execute(stmt)
+    tenant = res.scalar_one_or_none()
+    if not tenant:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found")
+
+    branding = dict(tenant.branding_config or {})
+    if payload.branding_config:
+        branding.update(payload.branding_config)
+
+    if payload.name is not None:
+        tenant.name = payload.name.strip()
+    if payload.siret is not None:
+        tenant.siret = payload.siret.strip() if payload.siret else None
+    if payload.plan is not None:
+        tenant.plan = payload.plan
+    if payload.country_code is not None:
+        tenant.country_code = payload.country_code.strip().upper()
+    if payload.contact_email is not None:
+        branding["contact_email"] = payload.contact_email
+    if payload.llm_model_tier is not None:
+        branding["llm_model_tier"] = payload.llm_model_tier
+    if payload.llm_model is not None:
+        branding["llm_model"] = payload.llm_model
+    if payload.llm_provider is not None:
+        branding["llm_provider"] = payload.llm_provider
+
+    tenant.branding_config = branding
+    tenant.updated_at = datetime.utcnow()
+
+    await _record_audit_log(
+        db=db,
+        admin_user=admin_user,
+        action="update_tenant",
+        entity_type="tenant",
+        tenant_id=t_uuid,
+        details=payload.dict(exclude_unset=True),
+        ip_address=request.client.host if request.client else None,
+    )
+    await db.flush()
+
+    resolved_model_info = await model_routing_service.resolve_model_for_tenant(db=db, tenant_id=t_uuid)
+
+    return {
+        "success": True,
+        "message": f"Tenant {tenant.name} mis à jour avec succès",
+        "tenant": {
+            "id": str(tenant.id),
+            "name": tenant.name,
+            "plan": tenant.plan,
+            "siret": tenant.siret or "",
+            "country_code": tenant.country_code,
+            "llm_model_tier": branding.get("llm_model_tier") or "inherit",
+            "resolved_model_info": resolved_model_info,
+        }
+    }
+
+
 @router.get("/llm-keys")
 async def get_llm_keys(
     request: Request,
     admin_user: CurrentTenantUser = Depends(require_platform_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Returns configured LLM keys masked for security."""
+    """Returns configured LLM keys masked for security and platform default model tier."""
     stmt = select(PlatformSettings).where(PlatformSettings.id == "global")
     res = await db.execute(stmt)
     ps = res.scalar_one_or_none()
@@ -321,6 +449,8 @@ async def get_llm_keys(
     anthropic_masked = f"{anthropic_key[:10]}...{anthropic_key[-4:]}" if len(anthropic_key) > 14 else ("sk-ant-***" if anthropic_key else "")
     openai_masked = f"{openai_key[:7]}...{openai_key[-4:]}" if len(openai_key) > 11 else ("sk-***" if openai_key else "")
     mistral_masked = f"{mistral_key[:6]}...{mistral_key[-4:]}" if len(mistral_key) > 10 else ("mis-***" if mistral_key else "")
+
+    default_tier = ps_dict.get("default_llm_tier") or "equilibre"
 
     await _record_audit_log(
         db=db,
@@ -338,6 +468,8 @@ async def get_llm_keys(
         "mistral_api_key_configured": bool(mistral_key),
         "mistral_api_key_masked": mistral_masked,
         "embedding_model": ps_dict.get("embedding_model") or settings.EMBEDDING_MODEL or "text-embedding-3-small",
+        "default_llm_tier": default_tier,
+        "available_tiers": LLM_MODEL_TIERS,
     }
 
 
@@ -348,7 +480,7 @@ async def update_llm_keys(
     admin_user: CurrentTenantUser = Depends(require_platform_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Updates master LLM keys dynamically in PostgreSQL and settings."""
+    """Updates master LLM keys and global platform default model tier dynamically in PostgreSQL and settings."""
     stmt = select(PlatformSettings).where(PlatformSettings.id == "global")
     res = await db.execute(stmt)
     ps = res.scalar_one_or_none()
@@ -368,6 +500,11 @@ async def update_llm_keys(
         val = payload.mistral_api_key.strip()
         current_settings["mistral_api_key"] = val
         settings.MISTRAL_API_KEY = val
+    if payload.default_llm_tier is not None:
+        val = payload.default_llm_tier.strip().lower()
+        if val in LLM_MODEL_TIERS:
+            current_settings["default_llm_tier"] = val
+            settings.DEFAULT_LLM_MODEL = LLM_MODEL_TIERS[val]["model_string"]
 
     if ps:
         ps.settings = current_settings
@@ -386,10 +523,11 @@ async def update_llm_keys(
     )
     await db.flush()
 
-    return {"success": True, "message": "Clés API Master enregistrées dans PostgreSQL avec audit log"}
+    return {"success": True, "message": "Paramètres LLM Master enregistrés dans PostgreSQL avec audit log"}
 
 
 @router.get("/rag-supervision")
+
 async def get_rag_supervision(
     admin_user: CurrentTenantUser = Depends(require_platform_admin),
     db: AsyncSession = Depends(get_db),

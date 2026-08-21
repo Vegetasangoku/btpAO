@@ -233,11 +233,16 @@ def generate_section_task(
                     for r in web_results
                 ]
 
-                # 8. Retrieve Tenant Custom System Prompt from branding_config
+                # 8. Retrieve Tenant Custom System Prompt and Model Tier
                 tenant_rec = (await db.execute(select(Tenant).where(Tenant.id == tenant_uuid))).scalars().first()
                 tenant_custom_prompt = (tenant_rec.branding_config or {}).get("system_prompt") if tenant_rec else None
 
-                # 9. Generate content via LLM with internal + web citations + tenant learnings + regulatory profile + custom prompt
+                # 9. Resolve LLM Model Tier (Tenant Override or Platform Default)
+                from app.services.model_routing_service import model_routing_service
+                resolved_model_info = await model_routing_service.resolve_model_for_tenant(db=db, tenant_id=tenant_uuid)
+                selected_model_string = resolved_model_info["model_string"]
+
+                # 10. Generate content via LLM with internal + web citations + tenant learnings + regulatory profile + custom prompt + tenant model
                 gen_result = await llm_generator_service.generate_memo_section(
                     project_title=project.title,
                     reference_code=project.reference_code,
@@ -252,7 +257,9 @@ def generate_section_task(
                     regulatory_profile=reg_dict,
                     tenant_system_prompt=tenant_custom_prompt,
                     custom_instructions=custom_instructions,
+                    llm_model=selected_model_string,
                 )
+
 
 
 
