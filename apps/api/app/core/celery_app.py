@@ -46,6 +46,17 @@ celery_app.conf.update(
     broker_connection_retry_on_startup=True,
 )
 
+# ── Celery Beat Scheduled Tasks ──────────────────────────────────────────────
+from celery.schedules import crontab
+
+celery_app.conf.beat_schedule = {
+    "daily-gdpr-account-purge": {
+        "task": "tasks.purge_expired_accounts_task",
+        "schedule": crontab(hour=3, minute=0),  # Everyday at 3:00 AM Paris time
+    },
+}
+
+
 
 def check_celery_broker_health() -> dict:
     """

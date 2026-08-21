@@ -107,10 +107,56 @@ def test_gdpr_deletion_request_and_cancellation():
     conn.close()
 
 
-def test_gdpr_execute_expired_purge_anonymizes_audit_logs():
+def test_gdpr_execute_expired_purge_security():
     client = TestClient(app)
 
-    res = client.post("/api/auth/account/execute-purge")
+    # 1. Unauthenticated -> 403 Forbidden (fail closed)
+    res_no_auth = client.post("/api/auth/account/execute-purge")
+    assert res_no_auth.status_code == 403
+    assert "Accès interdit" in res_no_auth.json()["detail"]
+
+    # 2. Invalid Cron Secret -> 403 Forbidden
+    res_bad_secret = client.post(
+        "/api/auth/account/execute-purge",
+        headers={"X-Cron-Secret": "invalid-secret-key-123"}
+    )
+    assert res_bad_secret.status_code == 403
+
+    # 3. Regular member user token -> 403 Forbidden
+    member_token = create_token(USER_ID, TENANT_ID)
+    res_member = client.post(
+        "/api/auth/account/execute-purge",
+        headers={"Authorization": f"Bearer {member_token}"}
+    )
+    assert res_member.status_code == 403
+
+    # 4. Valid Platform Admin Token -> 200 OK
+    admin_claims = {
+        "sub": "99999999-9999-9999-9999-999999999999",
+        "email": "charbelakl@gmail.com",
+        "aud": "authenticated",
+        "role": "authenticated",
+        "app_metadata": {"role": "super_admin", "is_platform_admin": True},
+        "user_metadata": {"role": "super_admin", "is_platform_admin": True},
+    }
+    admin_token = jwt.encode(admin_claims, JWT_SECRET, algorithm="HS256")
+    res_admin = client.post(
+        "/api/auth/account/execute-purge",
+        headers={"Authorization": f"Bearer {admin_token}"}
+    )
+    assert res_admin.status_code == 200
+    assert res_admin.json()["success"] is True
+
+
+def test_gdpr_execute_expired_purge_via_cron_secret_and_celery():
+    client = TestClient(app)
+    cron_secret = settings.CRON_PURGE_SECRET or "btp-cron-purge-secret-secure-prod-2026"
+
+    # Call with valid X-Cron-Secret header
+    res = client.post(
+        "/api/auth/account/execute-purge",
+        headers={"X-Cron-Secret": cron_secret}
+    )
     assert res.status_code == 200
     data = res.json()
     assert data["success"] is True
@@ -128,3 +174,9 @@ def test_gdpr_execute_expired_purge_anonymizes_audit_logs():
     assert audit_row[0] is None
     assert audit_row[1].get("anonymized") is True
     conn.close()
+
+    # Test Celery task directly
+    from app.workers.tasks import purge_expired_accounts_task
+    celery_result = purge_expired_accounts_task()
+    assert celery_result["success"] is True
+

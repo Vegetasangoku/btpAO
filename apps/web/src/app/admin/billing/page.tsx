@@ -1,6 +1,6 @@
 'use client';
 
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import Link from 'next/link';
 import {
   CreditCard,
@@ -11,15 +11,38 @@ import {
   Calendar,
   Building2,
   ShieldAlert,
+  Loader2,
 } from 'lucide-react';
+import { api } from '@/lib/api';
+import { Tenant } from '@/lib/types';
+
+const PLAN_PRICES: Record<string, number> = {
+  starter: 190,
+  pro: 490,
+  enterprise: 1490,
+};
 
 export default function AdminBillingPage() {
-  const transactions = [
-    { id: 'tx-1', client: 'EiffaBTP Construction SAS', amount: 490, date: '19/08/2026', status: 'Payé', invoice: 'FAC-2026-0819' },
-    { id: 'tx-2', client: 'Bouygues Travaux Publics IDF', amount: 1490, date: '15/08/2026', status: 'Payé', invoice: 'FAC-2026-0815' },
-    { id: 'tx-3', client: 'Vinci Construction & Ouvrages', amount: 1490, date: '01/08/2026', status: 'Payé', invoice: 'FAC-2026-0801' },
-    { id: 'tx-4', client: 'Colas Route & Génie Civil', amount: 490, date: '01/08/2026', status: 'Payé', invoice: 'FAC-2026-0802' },
-  ];
+  const [tenants, setTenants] = useState<Tenant[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    async function loadData() {
+      setLoading(true);
+      try {
+        const data = await api.getTenants();
+        setTenants(data);
+      } catch (err) {
+        console.error('Erreur chargement abonnements:', err);
+      } finally {
+        setLoading(false);
+      }
+    }
+    loadData();
+  }, []);
+
+  const totalMRR = tenants.reduce((acc, t) => acc + (PLAN_PRICES[t.plan?.toLowerCase() || 'pro'] || 490), 0);
+  const totalDossiersQuota = tenants.reduce((acc, t) => acc + (t.monthly_limit || (t.plan === 'enterprise' ? 50 : 15)), 0);
 
   return (
     <div className="space-y-8 pb-16 max-w-5xl">
@@ -31,10 +54,10 @@ export default function AdminBillingPage() {
             </span>
           </div>
           <h1 className="text-2xl sm:text-3xl font-black text-white">
-            Facturation & Flux Financiers Stripe
+            Facturation & Abonnements Clients
           </h1>
           <p className="text-xs text-slate-400">
-            Suivi des abonnements clients, des encaissements mensuels et du volume de DCE souscrits.
+            Suivi en temps réel des abonnements des entreprises BTP, des quotas mensuels et des revenus récurrents.
           </p>
         </div>
 
@@ -47,61 +70,89 @@ export default function AdminBillingPage() {
         </Link>
       </div>
 
-      {/* Metrics Row */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-        <div className="p-6 rounded-3xl bg-slate-900/90 border border-slate-800 space-y-2">
-          <p className="text-xs font-bold text-slate-400">Revenu Mensuel Récurrent (MRR)</p>
-          <p className="text-3xl font-black text-white font-mono">14 250 €</p>
-          <p className="text-xs text-emerald-400 font-bold flex items-center gap-1">
-            <TrendingUp className="w-3.5 h-3.5" /> +18.4% ce mois
-          </p>
+      {loading ? (
+        <div className="p-12 rounded-3xl bg-slate-900/90 border border-slate-800 flex items-center justify-center gap-3">
+          <Loader2 className="w-6 h-6 animate-spin text-sky-400" />
+          <span className="text-xs font-bold text-slate-300">Chargement des abonnements...</span>
         </div>
-
-        <div className="p-6 rounded-3xl bg-slate-900/90 border border-slate-800 space-y-2">
-          <p className="text-xs font-bold text-slate-400">Revenu Annuel Projeté (ARR)</p>
-          <p className="text-3xl font-black text-white font-mono">171 000 €</p>
-          <p className="text-xs text-slate-400 font-medium">18 PME BTP abonnées</p>
-        </div>
-
-        <div className="p-6 rounded-3xl bg-slate-900/90 border border-slate-800 space-y-2">
-          <p className="text-xs font-bold text-slate-400">Panier Moyen Client</p>
-          <p className="text-3xl font-black text-emerald-400 font-mono">791 €</p>
-          <p className="text-xs text-slate-400 font-medium">Par entreprise / mois</p>
-        </div>
-      </div>
-
-      {/* Transactions Table */}
-      <div className="p-6 rounded-3xl bg-slate-900/90 border border-slate-800 space-y-4">
-        <h2 className="text-sm font-bold text-white flex items-center gap-2">
-          <CreditCard className="w-4 h-4 text-rose-400" />
-          <span>Dernières Transactions Stripe Encaissées</span>
-        </h2>
-
-        <div className="divide-y divide-slate-800">
-          {transactions.map((tx) => (
-            <div key={tx.id} className="py-3.5 flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <div className="w-9 h-9 rounded-xl bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 flex items-center justify-center font-bold text-xs">
-                  ✓
-                </div>
-                <div>
-                  <p className="text-xs font-bold text-white">{tx.client}</p>
-                  <p className="text-[10px] text-slate-400 font-mono">{tx.invoice} • {tx.date}</p>
-                </div>
-              </div>
-
-              <div className="flex items-center gap-4">
-                <span className="text-sm font-black text-white font-mono">
-                  {tx.amount.toLocaleString('fr-FR')} € HT
-                </span>
-                <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
-                  {tx.status}
-                </span>
-              </div>
+      ) : (
+        <>
+          {/* Metrics Row */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div className="p-6 rounded-3xl bg-slate-900/90 border border-slate-800 space-y-2">
+              <p className="text-xs font-bold text-slate-400">Revenu Mensuel Récurrent (MRR Calculé)</p>
+              <p className="text-3xl font-black text-white font-mono">{totalMRR.toLocaleString('fr-FR')} €</p>
+              <p className="text-xs text-emerald-400 font-bold flex items-center gap-1">
+                <CheckCircle2 className="w-3.5 h-3.5" /> {tenants.length} Entreprises Actives
+              </p>
             </div>
-          ))}
-        </div>
-      </div>
+
+            <div className="p-6 rounded-3xl bg-slate-900/90 border border-slate-800 space-y-2">
+              <p className="text-xs font-bold text-slate-400">Capacité Quotas Dossiers</p>
+              <p className="text-3xl font-black text-sky-400 font-mono">{totalDossiersQuota} DCE / mois</p>
+              <p className="text-xs text-slate-400 font-medium">Capacité totale souscrite</p>
+            </div>
+
+            <div className="p-6 rounded-3xl bg-slate-900/90 border border-slate-800 space-y-2">
+              <p className="text-xs font-bold text-slate-400">Passerelle Bancaire</p>
+              <p className="text-xl font-bold text-white flex items-center gap-2">
+                <CreditCard className="w-5 h-5 text-indigo-400" /> Stripe Connect B2B
+              </p>
+              <p className="text-xs text-emerald-400 font-semibold">Prélèvements SEPA & CB actifs</p>
+            </div>
+          </div>
+
+          {/* Tenants Subscription Table */}
+          <div className="p-6 rounded-3xl bg-slate-900/90 border border-slate-800 space-y-4 shadow-xl">
+            <h2 className="text-sm font-bold text-white flex items-center gap-2">
+              <Building2 className="w-4 h-4 text-sky-400" />
+              <span>Abonnements par Entreprise ({tenants.length})</span>
+            </h2>
+
+            {tenants.length === 0 ? (
+              <p className="text-xs text-slate-400 text-center py-6">Aucun tenant enregistré pour le moment.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="text-[10px] text-slate-500 uppercase tracking-wider border-b border-slate-800">
+                    <tr>
+                      <th className="pb-3">Entreprise</th>
+                      <th className="pb-3">Formule / Plan</th>
+                      <th className="pb-3">Montant Mensuel</th>
+                      <th className="pb-3">Quota Dossiers</th>
+                      <th className="pb-3">Date d'inscription</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/60 font-mono">
+                    {tenants.map((t) => {
+                      const planKey = (t.plan || 'pro').toLowerCase();
+                      const price = PLAN_PRICES[planKey] || 490;
+                      return (
+                        <tr key={t.id} className="hover:bg-slate-800/30 transition-colors">
+                          <td className="py-3 font-sans font-bold text-white flex items-center gap-2">
+                            <Building2 className="w-3.5 h-3.5 text-slate-500" />
+                            {t.name}
+                          </td>
+                          <td className="py-3 font-sans">
+                            <span className="px-2 py-0.5 rounded-md bg-sky-500/10 text-sky-300 border border-sky-500/20 font-bold uppercase text-[10px]">
+                              {t.plan || 'Pro'}
+                            </span>
+                          </td>
+                          <td className="py-3 text-slate-200 font-bold">{price} € HT / mois</td>
+                          <td className="py-3 text-slate-300">{t.monthly_limit || (t.plan === 'enterprise' ? 50 : 15)} dossiers</td>
+                          <td className="py-3 text-slate-400 text-[11px]">
+                            {t.created_at ? new Date(t.created_at).toLocaleDateString('fr-FR') : '—'}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </>
+      )}
     </div>
   );
 }

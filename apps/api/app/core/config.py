@@ -74,13 +74,15 @@ class Settings(BaseSettings):
     WEB_SEARCH_PROVIDER: str = Field(default="serper")
 
     # Demo & Mock Settings
-
     ALLOW_MOCK_FALLBACK: bool = Field(default=False)
     DEFAULT_DEMO_TENANT_ID: str = "11111111-1111-1111-1111-111111111111"
     DEFAULT_DEMO_USER_ID: str = "22222222-2222-2222-2222-222222222222"
     DISABLE_WHERE_CLAUSE_FOR_RLS_TEST: bool = Field(default=False)
 
+    # RGPD Cron / Automation
+    CRON_PURGE_SECRET: Optional[str] = Field(default=None)
 
 
 settings = Settings()
+
 

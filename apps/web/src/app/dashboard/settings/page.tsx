@@ -141,8 +141,9 @@ export default function EnterpriseAdminSettingsPage() {
         if (tenantId) {
           setCurrentTenantId(tenantId);
 
-          const timeoutPromise = <T,>(p: Promise<T>, ms = 1200): Promise<T | null> =>
-            Promise.race([p, new Promise<null>((resolve) => setTimeout(() => resolve(null), ms))]);
+          const timeoutPromise = <T,>(p: PromiseLike<T>, ms = 1200): Promise<T | null> =>
+            Promise.race([Promise.resolve(p), new Promise<null>((resolve) => setTimeout(() => resolve(null), ms))]);
+
 
           // 1. Load Settings & Memory
           try {

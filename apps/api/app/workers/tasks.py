@@ -432,3 +432,23 @@ def build_export_doc_task(
 
 
     return asyncio.run(_async_export())
+
+
+@celery_app.task(name="tasks.purge_expired_accounts_task")
+def purge_expired_accounts_task() -> dict:
+    """
+    Scheduled Celery task executing daily RGPD account purge:
+    - Finds all users with status='pending_deletion' and scheduled_purge_at <= NOW()
+    - Anonymizes their audit logs (removing personal link)
+    - Hard deletes user records and personal assets
+    """
+    async def _async_purge():
+        from app.core.db import AsyncSessionLocal
+        from app.services.gdpr_service import execute_expired_accounts_purge_db
+
+        async with AsyncSessionLocal() as db:
+            return await execute_expired_accounts_purge_db(db)
+
+    return asyncio.run(_async_purge())
+
+

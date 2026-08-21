@@ -286,9 +286,10 @@ async def create_tenant(
         "slug": new_tenant.slug,
         "plan": new_tenant.plan,
         "country_code": new_tenant.country_code,
-        "siret": branding.get("siret") or "",
+        "siret": new_tenant.siret or "",
         "contact_email": branding.get("contact_email") or "",
         "llm_provider": branding.get("llm_provider") or "anthropic",
+
         "llm_model": branding.get("llm_model") or "claude-3-5-sonnet-20241022",
         "branding_config": branding,
         "users_count": 0,
