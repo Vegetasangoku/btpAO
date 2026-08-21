@@ -1,0 +1,16 @@
+{
+  "name": "btpao-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "npm --prefix apps/web run dev",
+    "dev:web": "npm --prefix apps/web run dev",
+    "dev:api": "cd apps/api && python3 -m uvicorn app.main:app --reload --port 8000",
+    "build": "npm --prefix apps/web run build",
+    "start": "npm --prefix apps/web run start",
+    "lint": "npm --prefix apps/web run lint"
+  },
+  "devDependencies": {
+    "playwright": "^1.62.1"
+  }
+}

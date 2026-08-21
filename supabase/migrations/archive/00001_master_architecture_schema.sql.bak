@@ -1,0 +1,427 @@
+-- ==============================================================================
+-- BTP-AO : ARCHITECTURE DE RÉFÉRENCE ABSOLUE (MASTER SCHEMA SQL)
+-- Extension pgvector, RBAC 3 Rôles, RLS Multi-Tenant & Seed Super Admin
+-- ==============================================================================
+
+-- 1. EXTENSIONS POSTGRESQL
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+CREATE EXTENSION IF NOT EXISTS "vector";
+
+-- 2. ÉNUMÉRATIONS (RBAC & STATUTS MÉTIER BTP)
+DO $$ BEGIN
+    CREATE TYPE user_role AS ENUM ('super_admin', 'tenant_admin', 'user');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
+DO $$ BEGIN
+    CREATE TYPE plan_abonnement AS ENUM ('starter', 'pro', 'enterprise');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
+DO $$ BEGIN
+    CREATE TYPE statut_projet AS ENUM ('analyse_dce', 'chiffrage', 'redaction', 'finalise', 'exporte');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
+-- 3. TABLES DU SYSTÈME MULTI-TENANT & IAM
+
+-- Table des Entreprises Clientes (Tenants)
+CREATE TABLE IF NOT EXISTS public.tenants (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    nom TEXT NOT NULL,
+    siret TEXT,
+    plan_abonnement plan_abonnement NOT NULL DEFAULT 'starter',
+    limite_dce_mensuel INT NOT NULL DEFAULT 3,
+    dce_consommes_ce_mois INT NOT NULL DEFAULT 0,
+    couleur_primaire TEXT NOT NULL DEFAULT '#0284c7',
+    logo_s3_url TEXT,
+    charte_docx_s3_url TEXT,
+    cree_le TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    mis_a_jour_le TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Table des Profils Utilisateurs (Liée à auth.users de Supabase)
+CREATE TABLE IF NOT EXISTS public.profiles (
+    id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+    tenant_id UUID REFERENCES public.tenants(id) ON DELETE CASCADE, -- NULL si super_admin
+    email TEXT NOT NULL UNIQUE,
+    nom_complet TEXT,
+    role user_role NOT NULL DEFAULT 'user',
+    cree_le TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    mis_a_jour_le TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Table des Dossiers d'Appels d'Offres (Projets BTP)
+CREATE TABLE IF NOT EXISTS public.projets (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id UUID NOT NULL REFERENCES public.tenants(id) ON DELETE CASCADE,
+    cree_par UUID REFERENCES public.profiles(id) ON DELETE SET NULL,
+    titre TEXT NOT NULL,
+    code_reference TEXT NOT NULL,
+    maitre_ouvrage TEXT NOT NULL,
+    lieu_execution TEXT,
+    montant_estime NUMERIC(12, 2),
+    delai_global_mois INT DEFAULT 6,
+    date_remise TIMESTAMPTZ,
+    statut statut_projet NOT NULL DEFAULT 'analyse_dce',
+    cree_le TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    mis_a_jour_le TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Table des Documents du DCE (CCTP, RC, CCAP, BPU)
+CREATE TABLE IF NOT EXISTS public.dce_documents (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id UUID NOT NULL REFERENCES public.tenants(id) ON DELETE CASCADE,
+    projet_id UUID NOT NULL REFERENCES public.projets(id) ON DELETE CASCADE,
+    nom_fichier TEXT NOT NULL,
+    type_document TEXT NOT NULL DEFAULT 'cctp', -- 'rc', 'cctp', 'ccap', 'bpu'
+    s3_chemin TEXT NOT NULL,
+    taille_octets BIGINT NOT NULL DEFAULT 0,
+    nombre_pages INT NOT NULL DEFAULT 0,
+    texte_brut TEXT,
+    statut_ocr TEXT NOT NULL DEFAULT 'en_attente', -- 'en_attente', 'traite', 'erreur'
+    cree_le TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Table des Chunks Vectorisés du DCE (pgvector 1536 dimensions)
+CREATE TABLE IF NOT EXISTS public.dce_embeddings (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id UUID NOT NULL REFERENCES public.tenants(id) ON DELETE CASCADE,
+    projet_id UUID NOT NULL REFERENCES public.projets(id) ON DELETE CASCADE,
+    document_id UUID NOT NULL REFERENCES public.dce_documents(id) ON DELETE CASCADE,
+    numero_page INT NOT NULL DEFAULT 1,
+    titre_section TEXT,
+    contenu_texte TEXT NOT NULL,
+    embedding vector(1536),
+    cree_le TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Table des Critères de Notation du Règlement de Consultation (RC)
+CREATE TABLE IF NOT EXISTS public.criteres_notation (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id UUID NOT NULL REFERENCES public.tenants(id) ON DELETE CASCADE,
+    projet_id UUID NOT NULL REFERENCES public.projets(id) ON DELETE CASCADE,
+    titre_critere TEXT NOT NULL,
+    ponderation_pct NUMERIC(5, 2) NOT NULL,
+    description TEXT,
+    attentes_cles JSONB NOT NULL DEFAULT '[]'::jsonb,
+    preuves_requises JSONB NOT NULL DEFAULT '[]'::jsonb,
+    ordre INT NOT NULL DEFAULT 1,
+    cree_le TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Table des Données Techniques et Choix de Chantier (Chiffrage)
+CREATE TABLE IF NOT EXISTS public.donnees_chantier (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id UUID NOT NULL REFERENCES public.tenants(id) ON DELETE CASCADE,
+    projet_id UUID NOT NULL UNIQUE REFERENCES public.projets(id) ON DELETE CASCADE,
+    delai_execution_mois INT NOT NULL DEFAULT 6,
+    date_demarrage DATE DEFAULT '2026-10-01',
+    materiel_lourd_principal TEXT NOT NULL,
+    travail_de_nuit BOOLEAN NOT NULL DEFAULT FALSE,
+    cadres_encadrement JSONB NOT NULL DEFAULT '[]'::jsonb,
+    phasage_travaux JSONB NOT NULL DEFAULT '[]'::jsonb,
+    gestion_dechets_rse TEXT NOT NULL,
+    mesures_securite_ppsps TEXT NOT NULL,
+    mis_a_jour_le TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Table des Sections du Mémoire Technique
+CREATE TABLE IF NOT EXISTS public.sections_memoire (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id UUID NOT NULL REFERENCES public.tenants(id) ON DELETE CASCADE,
+    projet_id UUID NOT NULL REFERENCES public.projets(id) ON DELETE CASCADE,
+    cle_section TEXT NOT NULL,
+    titre TEXT NOT NULL,
+    ordre INT NOT NULL DEFAULT 1,
+    contenu_html TEXT NOT NULL DEFAULT '',
+    score_conformite INT NOT NULL DEFAULT 0,
+    est_valide BOOLEAN NOT NULL DEFAULT FALSE,
+    verrouille_pour_export BOOLEAN NOT NULL DEFAULT FALSE,
+    mis_a_jour_le TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_section_projet UNIQUE (projet_id, cle_section)
+);
+
+-- Table de la Base Documentaire Entreprise (Anciens Mémoires, Qualibat, Fiches Matériel)
+CREATE TABLE IF NOT EXISTS public.base_connaissances (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id UUID NOT NULL REFERENCES public.tenants(id) ON DELETE CASCADE,
+    categorie TEXT NOT NULL, -- 'qualibat', 'reference_chantier', 'materiel', 'rse', 'securite'
+    titre TEXT NOT NULL,
+    description TEXT,
+    s3_chemin TEXT,
+    metadata_json JSONB DEFAULT '{}'::jsonb,
+    embedding vector(1536),
+    cree_le TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- 4. INDEX DE PERFORMANCE & RECHERCHE VECTORIELLE (HNSW)
+CREATE INDEX IF NOT EXISTS idx_dce_embeddings_hnsw 
+    ON public.dce_embeddings USING hnsw (embedding vector_cosine_ops)
+    WITH (m = 16, ef_construction = 64);
+
+CREATE INDEX IF NOT EXISTS idx_base_connaissances_hnsw 
+    ON public.base_connaissances USING hnsw (embedding vector_cosine_ops)
+    WITH (m = 16, ef_construction = 64);
+
+CREATE INDEX IF NOT EXISTS idx_projets_tenant ON public.projets(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_sections_projet ON public.sections_memoire(projet_id);
+CREATE INDEX IF NOT EXISTS idx_criteres_projet ON public.criteres_notation(projet_id);
+
+-- 5. FONCTIONS DE RECHERCHE VECTORIELLE AVEC ISOLATION TENANT STRICTE
+CREATE OR REPLACE FUNCTION match_dce_contexte(
+    query_embedding vector(1536),
+    match_threshold float,
+    match_count int,
+    filter_tenant_id uuid,
+    filter_projet_id uuid
+)
+RETURNS TABLE (
+    id uuid,
+    numero_page int,
+    titre_section text,
+    contenu_texte text,
+    similarity float
+)
+LANGUAGE sql STABLE
+AS $$
+    SELECT
+        dce_embeddings.id,
+        dce_embeddings.numero_page,
+        dce_embeddings.titre_section,
+        dce_embeddings.contenu_texte,
+        1 - (dce_embeddings.embedding <=> query_embedding) AS similarity
+    FROM public.dce_embeddings
+    WHERE dce_embeddings.tenant_id = filter_tenant_id
+      AND dce_embeddings.projet_id = filter_projet_id
+      AND 1 - (dce_embeddings.embedding <=> query_embedding) > match_threshold
+    ORDER BY dce_embeddings.embedding <=> query_embedding
+    LIMIT match_count;
+$$;
+
+-- 6. FONCTIONS ET POLITIQUES ROW LEVEL SECURITY (RLS)
+
+-- Helper : Vérifier si l'utilisateur est Super Admin
+CREATE OR REPLACE FUNCTION public.is_super_admin()
+RETURNS BOOLEAN
+LANGUAGE sql STABLE SECURITY DEFINER
+AS $$
+    SELECT COALESCE(
+        (auth.jwt() -> 'app_metadata' ->> 'role') = 'super_admin' 
+        OR (auth.jwt() ->> 'email') = 'charbelakl@gmail.com', 
+        false
+    );
+$$;
+
+-- Helper : Récupérer le tenant_id de l'utilisateur actif
+CREATE OR REPLACE FUNCTION public.current_tenant_id()
+RETURNS UUID
+LANGUAGE sql STABLE SECURITY DEFINER
+AS $$
+    SELECT NULLIF(auth.jwt() -> 'app_metadata' ->> 'tenant_id', '')::uuid;
+$$;
+
+-- Activation RLS sur toutes les tables
+ALTER TABLE public.tenants ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.projets ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.dce_documents ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.dce_embeddings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.criteres_notation ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.donnees_chantier ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.sections_memoire ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.base_connaissances ENABLE ROW LEVEL SECURITY;
+
+-- Politiques RLS pour TENANTS
+DROP POLICY IF EXISTS "tenants_isolation_policy" ON public.tenants;
+CREATE POLICY "tenants_isolation_policy" ON public.tenants
+FOR ALL USING (
+    public.is_super_admin() OR id = public.current_tenant_id()
+);
+
+-- Politiques RLS pour PROFILES
+DROP POLICY IF EXISTS "profiles_isolation_policy" ON public.profiles;
+CREATE POLICY "profiles_isolation_policy" ON public.profiles
+FOR ALL USING (
+    public.is_super_admin() OR tenant_id = public.current_tenant_id() OR id = auth.uid()
+);
+
+-- Politiques RLS pour PROJETS
+DROP POLICY IF EXISTS "projets_isolation_policy" ON public.projets;
+CREATE POLICY "projets_isolation_policy" ON public.projets
+FOR ALL USING (
+    public.is_super_admin() OR tenant_id = public.current_tenant_id()
+);
+
+-- Politiques RLS pour DCE_DOCUMENTS
+DROP POLICY IF EXISTS "dce_documents_isolation_policy" ON public.dce_documents;
+CREATE POLICY "dce_documents_isolation_policy" ON public.dce_documents
+FOR ALL USING (
+    public.is_super_admin() OR tenant_id = public.current_tenant_id()
+);
+
+-- Politiques RLS pour DCE_EMBEDDINGS
+DROP POLICY IF EXISTS "dce_embeddings_isolation_policy" ON public.dce_embeddings;
+CREATE POLICY "dce_embeddings_isolation_policy" ON public.dce_embeddings
+FOR ALL USING (
+    public.is_super_admin() OR tenant_id = public.current_tenant_id()
+);
+
+-- Politiques RLS pour CRITERES_NOTATION
+DROP POLICY IF EXISTS "criteres_notation_isolation_policy" ON public.criteres_notation;
+CREATE POLICY "criteres_notation_isolation_policy" ON public.criteres_notation
+FOR ALL USING (
+    public.is_super_admin() OR tenant_id = public.current_tenant_id()
+);
+
+-- Politiques RLS pour DONNEES_CHANTIER
+DROP POLICY IF EXISTS "donnees_chantier_isolation_policy" ON public.donnees_chantier;
+CREATE POLICY "donnees_chantier_isolation_policy" ON public.donnees_chantier
+FOR ALL USING (
+    public.is_super_admin() OR tenant_id = public.current_tenant_id()
+);
+
+-- Politiques RLS pour SECTIONS_MEMOIRE
+DROP POLICY IF EXISTS "sections_memoire_isolation_policy" ON public.sections_memoire;
+CREATE POLICY "sections_memoire_isolation_policy" ON public.sections_memoire
+FOR ALL USING (
+    public.is_super_admin() OR tenant_id = public.current_tenant_id()
+);
+
+-- Politiques RLS pour BASE_CONNAISSANCES
+DROP POLICY IF EXISTS "base_connaissances_isolation_policy" ON public.base_connaissances;
+CREATE POLICY "base_connaissances_isolation_policy" ON public.base_connaissances
+FOR ALL USING (
+    public.is_super_admin() OR tenant_id = public.current_tenant_id()
+);
+
+-- 7. TRIGGER AUTOMATIQUE À L'INSCRIPTION SUPABASE AUTH
+CREATE OR REPLACE FUNCTION public.handle_user_signup_master()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, auth
+AS $$
+DECLARE
+    new_tenant_id UUID;
+    v_role user_role;
+    v_company_name TEXT;
+    v_full_name TEXT;
+BEGIN
+    -- Si c'est charbelakl@gmail.com -> Rôle super_admin immédiat sans tenant
+    IF NEW.email = 'charbelakl@gmail.com' THEN
+        v_role := 'super_admin';
+        new_tenant_id := NULL;
+        v_company_name := 'btpAO Plateforme SaaS';
+    ELSE
+        -- Utilisateur client standard -> Création de son entreprise (Tenant)
+        v_role := COALESCE((NEW.raw_user_meta_data->>'role')::user_role, 'tenant_admin');
+        v_company_name := COALESCE(NEW.raw_user_meta_data->>'company_name', split_part(NEW.email, '@', 1) || ' BTP');
+
+        INSERT INTO public.tenants (
+            nom,
+            plan_abonnement,
+            couleur_primaire,
+            cree_le,
+            mis_a_jour_le
+        )
+        VALUES (
+            v_company_name,
+            'pro',
+            '#0284c7',
+            NOW(),
+            NOW()
+        )
+        RETURNING id INTO new_tenant_id;
+    END IF;
+
+    v_full_name := COALESCE(NEW.raw_user_meta_data->>'full_name', split_part(NEW.email, '@', 1));
+
+    -- Insertion dans profiles
+    INSERT INTO public.profiles (
+        id,
+        tenant_id,
+        email,
+        nom_complet,
+        role,
+        cree_le,
+        mis_a_jour_le
+    )
+    VALUES (
+        NEW.id,
+        new_tenant_id,
+        NEW.email,
+        v_full_name,
+        v_role,
+        NOW(),
+        NOW()
+    )
+    ON CONFLICT (id) DO UPDATE
+    SET role = v_role,
+        tenant_id = new_tenant_id;
+
+    -- Injection dans app_metadata pour JWT
+    UPDATE auth.users
+    SET raw_app_meta_data = COALESCE(raw_app_meta_data, '{}'::jsonb) || 
+        jsonb_build_object(
+            'role', v_role::text,
+            'tenant_id', CASE WHEN new_tenant_id IS NOT NULL THEN new_tenant_id::text ELSE NULL END,
+            'company_name', v_company_name
+        )
+    WHERE id = NEW.id;
+
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS on_auth_user_created_master ON auth.users;
+CREATE TRIGGER on_auth_user_created_master
+    AFTER INSERT ON auth.users
+    FOR EACH ROW
+    EXECUTE FUNCTION public.handle_user_signup_master();
+
+-- 8. SEED OBLIGATOIRE DU SUPER ADMIN (charbelakl@gmail.com)
+DO $$
+DECLARE
+    super_admin_id UUID;
+BEGIN
+    SELECT id INTO super_admin_id FROM auth.users WHERE email = 'charbelakl@gmail.com' LIMIT 1;
+
+    IF super_admin_id IS NOT NULL THEN
+        -- Force le rôle super_admin et tenant_id NULL
+        INSERT INTO public.profiles (
+            id,
+            tenant_id,
+            email,
+            nom_complet,
+            role,
+            cree_le,
+            mis_a_jour_le
+        )
+        VALUES (
+            super_admin_id,
+            NULL,
+            'charbelakl@gmail.com',
+            'Charbel Akl (Super Admin)',
+            'super_admin',
+            NOW(),
+            NOW()
+        )
+        ON CONFLICT (id) DO UPDATE
+        SET role = 'super_admin',
+            tenant_id = NULL;
+
+        UPDATE auth.users
+        SET raw_app_meta_data = COALESCE(raw_app_meta_data, '{}'::jsonb) || 
+            jsonb_build_object(
+                'role', 'super_admin',
+                'tenant_id', NULL,
+                'company_name', 'btpAO Plateforme SaaS'
+            )
+        WHERE id = super_admin_id;
+    END IF;
+END $$;

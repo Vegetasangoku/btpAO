@@ -1,0 +1,211 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────────────────────────
+#  btpAO — SaaS B2B Générateur de Mémoires Techniques BTP
+#  Stack locale complète : Redis | MinIO | FastAPI | Celery | Next.js
+# ─────────────────────────────────────────────────────────────────
+
+services:
+  # ── 1. Redis — Broker Celery & Cache ──────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: btpao_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - btpao_net
+
+  # ── 2. MinIO — Stockage S3 Local Tenant-Isolated ──────────────
+  minio:
+    image: minio/minio:latest
+    container_name: btpao_minio
+    restart: unless-stopped
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - btpao_net
+
+  # ── 3. MinIO Init — Création automatique du bucket ────────────
+  minio-init:
+    image: minio/mc:latest
+    container_name: btpao_minio_init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+        mc alias set local http://minio:9000 minioadmin minioadmin;
+        mc mb --ignore-existing local/btp-storage;
+        mc anonymous set download local/btp-storage/public;
+        echo 'MinIO bucket btp-storage ready.';
+      "
+    networks:
+      - btpao_net
+
+  # ── 4. FastAPI Backend ─────────────────────────────────────────
+  api:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    container_name: btpao_api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      APP_ENV: development
+      DEBUG: "true"
+      SUPABASE_URL: ${SUPABASE_URL:-https://ykdbjsvwzxeftlddubgy.supabase.co}
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+      SUPABASE_JWT_SECRET: ${SUPABASE_JWT_SECRET}
+      DATABASE_URL: ${DATABASE_URL}
+      # S3 / MinIO
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      S3_BUCKET_NAME: btp-storage
+      S3_REGION: eu-west-3
+      S3_USE_SSL: "false"
+      # Redis
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      # LLM Keys (set in .env file)
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      MISTRAL_API_KEY: ${MISTRAL_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      # Azure OCR (optional)
+      AZURE_DOC_INTELLIGENCE_ENDPOINT: ${AZURE_DOC_INTELLIGENCE_ENDPOINT}
+      AZURE_DOC_INTELLIGENCE_KEY: ${AZURE_DOC_INTELLIGENCE_KEY}
+      # Demo
+      ALLOW_MOCK_FALLBACK: "true"
+      CORS_ORIGINS: '["http://localhost:3000","http://127.0.0.1:3000"]'
+    depends_on:
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    volumes:
+      - ./apps/api:/app
+      - api_local_storage:/app/local_storage
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+    networks:
+      - btpao_net
+
+  # ── 5. Celery Worker — Tâches Asynchrones ─────────────────────
+  worker:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    container_name: btpao_worker
+    restart: unless-stopped
+    environment:
+      APP_ENV: development
+      SUPABASE_URL: ${SUPABASE_URL:-https://ykdbjsvwzxeftlddubgy.supabase.co}
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+      DATABASE_URL: ${DATABASE_URL}
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      S3_BUCKET_NAME: btp-storage
+      S3_USE_SSL: "false"
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      MISTRAL_API_KEY: ${MISTRAL_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      ALLOW_MOCK_FALLBACK: "true"
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./apps/api:/app
+      - api_local_storage:/app/local_storage
+    command: celery -A app.core.celery_app worker --loglevel=info --concurrency=2 -Q default,ocr,generation
+    networks:
+      - btpao_net
+
+  # ── 6. Celery Beat — Scheduler (optionnel) ────────────────────
+  beat:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    container_name: btpao_beat
+    restart: unless-stopped
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+    depends_on:
+      - worker
+    volumes:
+      - ./apps/api:/app
+    command: celery -A app.core.celery_app beat --loglevel=info
+    networks:
+      - btpao_net
+    profiles:
+      - full
+
+  # ── 7. Next.js Frontend ────────────────────────────────────────
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+      target: development
+    container_name: btpao_web
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000/api
+      NEXT_PUBLIC_SUPABASE_URL: ${SUPABASE_URL:-https://ykdbjsvwzxeftlddubgy.supabase.co}
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
+    depends_on:
+      api:
+        condition: service_healthy
+    volumes:
+      - ./apps/web:/app
+      - /app/node_modules
+      - /app/.next
+    command: npm run dev
+    networks:
+      - btpao_net
+
+# ── Volumes ───────────────────────────────────────────────────────
+volumes:
+  minio_data:
+    name: btpao_minio_data
+  api_local_storage:
+    name: btpao_api_storage
+
+# ── Networks ──────────────────────────────────────────────────────
+networks:
+  btpao_net:
+    name: btpao_network
+    driver: bridge
