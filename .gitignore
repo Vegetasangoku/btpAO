@@ -46,3 +46,6 @@ htmlcov/
 .tempmediaStorage/
 playwright-report/
 test-results/
+
+# Dev stack launcher (dev-start.sh / dev-stop.sh)
+logs/

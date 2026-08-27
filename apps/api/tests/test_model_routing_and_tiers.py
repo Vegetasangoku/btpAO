@@ -37,7 +37,7 @@ async def test_model_routing_hierarchy():
         tenant_id=tenant_id_a,
     )
     assert res_a["tier_id"] == "equilibre"
-    assert res_a["model_string"] == "anthropic/claude-3-5-sonnet-20241022"
+    assert res_a["model_string"] == "anthropic/claude-sonnet-5"
     assert res_a["is_override"] is False
 
     # 2. Test when super-admin changed platform default to 'avance'
@@ -52,7 +52,7 @@ async def test_model_routing_hierarchy():
         tenant_id=tenant_id_a,
     )
     assert res_platform_changed["tier_id"] == "avance"
-    assert res_platform_changed["model_string"] == "anthropic/claude-3-opus-20240229"
+    assert res_platform_changed["model_string"] == "anthropic/claude-opus-5"
     assert res_platform_changed["is_override"] is False
 
     # 3. Test tenant specific override (e.g. 'economique')
@@ -71,7 +71,7 @@ async def test_model_routing_hierarchy():
         tenant_id=tenant_id_b,
     )
     assert res_b["tier_id"] == "economique"
-    assert res_b["model_string"] == "anthropic/claude-3-5-haiku-20241022"
+    assert res_b["model_string"] == "anthropic/claude-haiku-4-5-20251001"
     assert res_b["is_override"] is True
 
     # 4. Test tenant specific override (e.g. 'maximum')
@@ -90,8 +90,9 @@ async def test_model_routing_hierarchy():
         tenant_id=tenant_id_c,
     )
     assert res_c["tier_id"] == "maximum"
-    assert res_c["model_string"] == "anthropic/claude-3-7-sonnet-20250219"
+    assert res_c["model_string"] == "anthropic/claude-fable-5"
     assert res_c["is_override"] is True
+
 
 
 @pytest.mark.asyncio

@@ -2,7 +2,7 @@
 
 import React from 'react';
 import { useParams } from 'next/navigation';
-import { GanttPreview } from '@/components/visuals/gantt-preview';
+import { InteractiveGanttChart } from '@/components/visuals/interactive-gantt-chart';
 import { OrganigrammePreview } from '@/components/visuals/organigramme-preview';
 
 export default function VisualsPage() {
@@ -19,7 +19,7 @@ export default function VisualsPage() {
         </p>
       </div>
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-        <GanttPreview projectId={projectId} />
+        <InteractiveGanttChart projectId={projectId} />
         <OrganigrammePreview projectId={projectId} />
       </div>
     </div>

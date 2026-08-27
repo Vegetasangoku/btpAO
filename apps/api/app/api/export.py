@@ -17,7 +17,7 @@ from app.core.config import settings
 from app.core.db import get_db
 from app.core.security import CurrentTenantUser, get_current_tenant_user
 from app.core.storage import storage_service
-from app.models.entities import ExportJob, ExportTemplate, GeneratedSection, Project, ProjectDecision
+from app.models.entities import ExportJob, ExportTemplate, GeneratedSection, Project, ProjectDecision, ProjectGanttTask, Tenant
 from app.models.schemas import ExportDocumentRequest, ExportJobOut
 from app.services.billing_service import billing_service
 from app.services.exporter_service import exporter_service
@@ -117,14 +117,23 @@ async def compile_technical_memo(
     await db.flush()
 
     # 6. Dispatch asynchronous compilation task to Celery workers
-    from app.workers.tasks import build_export_doc_task
-    build_export_doc_task.delay(
-        tenant_id=current_user.tenant_id,
-        project_id=str(p_uuid),
-        export_job_id=str(job_id),
-        doc_format=payload.format,
-        include_visuals=payload.include_gantt or payload.include_organigramme,
-    )
+    try:
+        from app.workers.tasks import build_export_doc_task
+        build_export_doc_task.delay(
+            tenant_id=current_user.tenant_id,
+            project_id=str(p_uuid),
+            export_job_id=str(job_id),
+            doc_format=payload.format,
+            include_visuals=payload.include_gantt or payload.include_organigramme,
+        )
+    except Exception as e:
+        new_job.status = "failed"
+        new_job.error_message = f"Échec du lancement de la tâche de génération : {e.__class__.__name__}: {e}"
+        await db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Le service de génération de documents est temporairement indisponible. Veuillez réessayer dans quelques instants ; si le problème persiste, contactez le support.",
+        )
 
     return ExportJobOut(
         id=str(new_job.id),
@@ -275,6 +284,21 @@ async def stream_project_docx(
     decision = dec_res.scalar_one_or_none()
     decision_form = decision.form_data if decision else {}
 
+    gantt_tasks_stmt = select(ProjectGanttTask).where(
+        ProjectGanttTask.tenant_id == t_uuid,
+        ProjectGanttTask.project_id == p_uuid,
+    ).order_by(ProjectGanttTask.sequence, ProjectGanttTask.start_date)
+    gantt_tasks_res = await db.execute(gantt_tasks_stmt)
+    gantt_task_rows = gantt_tasks_res.scalars().all()
+    gantt_tasks = [
+        {
+            "id": str(r.id), "name": r.name, "start_date": r.start_date, "end_date": r.end_date,
+            "sequence": r.sequence, "milestone_label": r.milestone_label,
+            "depends_on": [str(d) for d in (r.depends_on or [])],
+        }
+        for r in gantt_task_rows
+    ] or None
+
     tmpl_stmt = select(ExportTemplate).where(
         ExportTemplate.tenant_id == t_uuid,
         ExportTemplate.is_default == True,
@@ -288,6 +312,14 @@ async def stream_project_docx(
         except Exception:
             template_bytes = None
 
+    tenant_res = await db.execute(select(Tenant).where(Tenant.id == t_uuid))
+    tenant_row = tenant_res.scalar_one_or_none()
+    company_name = None
+    if tenant_row:
+        branding = tenant_row.branding_config or {}
+        company_name = branding.get("company_name") or tenant_row.name
+    company_name = company_name or "Votre Entreprise"
+
     project_dict = {
         "id": str(project.id),
         "title": project.title,
@@ -296,8 +328,11 @@ async def stream_project_docx(
         "location": project.location,
         "lot_number": project.lot_number,
         "budget_estimate": float(project.budget_estimate) if project.budget_estimate is not None else 0.0,
+        "company_name": company_name,
     }
 
+    from app.api.generate import SECTION_DEFINITIONS
+    required_section_titles = sorted({v["title"] for k, v in SECTION_DEFINITIONS.items() if k != "qse_environnement"})
     docx_res = exporter_service.build_memo_docx(
         tenant_id=current_user.tenant_id,
         project_id=project_id,
@@ -306,6 +341,8 @@ async def stream_project_docx(
         decision_form=decision_form,
         template_bytes=template_bytes,
         include_visuals=False,
+        required_section_titles=required_section_titles,
+        gantt_tasks=gantt_tasks,
     )
 
     raw_title = project.title or "Memoire_Technique"

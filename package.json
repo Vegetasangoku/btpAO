@@ -6,6 +6,8 @@
     "dev": "npm --prefix apps/web run dev",
     "dev:web": "npm --prefix apps/web run dev",
     "dev:api": "cd apps/api && python3 -m uvicorn app.main:app --reload --port 8000",
+    "dev:all": "bash dev-start.sh",
+    "dev:stop": "bash dev-stop.sh",
     "build": "npm --prefix apps/web run build",
     "start": "npm --prefix apps/web run start",
     "lint": "npm --prefix apps/web run lint"

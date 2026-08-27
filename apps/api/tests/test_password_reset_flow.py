@@ -87,8 +87,12 @@ def test_forgot_password_valid_user_creates_token_and_sends_branded_email(setup_
     assert res.status_code == 200
     data = res.json()
     assert data["success"] is True
-    assert data.get("reset_url_dev") is not None
-    reset_url = data["reset_url_dev"]
+
+    # Verify email was dispatched in RECENT_SENT_EMAILS
+    assert len(RECENT_SENT_EMAILS) == 1
+    sent_mail = RECENT_SENT_EMAILS[0]
+    assert sent_mail["to_email"] == user_email
+    reset_url = sent_mail["reset_url"]
     raw_token = reset_url.split("token=")[1]
 
     # Verify token exists in database
@@ -102,10 +106,6 @@ def test_forgot_password_valid_user_creates_token_and_sends_branded_email(setup_
     cur.close()
     conn.close()
 
-    # Verify email was dispatched in RECENT_SENT_EMAILS
-    assert len(RECENT_SENT_EMAILS) == 1
-    sent_mail = RECENT_SENT_EMAILS[0]
-    assert sent_mail["to_email"] == user_email
     assert "[btpAO] Réinitialisation de votre mot de passe" in sent_mail["subject"]
     assert "btpAO Sécurité" in sent_mail["from_email"]
 
@@ -125,7 +125,9 @@ def test_verify_reset_token_endpoint(setup_password_reset_test_data):
 
     # 1. Request token
     req_res = client.post("/api/auth/forgot-password", json={"email": user_email})
-    reset_url = req_res.json()["reset_url_dev"]
+    assert req_res.status_code == 200
+    sent_mail = RECENT_SENT_EMAILS[0]
+    reset_url = sent_mail["reset_url"]
     token = reset_url.split("token=")[1]
 
     # 2. Verify valid token
@@ -152,7 +154,8 @@ def test_reset_password_full_lifecycle_and_replay_protection(setup_password_rese
 
     # 1. Request token
     req_res = client.post("/api/auth/forgot-password", json={"email": user_email})
-    token = req_res.json()["reset_url_dev"].split("token=")[1]
+    assert req_res.status_code == 200
+    token = RECENT_SENT_EMAILS[0]["reset_url"].split("token=")[1]
 
     # 2. Too short password rejected (<8 chars)
     short_res = client.post("/api/auth/reset-password", json={

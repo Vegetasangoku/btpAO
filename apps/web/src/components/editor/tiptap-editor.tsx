@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useEffect, useState } from 'react';
+import { useTranslation } from '@/components/i18n-provider';
 import { useEditor, EditorContent } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import Table from '@tiptap/extension-table';
@@ -42,12 +43,21 @@ interface TiptapEditorProps {
 }
 
 export function TiptapEditor({ section, projectId, onSave, onRegenerate }: TiptapEditorProps) {
+  const { t } = useTranslation();
   const [isLocked, setIsLocked] = useState(section.locked_for_export);
   const [isSaving, setIsSaving] = useState(false);
   const [isAiGenerating, setIsAiGenerating] = useState(false);
   const [aiPrompt, setAiPrompt] = useState('');
   const [showAiModal, setShowAiModal] = useState(false);
   const [complianceScore, setComplianceScore] = useState(section.compliance_score || 98.5);
+  const [learningProposal, setLearningProposal] = useState<{
+    section_type: string;
+    summary: string;
+    suggested_content: string;
+    diff_percentage: number;
+  } | null>(null);
+  const [savingLearning, setSavingLearning] = useState(false);
+  const [learningScope, setLearningScope] = useState<'this_ao' | 'similar_aos' | 'all_future'>('similar_aos');
 
   const editor = useEditor({
     extensions: [
@@ -65,7 +75,7 @@ export function TiptapEditor({ section, projectId, onSave, onRegenerate }: Tipta
     editable: !isLocked,
     editorProps: {
       attributes: {
-        class: 'prose prose-invert max-w-none focus:outline-none min-h-[460px] p-6 text-slate-200 text-sm leading-relaxed',
+        class: 'prose dark:prose-invert max-w-none focus:outline-none min-h-[460px] p-6 text-slate-700 dark:text-slate-200 text-sm leading-relaxed',
       },
     },
   });
@@ -86,12 +96,37 @@ export function TiptapEditor({ section, projectId, onSave, onRegenerate }: Tipta
     setIsSaving(true);
     try {
       const html = editor.getHTML();
-      const updated = await api.updateSection(section.id, html, 'edited', isLocked);
-      if (onSave) onSave(updated);
+      const res = await api.updateSection(section.id, html, 'edited', isLocked);
+      if (onSave) onSave(res.section);
+      if (res.learning_opportunity && res.learning_proposal) {
+        setLearningProposal(res.learning_proposal);
+      }
     } catch (err) {
       console.error('Save failed', err);
     } finally {
       setIsSaving(false);
+    }
+  };
+
+  const handleSaveLearning = async () => {
+    if (!learningProposal) return;
+    setSavingLearning(true);
+    try {
+      await api.createLearning({
+        title: `Ajustement sur ${section.title}`,
+        category: 'methodology',
+        section_type: learningScope === 'all_future' ? undefined : learningProposal.section_type,
+        project_id: learningScope === 'this_ao' ? projectId : undefined,
+        learned_content: learningProposal.suggested_content,
+        learning_insight: learningProposal.summary,
+        source_outcome: 'manual_edit',
+      });
+      setLearningProposal(null);
+      setLearningScope('similar_aos');
+    } catch (err) {
+      console.error('Learning save failed', err);
+    } finally {
+      setSavingLearning(false);
     }
   };
 
@@ -136,29 +171,29 @@ export function TiptapEditor({ section, projectId, onSave, onRegenerate }: Tipta
   };
 
   if (!editor) {
-    return <div className="p-8 text-center text-slate-400">Chargement de l’éditeur WYSIWYG...</div>;
+    return <div className="p-8 text-center text-slate-500 dark:text-slate-400">{t('editor.tiptap.loading')}</div>;
   }
 
   return (
-    <div className="bg-slate-900/90 border border-slate-800 rounded-xl overflow-hidden shadow-2xl flex flex-col">
+    <div className="bg-white dark:bg-slate-900/90 border border-slate-200 dark:border-slate-800 rounded-xl overflow-hidden shadow-2xl flex flex-col">
       {/* Editor Top Bar & Controls */}
-      <div className="p-4 border-b border-slate-800 bg-slate-950/70 flex flex-wrap items-center justify-between gap-3">
+      <div className="p-4 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/70 flex flex-wrap items-center justify-between gap-3">
         {/* Title & Badge */}
         <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-lg bg-sky-500/10 border border-sky-500/20 flex items-center justify-center">
-            <FileCheck className="w-4 h-4 text-sky-400" />
+          <div className="w-8 h-8 rounded-lg bg-amber-500/10 border border-amber-500/20 flex items-center justify-center">
+            <FileCheck className="w-4 h-4 text-amber-600 dark:text-amber-400" />
           </div>
           <div>
-            <h2 className="text-sm font-bold text-white flex items-center gap-2">
+            <h2 className="text-sm font-bold text-slate-900 dark:text-white flex items-center gap-2">
               {section.title}
               {isLocked && (
                 <span className="text-[10px] bg-emerald-500/20 text-emerald-300 px-2 py-0.5 rounded-full border border-emerald-500/30 flex items-center gap-1 font-semibold">
-                  <CheckCircle2 className="w-3 h-3" /> Validé & Verrouillé
+                  <CheckCircle2 className="w-3 h-3" /> {t('editor.tiptap.locked_badge')}
                 </span>
               )}
             </h2>
-            <p className="text-[11px] text-slate-400">
-              Modifications en direct • Conformité Règlement de Consultation (RC)
+            <p className="text-[11px] text-slate-500 dark:text-slate-400">
+              {t('editor.tiptap.live_edits_subtitle')}
             </p>
           </div>
         </div>
@@ -169,10 +204,10 @@ export function TiptapEditor({ section, projectId, onSave, onRegenerate }: Tipta
           <button
             onClick={() => setShowAiModal(true)}
             disabled={isLocked || isAiGenerating}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gradient-to-r from-sky-600 to-indigo-600 hover:from-sky-500 hover:to-indigo-500 text-white text-xs font-semibold shadow-glow disabled:opacity-50 transition-all"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-500 hover:to-orange-500 text-white text-xs font-semibold shadow-glow disabled:opacity-50 transition-all"
           >
             <Sparkles className="w-3.5 h-3.5" />
-            <span>Copilote IA BTP</span>
+            <span>{t('editor.tiptap.btn_copilot')}</span>
           </button>
 
           {/* Validation Lock Button */}
@@ -180,101 +215,149 @@ export function TiptapEditor({ section, projectId, onSave, onRegenerate }: Tipta
             onClick={handleToggleLock}
             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${
               isLocked
-                ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/25'
-                : 'bg-slate-800 border-slate-700 text-slate-200 hover:bg-slate-700'
+                ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-500/25'
+                : 'bg-slate-200 dark:bg-slate-800 border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-300 dark:hover:bg-slate-700'
             }`}
           >
             {isLocked ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
-            <span>{isLocked ? 'Verrouillé (Validé)' : 'Valider Section'}</span>
+            <span>{isLocked ? t('editor.tiptap.btn_locked') : t('editor.tiptap.btn_validate')}</span>
           </button>
 
           {/* Save Button */}
           <button
             onClick={handleSave}
             disabled={isSaving || isLocked}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold disabled:opacity-50 transition-all"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold disabled:opacity-50 transition-all"
           >
             <Save className="w-3.5 h-3.5" />
-            <span>{isSaving ? 'Enregistrement...' : 'Sauvegarder'}</span>
+            <span>{isSaving ? t('editor.tiptap.saving') : t('editor.tiptap.btn_save')}</span>
           </button>
         </div>
       </div>
 
+      {/* Learning Proposal Banner (Phase C — Apprentissage Continu, portée 3 niveaux) */}
+      {learningProposal && (
+        <div className="mx-4 mt-3 p-3 rounded-xl bg-indigo-500/10 border border-indigo-500/30 space-y-2.5 text-xs">
+          <div>
+            <p className="font-semibold text-indigo-700 dark:text-indigo-300">{t('editor.tiptap.learning_title', { percent: learningProposal.diff_percentage })}</p>
+            <p className="text-[11px] text-indigo-700/80 dark:text-indigo-200/80 mt-0.5">{learningProposal.summary || t('editor.tiptap.learning_default_summary')}</p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-[10px] text-indigo-700/70 dark:text-indigo-300/70 font-semibold uppercase tracking-wide mr-1">{t('editor.tiptap.learning_scope_label')}</span>
+            {([
+              { value: 'this_ao' as const, label: t('editor.tiptap.scope_this_ao') },
+              { value: 'similar_aos' as const, label: t('editor.tiptap.scope_similar_aos') },
+              { value: 'all_future' as const, label: t('editor.tiptap.scope_all_future') },
+            ]).map((opt) => (
+              <button
+                key={opt.value}
+                type="button"
+                onClick={() => setLearningScope(opt.value)}
+                className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition-all ${
+                  learningScope === opt.value
+                    ? 'bg-indigo-600 border-indigo-500 text-white'
+                    : 'bg-slate-100 dark:bg-slate-900/60 border-slate-300 dark:border-slate-700 text-indigo-700/70 dark:text-indigo-200/70 hover:text-indigo-900 dark:hover:text-indigo-100'
+                }`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={handleSaveLearning}
+              disabled={savingLearning}
+              className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-semibold disabled:opacity-50"
+            >
+              {savingLearning ? t('editor.tiptap.saving') : t('editor.tiptap.btn_memorize')}
+            </button>
+            <button
+              onClick={() => { setLearningProposal(null); setLearningScope('similar_aos'); }}
+              className="px-2 py-1.5 rounded-lg text-indigo-700 dark:text-indigo-300 hover:text-slate-900 dark:hover:text-white text-[11px]"
+            >
+              {t('editor.tiptap.btn_ignore')}
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Formatting Toolbar */}
       {!isLocked && (
-        <div className="px-4 py-2 border-b border-slate-800/80 bg-slate-900/50 flex flex-wrap items-center gap-1">
+        <div className="px-4 py-2 border-b border-slate-200/80 dark:border-slate-800/80 bg-slate-50 dark:bg-slate-900/50 flex flex-wrap items-center gap-1">
           <button
             onClick={() => editor.chain().focus().toggleBold().run()}
-            className={`p-1.5 rounded text-xs ${editor.isActive('bold') ? 'bg-sky-500/20 text-sky-400' : 'text-slate-400 hover:text-white'}`}
-            title="Gras"
+            className={`p-1.5 rounded text-xs ${editor.isActive('bold') ? 'bg-amber-500/20 text-amber-600 dark:text-amber-400' : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'}`}
+            title={t('editor.tiptap.tt_bold')}
           >
             <Bold className="w-4 h-4" />
           </button>
 
           <button
             onClick={() => editor.chain().focus().toggleItalic().run()}
-            className={`p-1.5 rounded text-xs ${editor.isActive('itailc') ? 'bg-sky-500/20 text-sky-400' : 'text-slate-400 hover:text-white'}`}
-            title="Italique"
+            className={`p-1.5 rounded text-xs ${editor.isActive('itailc') ? 'bg-amber-500/20 text-amber-600 dark:text-amber-400' : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'}`}
+            title={t('editor.tiptap.tt_italic')}
           >
             <Italic className="w-4 h-4" />
           </button>
 
           <button
             onClick={() => editor.chain().focus().toggleUnderline().run()}
-            className={`p-1.5 rounded text-xs ${editor.isActive('underline') ? 'bg-sky-500/20 text-sky-400' : 'text-slate-400 hover:text-white'}`}
-            title="Souligné"
+            className={`p-1.5 rounded text-xs ${editor.isActive('underline') ? 'bg-amber-500/20 text-amber-600 dark:text-amber-400' : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'}`}
+            title={t('editor.tiptap.tt_underline')}
           >
             <UnderlineIcon className="w-4 h-4" />
           </button>
 
           <button
             onClick={() => editor.chain().focus().toggleHighlight({ color: '#0369a1' }).run()}
-            className={`p-1.5 rounded text-xs ${editor.isActive('highlight') ? 'bg-sky-500/20 text-sky-400' : 'text-slate-400 hover:text-white'}`}
-            title="Surligner"
+            className={`p-1.5 rounded text-xs ${editor.isActive('highlight') ? 'bg-amber-500/20 text-amber-600 dark:text-amber-400' : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'}`}
+            title={t('editor.tiptap.tt_highlight')}
           >
             <Highlighter className="w-4 h-4" />
           </button>
 
-          <div className="w-px h-4 bg-slate-800 mx-1" />
+          <div className="w-px h-4 bg-slate-200 dark:bg-slate-800 mx-1" />
 
           <button
             onClick={() => editor.chain().focus().toggleHeading({ level: 1 }).run()}
-            className={`p-1.5 rounded text-xs font-bold ${editor.isActive('heading', { level: 1 }) ? 'bg-sky-500/20 text-sky-400' : 'text-slate-400 hover:text-white'}`}
-            title="Titre H1"
+            className={`p-1.5 rounded text-xs font-bold ${editor.isActive('heading', { level: 1 }) ? 'bg-amber-500/20 text-amber-600 dark:text-amber-400' : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'}`}
+            title={t('editor.tiptap.tt_h1')}
           >
             <Heading1 className="w-4 h-4" />
           </button>
 
           <button
             onClick={() => editor.chain().focus().toggleHeading({ level: 2 }).run()}
-            className={`p-1.5 rounded text-xs font-bold ${editor.isActive('heading', { level: 2 }) ? 'bg-sky-500/20 text-sky-400' : 'text-slate-400 hover:text-white'}`}
-            title="Titre H2"
+            className={`p-1.5 rounded text-xs font-bold ${editor.isActive('heading', { level: 2 }) ? 'bg-amber-500/20 text-amber-600 dark:text-amber-400' : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'}`}
+            title={t('editor.tiptap.tt_h2')}
           >
             <Heading2 className="w-4 h-4" />
           </button>
 
           <button
             onClick={() => editor.chain().focus().toggleHeading({ level: 3 }).run()}
-            className={`p-1.5 rounded text-xs font-bold ${editor.isActive('heading', { level: 3 }) ? 'bg-sky-500/20 text-sky-400' : 'text-slate-400 hover:text-white'}`}
-            title="Titre H3"
+            className={`p-1.5 rounded text-xs font-bold ${editor.isActive('heading', { level: 3 }) ? 'bg-amber-500/20 text-amber-600 dark:text-amber-400' : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'}`}
+            title={t('editor.tiptap.tt_h3')}
           >
             <Heading3 className="w-4 h-4" />
           </button>
 
-          <div className="w-px h-4 bg-slate-800 mx-1" />
+          <div className="w-px h-4 bg-slate-200 dark:bg-slate-800 mx-1" />
 
           <button
             onClick={() => editor.chain().focus().toggleBulletList().run()}
-            className={`p-1.5 rounded text-xs ${editor.isActive('bulletList') ? 'bg-sky-500/20 text-sky-400' : 'text-slate-400 hover:text-white'}`}
-            title="Liste à puces"
+            className={`p-1.5 rounded text-xs ${editor.isActive('bulletList') ? 'bg-amber-500/20 text-amber-600 dark:text-amber-400' : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'}`}
+            title={t('editor.tiptap.tt_bullet_list')}
           >
             <List className="w-4 h-4" />
           </button>
 
           <button
             onClick={() => editor.chain().focus().toggleOrderedList().run()}
-            className={`p-1.5 rounded text-xs ${editor.isActive('orderedList') ? 'bg-sky-500/20 text-sky-400' : 'text-slate-400 hover:text-white'}`}
-            title="Liste numérotée"
+            className={`p-1.5 rounded text-xs ${editor.isActive('orderedList') ? 'bg-amber-500/20 text-amber-600 dark:text-amber-400' : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'}`}
+            title={t('editor.tiptap.tt_ordered_list')}
           >
             <ListOrdered className="w-4 h-4" />
           </button>
@@ -283,19 +366,19 @@ export function TiptapEditor({ section, projectId, onSave, onRegenerate }: Tipta
             onClick={() =>
               editor.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run()
             }
-            className="p-1.5 rounded text-xs text-slate-400 hover:text-white"
-            title="Insérer un tableau technique"
+            className="p-1.5 rounded text-xs text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white"
+            title={t('editor.tiptap.tt_insert_table')}
           >
             <TableIcon className="w-4 h-4" />
           </button>
 
-          <div className="w-px h-4 bg-slate-800 mx-1" />
+          <div className="w-px h-4 bg-slate-200 dark:bg-slate-800 mx-1" />
 
           <button
             onClick={() => editor.chain().focus().undo().run()}
             disabled={!editor.can().undo()}
-            className="p-1.5 rounded text-xs text-slate-400 hover:text-white disabled:opacity-30"
-            title="Annuler"
+            className="p-1.5 rounded text-xs text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white disabled:opacity-30"
+            title={t('editor.tiptap.tt_undo')}
           >
             <RotateCcw className="w-4 h-4" />
           </button>
@@ -303,8 +386,8 @@ export function TiptapEditor({ section, projectId, onSave, onRegenerate }: Tipta
           <button
             onClick={() => editor.chain().focus().redo().run()}
             disabled={!editor.can().redo()}
-            className="p-1.5 rounded text-xs text-slate-400 hover:text-white disabled:opacity-30"
-            title="Rétablir"
+            className="p-1.5 rounded text-xs text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white disabled:opacity-30"
+            title={t('editor.tiptap.tt_redo')}
           >
             <RotateCw className="w-4 h-4" />
           </button>
@@ -312,51 +395,51 @@ export function TiptapEditor({ section, projectId, onSave, onRegenerate }: Tipta
       )}
 
       {/* Editor Content Area */}
-      <div className="relative bg-slate-950/40">
+      <div className="relative bg-slate-50 dark:bg-slate-950/40">
         <EditorContent editor={editor} />
 
         {isLocked && (
-          <div className="absolute inset-0 bg-slate-950/40 backdrop-blur-[1px] flex items-center justify-center pointer-events-none">
-            <div className="px-4 py-2 rounded-lg bg-slate-900/90 border border-emerald-500/40 text-emerald-300 text-xs font-semibold flex items-center gap-2 shadow-2xl">
+          <div className="absolute inset-0 bg-slate-50/60 dark:bg-slate-950/40 backdrop-blur-[1px] flex items-center justify-center pointer-events-none">
+            <div className="px-4 py-2 rounded-lg bg-white dark:bg-slate-900/90 border border-emerald-500/40 text-emerald-700 dark:text-emerald-300 text-xs font-semibold flex items-center gap-2 shadow-2xl">
               <Lock className="w-4 h-4 text-emerald-400" />
-              Section validée et sécurisée juridiquement
+              {t('editor.tiptap.locked_overlay')}
             </div>
           </div>
         )}
       </div>
 
       {/* Footer / Compliance Score Info */}
-      <div className="p-3.5 border-t border-slate-800 bg-slate-950/80 flex flex-wrap items-center justify-between gap-3 text-xs">
+      <div className="p-3.5 border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/80 flex flex-wrap items-center justify-between gap-3 text-xs">
         <div className="flex items-center gap-2">
-          <span className="text-slate-400">Score de conformité DCE :</span>
-          <div className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 font-mono font-bold">
+          <span className="text-slate-600 dark:text-slate-400">{t('editor.tiptap.compliance_label')}</span>
+          <div className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-700 dark:text-emerald-400 font-mono font-bold">
             <CheckCircle2 className="w-3.5 h-3.5" />
             {complianceScore.toFixed(1)} / 100
           </div>
         </div>
 
-        <p className="text-slate-400 text-[11px]">
-          {section.compliance_notes || 'Tous les sous-critères du Règlement de Consultation sont couverts.'}
+        <p className="text-slate-600 dark:text-slate-400 text-[11px]">
+          {section.compliance_notes || t('editor.tiptap.compliance_default_note')}
         </p>
       </div>
 
       {/* AI Copilot Modal */}
       {showAiModal && (
-        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-sky-500/30 rounded-2xl max-w-lg w-full p-6 shadow-glow space-y-4">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+        <div className="fixed inset-0 bg-slate-950/60 dark:bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-slate-900 border border-amber-500/30 rounded-2xl max-w-lg w-full p-6 shadow-glow space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-200 dark:border-slate-800 pb-3">
               <div className="flex items-center gap-2.5">
-                <div className="w-8 h-8 rounded-lg bg-sky-500/20 border border-sky-500/40 flex items-center justify-center">
-                  <Sparkles className="w-4 h-4 text-sky-400" />
+                <div className="w-8 h-8 rounded-lg bg-amber-500/20 border border-amber-500/40 flex items-center justify-center">
+                  <Sparkles className="w-4 h-4 text-amber-600 dark:text-amber-400" />
                 </div>
                 <div>
-                  <h3 className="text-sm font-bold text-white">Copilote IA BTP (Claude 3.5)</h3>
-                  <p className="text-[11px] text-slate-400">Affinement technique de la section</p>
+                  <h3 className="text-sm font-bold text-slate-900 dark:text-white">{t('editor.tiptap.modal_title')}</h3>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400">{t('editor.tiptap.modal_subtitle')}</p>
                 </div>
               </div>
               <button
                 onClick={() => setShowAiModal(false)}
-                className="text-slate-400 hover:text-white text-xs p-1"
+                className="text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white text-xs p-1"
               >
                 ✕
               </button>
@@ -364,7 +447,7 @@ export function TiptapEditor({ section, projectId, onSave, onRegenerate }: Tipta
 
             {/* Quick Action Presets */}
             <div className="space-y-2">
-              <p className="text-xs font-semibold text-slate-300">Améliorations rapides :</p>
+              <p className="text-xs font-semibold text-slate-700 dark:text-slate-300">{t('editor.tiptap.quick_improvements')}</p>
               <div className="grid grid-cols-1 gap-2">
                 <button
                   onClick={() =>
@@ -373,10 +456,10 @@ export function TiptapEditor({ section, projectId, onSave, onRegenerate }: Tipta
                     )
                   }
                   disabled={isAiGenerating}
-                  className="text-left px-3 py-2 rounded-lg bg-slate-800/80 hover:bg-sky-500/20 border border-slate-700 hover:border-sky-500/40 text-xs text-slate-200 transition-all flex items-center justify-between"
+                  className="text-left px-3 py-2 rounded-lg bg-slate-100 dark:bg-slate-800/80 hover:bg-violet-500/20 border border-slate-300 dark:border-slate-700 hover:border-violet-500/40 text-xs text-slate-700 dark:text-slate-200 transition-all flex items-center justify-between"
                 >
-                  <span>🚜 Intégrer détails engins & rotation des banches</span>
-                  <Sparkles className="w-3 h-3 text-sky-400" />
+                  <span>{t('editor.tiptap.preset_engins')}</span>
+                  <Sparkles className="w-3 h-3 text-violet-600 dark:text-violet-400" />
                 </button>
 
                 <button
@@ -386,10 +469,10 @@ export function TiptapEditor({ section, projectId, onSave, onRegenerate }: Tipta
                     )
                   }
                   disabled={isAiGenerating}
-                  className="text-left px-3 py-2 rounded-lg bg-slate-800/80 hover:bg-emerald-500/20 border border-slate-700 hover:border-emerald-500/40 text-xs text-slate-200 transition-all flex items-center justify-between"
+                  className="text-left px-3 py-2 rounded-lg bg-slate-100 dark:bg-slate-800/80 hover:bg-emerald-500/20 border border-slate-300 dark:border-slate-700 hover:border-emerald-500/40 text-xs text-slate-700 dark:text-slate-200 transition-all flex items-center justify-between"
                 >
-                  <span>🌿 Renforcer les engagements RSE & Déchets</span>
-                  <Sparkles className="w-3 h-3 text-emerald-400" />
+                  <span>{t('editor.tiptap.preset_rse')}</span>
+                  <Sparkles className="w-3 h-3 text-emerald-600 dark:text-emerald-400" />
                 </button>
 
                 <button
@@ -399,41 +482,41 @@ export function TiptapEditor({ section, projectId, onSave, onRegenerate }: Tipta
                     )
                   }
                   disabled={isAiGenerating}
-                  className="text-left px-3 py-2 rounded-lg bg-slate-800/80 hover:bg-amber-500/20 border border-slate-700 hover:border-amber-500/40 text-xs text-slate-200 transition-all flex items-center justify-between"
+                  className="text-left px-3 py-2 rounded-lg bg-slate-100 dark:bg-slate-800/80 hover:bg-amber-500/20 border border-slate-300 dark:border-slate-700 hover:border-amber-500/40 text-xs text-slate-700 dark:text-slate-200 transition-all flex items-center justify-between"
                 >
-                  <span>📐 Rendre 100% technique & citer normes DTU</span>
-                  <Sparkles className="w-3 h-3 text-amber-400" />
+                  <span>{t('editor.tiptap.preset_dtu')}</span>
+                  <Sparkles className="w-3 h-3 text-amber-600 dark:text-amber-400" />
                 </button>
               </div>
             </div>
 
             {/* Custom Prompt Input */}
             <div className="space-y-1.5">
-              <label className="text-xs font-semibold text-slate-300">Consigne personnalisée :</label>
+              <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">{t('editor.tiptap.custom_prompt_label')}</label>
               <textarea
                 value={aiPrompt}
                 onChange={(e) => setAiPrompt(e.target.value)}
-                placeholder="Ex : Ajoute un paragraphe sur la procédure de coulage par temps froid et les fiches d'autocontrôle du ferraillage..."
+                placeholder={t('editor.tiptap.custom_prompt_placeholder')}
                 rows={3}
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg p-3 text-xs text-slate-200 placeholder:text-slate-600 focus:outline-none focus:border-sky-500"
+                className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg p-3 text-xs text-slate-700 dark:text-slate-200 placeholder:text-slate-400 dark:placeholder:text-slate-600 focus:outline-none focus:border-amber-500"
               />
             </div>
 
             {/* Modal Footer */}
-            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-200 dark:border-slate-800">
               <button
                 onClick={() => setShowAiModal(false)}
-                className="px-3 py-1.5 rounded-lg text-xs text-slate-400 hover:text-white"
+                className="px-3 py-1.5 rounded-lg text-xs text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white"
               >
-                Annuler
+                {t('editor.tiptap.btn_cancel')}
               </button>
               <button
                 onClick={() => handleAiRefinement()}
                 disabled={isAiGenerating || !aiPrompt.trim()}
-                className="px-4 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold disabled:opacity-50 flex items-center gap-1.5"
+                className="px-4 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold disabled:opacity-50 flex items-center gap-1.5"
               >
                 <Sparkles className="w-3.5 h-3.5" />
-                <span>{isAiGenerating ? 'Rédaction IA en cours...' : 'Régénérer avec l’IA'}</span>
+                <span>{isAiGenerating ? t('editor.tiptap.ai_writing') : t('editor.tiptap.btn_regenerate_ai')}</span>
               </button>
             </div>
           </div>

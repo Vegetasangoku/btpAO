@@ -12,9 +12,26 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.models.entities import CompanyAsset, DCECriterionEntity, Project, ProjectGoNoGoAnalysis
+from app.models.entities import CompanyAsset, DCECriterionEntity, GeneratedSection, Project, ProjectGoNoGoAnalysis, User
 from app.models.schemas import GoNoGoAnalysisOut, GoNoGoFactor
 from app.services.regulatory_service import regulatory_service
+
+
+# Clés canoniques des 9 sections texte du mémoire technique (alignées sur generate.py's
+# SECTION_DEFINITIONS, alias "qse_environnement" exclu) — dupliquées ici volontairement pour
+# éviter un import services -> api (sens interdit dans l'architecture en couches du projet).
+REQUIRED_SECTION_KEYS = [
+    "presentation_entreprise",
+    "references_similaires",
+    "moyens_humains",
+    "moyens_materiels",
+    "methodologie_phasage",
+    "qualite_controle",
+    "securite_ppsps",
+    "rse_environnement",
+    "sous_traitance",
+]
+COMPLETED_SECTION_STATUSES = {"generated", "prefilled_draft", "restored"}
 
 
 class GoNoGoService:
@@ -72,6 +89,19 @@ class GoNoGoService:
         ).group_by(Project.status)
         hist_res = await db.execute(hist_stmt)
         hist_counts = dict(hist_res.all())
+
+        # 6. Fetch Generated Sections to compute the Taux de Complétion (données trouvées vs
+        # requises) — une métrique factuelle, indépendante du Score Stratégique ci-dessous.
+        sec_stmt = select(GeneratedSection.section_key, GeneratedSection.status).where(
+            GeneratedSection.project_id == project_id,
+            GeneratedSection.tenant_id == tenant_id,
+        )
+        sec_res = await db.execute(sec_stmt)
+        completed_keys = {
+            key for key, sec_status in sec_res.all()
+            if key in REQUIRED_SECTION_KEYS and sec_status in COMPLETED_SECTION_STATUSES
+        }
+        completion_rate = round((len(completed_keys) / len(REQUIRED_SECTION_KEYS)) * 100.0, 1)
 
         factors: List[GoNoGoFactor] = []
         blocking_issues: List[str] = []
@@ -301,6 +331,15 @@ class GoNoGoService:
                 score -= 5.0
 
         # ---------------------------------------------------------------------
+        # Data Sufficiency Gate — évite un Score Stratégique arbitraire (ex : dossier vierge,
+        # les 4 facteurs neutres "missing_data", score qui reste au baseline 70.0 sans aucun
+        # signal réel). Le frontend masque le composant Score Stratégique quand ce flag est False,
+        # tout en affichant toujours le Taux de Complétion (donnée factuelle, jamais arbitraire).
+        # ---------------------------------------------------------------------
+        real_data_factors = sum(1 for f in factors if f.status != "missing_data")
+        has_sufficient_data = real_data_factors >= 1
+
+        # ---------------------------------------------------------------------
         # Final Recommendation & Score Boundaries
         # ---------------------------------------------------------------------
         final_score = max(0.0, min(100.0, round(score, 1)))
@@ -329,6 +368,16 @@ class GoNoGoService:
         existing_res = await db.execute(existing_stmt)
         analysis_record = existing_res.scalar_one_or_none()
 
+        # Check if user_id exists in users table before setting evaluated_by
+        valid_user_id = None
+        if user_id:
+            try:
+                u_check = await db.execute(select(User.id).where(User.id == user_id))
+                if u_check.scalar_one_or_none():
+                    valid_user_id = user_id
+            except Exception:
+                valid_user_id = None
+
         factors_json = [f.model_dump() for f in factors]
 
         if not analysis_record:
@@ -342,7 +391,9 @@ class GoNoGoService:
                 factors=factors_json,
                 mandatory_criteria_met=len(blocking_issues) == 0,
                 blocking_issues=blocking_issues,
-                evaluated_by=user_id,
+                completion_rate=completion_rate,
+                has_sufficient_data=has_sufficient_data,
+                evaluated_by=valid_user_id,
                 created_at=datetime.now(timezone.utc),
                 updated_at=datetime.now(timezone.utc),
             )
@@ -354,7 +405,10 @@ class GoNoGoService:
             analysis_record.factors = factors_json
             analysis_record.mandatory_criteria_met = len(blocking_issues) == 0
             analysis_record.blocking_issues = blocking_issues
-            analysis_record.evaluated_by = user_id
+            analysis_record.completion_rate = completion_rate
+            analysis_record.has_sufficient_data = has_sufficient_data
+            if valid_user_id:
+                analysis_record.evaluated_by = valid_user_id
             analysis_record.updated_at = datetime.now(timezone.utc)
 
         await db.flush()

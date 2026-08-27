@@ -33,13 +33,13 @@ export function DCEUploader({ projectId, criteria = [], onCriteriaExtracted }: D
     const file = files[0];
     setIsUploading(true);
     setUploadProgress(20);
-    setStatusMessage('Téléchargement du fichier vers le bucket sécurisé S3...');
+    setStatusMessage('Envoi du fichier vers votre espace sécurisé...');
 
     try {
       setTimeout(() => setUploadProgress(50), 400);
-      setTimeout(() => setStatusMessage('Analyse OCR & extraction du texte par Azure Document Intelligence...'), 800);
+      setTimeout(() => setStatusMessage('Analyse et extraction automatique du contenu...'), 800);
       setTimeout(() => setUploadProgress(80), 1200);
-      setTimeout(() => setStatusMessage('Vectorisation des chunks sémantiques (pgvector) & Extraction des critères RC...'), 1600);
+      setTimeout(() => setStatusMessage('Indexation intelligente & extraction des critères de sélection...'), 1600);
 
       const res = await api.uploadDCE(projectId, docType, file);
       setUploadProgress(100);
@@ -101,7 +101,7 @@ export function DCEUploader({ projectId, criteria = [], onCriteriaExtracted }: D
               Glissez-déposez le fichier PDF ici ou <span className="text-sky-400 underline">parcourez vos fichiers</span>
             </p>
             <p className="text-[11px] text-slate-400 mt-1">
-              Formats acceptés : PDF, DOCX (Taille max : 100 Mo) • Traitement OCR & pgvector
+              Formats acceptés : PDF, DOCX (Taille max : 100 Mo) • Analyse automatique
             </p>
           </div>
           <input
@@ -142,7 +142,7 @@ export function DCEUploader({ projectId, criteria = [], onCriteriaExtracted }: D
               Grille de Pondération & Critères de Notation (Extrait RC)
             </h3>
             <p className="text-xs text-slate-400">
-              Le moteur RAG s'assure que 100% de ces exigences sont couvertes et chiffrées dans chaque section rédigée.
+              L'intelligence artificielle s'assure que 100% de ces exigences sont couvertes et chiffrées dans votre mémoire technique.
             </p>
           </div>
 

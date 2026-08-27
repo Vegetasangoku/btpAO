@@ -13,36 +13,35 @@ import {
   User,
   Building,
   Sparkles,
+  ChevronDown,
 } from 'lucide-react';
 import { supabase } from '@/lib/supabase/client';
 
 export function Header() {
   const router = useRouter();
   const [user, setUser] = useState<any>(null);
-  const [companyName, setCompanyName] = useState<string>('EiffaBTP Construction');
+  const [companyName, setCompanyName] = useState<string>('Entreprise BTP');
   const [role, setRole] = useState<string>('Conducteur Principal');
   const [showDropdown, setShowDropdown] = useState(false);
 
   useEffect(() => {
-    // 1. Initial user check
     supabase.auth.getUser().then(({ data }) => {
       if (data?.user) {
         setUser(data.user);
         const meta = data.user.user_metadata || {};
         const appMeta = data.user.app_metadata || {};
         setCompanyName(meta.company_name || appMeta.company_name || 'Entreprise BTP');
-        setRole(meta.role || appMeta.role || 'Admin BTP');
+        setRole(meta.role || appMeta.role || 'Conducteur BTP');
       }
     });
 
-    // 2. Auth state change listener
     const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
       if (session?.user) {
         setUser(session.user);
         const meta = session.user.user_metadata || {};
         const appMeta = session.user.app_metadata || {};
         setCompanyName(meta.company_name || appMeta.company_name || 'Entreprise BTP');
-        setRole(meta.role || appMeta.role || 'Admin BTP');
+        setRole(meta.role || appMeta.role || 'Conducteur BTP');
       } else {
         setUser(null);
       }
@@ -62,34 +61,34 @@ export function Header() {
 
   const initials = user?.email
     ? user.email.substring(0, 2).toUpperCase()
-    : 'JA';
+    : 'BTP';
 
   return (
-    <header className="h-16 border-b border-slate-800/80 bg-slate-950/60 backdrop-blur-xl px-6 flex items-center justify-between sticky top-0 z-20">
-      {/* Search & Quick Breadcrumb */}
-      <div className="flex items-center gap-4 flex-1 max-w-lg">
+    <header className="h-16 border-b border-slate-200 dark:border-[#1E2638] bg-white/80 dark:bg-[#0C0F17]/80 backdrop-blur-xl px-6 flex items-center justify-between sticky top-0 z-20 transition-colors duration-200">
+      {/* Search & Global Context */}
+      <div className="flex items-center gap-4 flex-1 max-w-md">
         <div className="relative w-full">
-          <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+          <Search className="w-4 h-4 text-slate-400 dark:text-slate-500 absolute left-3.5 top-1/2 -translate-y-1/2" />
           <input
             type="text"
-            placeholder="Rechercher un appel d'offres, CCTP, critère RC ou matériel..."
-            className="w-full bg-slate-900/80 border border-slate-800 rounded-lg pl-9 pr-4 py-1.5 text-xs text-slate-200 placeholder:text-slate-500 focus:outline-none focus:border-sky-500 transition-colors"
+            placeholder="Rechercher un AO, CCTP, RC ou critère..."
+            className="w-full bg-slate-100/90 dark:bg-[#121622] border border-slate-200 dark:border-[#1E2638] rounded-xl pl-10 pr-4 py-2 text-xs text-slate-900 dark:text-slate-200 placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none focus:border-amber-500 transition-colors"
           />
         </div>
       </div>
 
       {/* Right Controls */}
       <div className="flex items-center gap-3">
-        {/* Security & RLS status */}
-        <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-medium">
+        {/* Security badge */}
+        <div className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-700 dark:text-emerald-400 text-xs font-bold">
           <ShieldCheck className="w-3.5 h-3.5" />
-          <span>Supabase IAM & RLS</span>
+          <span>Espace Sécurisé</span>
         </div>
 
         {/* Quick New Project Button */}
         <Link
-          href="/projects"
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold shadow-sm transition-all"
+          href="/dashboard/wizard"
+          className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-black shadow-sm shadow-amber-500/20 transition-all cursor-pointer"
         >
           <Plus className="w-3.5 h-3.5" />
           <span>Nouvel AO</span>
@@ -100,59 +99,61 @@ export function Header() {
           <div className="relative">
             <button
               onClick={() => setShowDropdown(!showDropdown)}
-              className="flex items-center gap-2.5 pl-2 border-l border-slate-800 hover:opacity-80 transition-opacity"
+              className="flex items-center gap-2.5 pl-3 border-l border-slate-200 dark:border-slate-800 hover:opacity-85 transition-opacity cursor-pointer"
             >
-              <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-sky-600 to-indigo-600 flex items-center justify-center font-bold text-xs text-white shadow-inner">
+              <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-amber-500 to-amber-600 flex items-center justify-center font-black text-xs text-slate-950 shadow-sm ring-1 ring-white/20">
                 {initials}
               </div>
               <div className="hidden md:block text-left">
-                <p className="text-xs font-semibold text-slate-200 leading-tight truncate max-w-[140px]">
+                <p className="text-xs font-bold text-slate-900 dark:text-slate-200 leading-tight truncate max-w-[140px]">
                   {user.email}
                 </p>
-                <p className="text-[10px] text-sky-400 truncate max-w-[140px]">{companyName}</p>
+                <p className="text-[10px] font-semibold text-amber-600 dark:text-amber-400 truncate max-w-[140px]">{companyName}</p>
               </div>
+              <ChevronDown className="w-3.5 h-3.5 text-slate-400 hidden md:block" />
             </button>
 
             {/* Dropdown Menu */}
             {showDropdown && (
-              <div className="absolute right-0 mt-2 w-56 rounded-2xl bg-slate-900 border border-slate-800 shadow-2xl p-2 z-50 space-y-1">
-                <div className="p-2 border-b border-slate-800">
-                  <p className="text-xs font-bold text-white truncate">{companyName}</p>
-                  <p className="text-[10px] text-slate-400 truncate">{user.email}</p>
-                  <span className="inline-block mt-1 text-[9px] font-bold px-2 py-0.5 rounded bg-sky-500/10 text-sky-300 border border-sky-500/20">
-                    Plan Pro BTP • Actif
+              <div className="absolute right-0 mt-2 w-60 rounded-2xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-[#1E2638] shadow-2xl p-2 z-50 space-y-1 animate-in fade-in">
+                <div className="p-2.5 border-b border-slate-100 dark:border-slate-800">
+                  <p className="text-xs font-bold text-slate-900 dark:text-white truncate">{companyName}</p>
+                  <p className="text-[10px] text-slate-500 dark:text-slate-400 truncate">{user.email}</p>
+                  <span className="inline-block mt-1.5 text-[9px] font-bold px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-500/30">
+                    Plan Entreprise BTP • Actif
                   </span>
                 </div>
 
                 <Link
-                  href="/settings"
+                  href="/dashboard/company"
                   onClick={() => setShowDropdown(false)}
-                  className="flex items-center gap-2 px-3 py-2 rounded-xl text-xs text-slate-300 hover:text-white hover:bg-slate-800 transition-colors"
+                  className="flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-semibold text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
                 >
-                  <Building className="w-3.5 h-3.5" />
-                  <span>Mon Entreprise & Charte</span>
+                  <Building className="w-3.5 h-3.5 text-amber-500" />
+                  <span>Mon Entreprise & Moyens</span>
                 </Link>
 
                 <Link
-                  href="/settings/ai-ocr"
+                  href="/dashboard/branding"
                   onClick={() => setShowDropdown(false)}
-                  className="flex items-center gap-2 px-3 py-2 rounded-xl text-xs text-slate-300 hover:text-white hover:bg-slate-800 transition-colors"
+                  className="flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-semibold text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
                 >
-                  <Sparkles className="w-3.5 h-3.5 text-sky-400" />
-                  <span>Studio OCR & IA</span>
+                  <Sparkles className="w-3.5 h-3.5 text-amber-500" />
+                  <span>Charte & Modèles</span>
                 </Link>
 
                 <Link
-                  href="/pricing"
+                  href="/dashboard/settings"
                   onClick={() => setShowDropdown(false)}
-                  className="flex items-center gap-2 px-3 py-2 rounded-xl text-xs text-slate-300 hover:text-white hover:bg-slate-800 transition-colors"
+                  className="flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-semibold text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
                 >
-                  <span>💳 Gérer mon Abonnement</span>
+                  <User className="w-3.5 h-3.5 text-slate-400" />
+                  <span>Paramètres du compte</span>
                 </Link>
 
                 <button
                   onClick={handleLogout}
-                  className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-xs text-rose-400 hover:bg-rose-500/10 transition-colors text-left"
+                  className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-bold text-rose-600 dark:text-rose-400 hover:bg-rose-500/10 transition-colors text-left cursor-pointer"
                 >
                   <LogOut className="w-3.5 h-3.5" />
                   <span>Se déconnecter</span>
@@ -161,17 +162,17 @@ export function Header() {
             )}
           </div>
         ) : (
-          <div className="flex items-center gap-2 pl-2 border-l border-slate-800">
+          <div className="flex items-center gap-2 pl-3 border-l border-slate-200 dark:border-slate-800">
             <Link
               href="/login"
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold border border-slate-700 transition-colors"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 text-xs font-bold border border-slate-200 dark:border-slate-700 transition-colors"
             >
               <LogIn className="w-3.5 h-3.5" />
               <span>Connexion</span>
             </Link>
             <Link
               href="/register"
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs font-bold transition-all shadow-sm"
+              className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-black transition-all shadow-sm"
             >
               <span>Créer un compte</span>
             </Link>

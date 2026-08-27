@@ -21,13 +21,14 @@ class EmbeddingService:
         if not text or not text.strip():
             return [0.0] * self.dimension
 
-        # 1. Try LiteLLM embedding if API keys are configured
-        if settings.OPENAI_API_KEY or settings.MISTRAL_API_KEY or settings.ANTHROPIC_API_KEY:
+        # 1. Try LiteLLM embedding if valid API key is configured
+        api_key = settings.OPENAI_API_KEY or settings.MISTRAL_API_KEY
+        if api_key and not api_key.startswith("sk-...") and not api_key.startswith("..."):
             try:
                 response = litellm.embedding(
                     model=self.model,
                     input=[text],
-                    api_key=settings.OPENAI_API_KEY or settings.MISTRAL_API_KEY,
+                    api_key=api_key,
                 )
                 if response and response.data and len(response.data) > 0:
                     embedding = response.data[0]["embedding"]
@@ -40,6 +41,7 @@ class EmbeddingService:
 
         # 2. Deterministic high-entropy pseudo-embedding fallback
         return self._generate_deterministic_vector(text)
+
 
     def generate_batch_embeddings(self, texts: List[str]) -> List[List[float]]:
         return [self.generate_embedding(t) for t in texts]

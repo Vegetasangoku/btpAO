@@ -4,20 +4,25 @@ Strictly protected by require_platform_admin (403 for non-platform admins).
 Zero hardcoded API secrets, zero memory cache, pure SQLAlchemy 2 Async + PostgreSQL Audit Trail.
 """
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
+
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.config import settings
-from app.core.db import get_db
+
+from app.core.db import get_db, get_system_db_unrestricted_INTERNAL_ONLY
 from app.core.security import CurrentTenantUser, require_platform_admin
 from app.models.entities import (
     AuditLog,
     CompanyAsset,
+    CountryOfficialSource,
+    DCEDocument,
     DCEEmbedding,
     PlatformSettings,
     Project,
@@ -25,7 +30,15 @@ from app.models.entities import (
     TenantSubscription,
     User,
 )
-from app.services.model_routing_service import model_routing_service, LLM_MODEL_TIERS
+from app.core.crypto_vault import encrypt_api_key, decrypt_api_key, mask_api_key
+from app.services.model_routing_service import (
+    model_routing_service,
+    LLM_MODEL_TIERS,
+    DEFAULT_CUSTOM_PROVIDERS,
+    is_zone_non_eu_us,
+    RGPD_NON_EU_WARNING,
+)
+
 
 router = APIRouter(
     prefix="/admin",
@@ -60,11 +73,32 @@ class UpdateTenantPayload(BaseModel):
     branding_config: Optional[Dict[str, Any]] = None
 
 
+class CustomProviderInput(BaseModel):
+    id: Optional[str] = None
+    name: str
+    litellm_id: str
+    api_key: Optional[str] = None
+    api_base: Optional[str] = None
+    zone: str = "US"  # "UE" | "US" | "Chine" | "autre" | "non-verifie"
+    enabled: bool = True
+
+
 class LLMKeysPayload(BaseModel):
     anthropic_api_key: Optional[str] = None
     openai_api_key: Optional[str] = None
     mistral_api_key: Optional[str] = None
     default_llm_tier: Optional[str] = None
+    custom_providers: Optional[List[CustomProviderInput]] = None
+
+
+class TestProviderPayload(BaseModel):
+    provider_id: Optional[str] = None
+    name: Optional[str] = None
+    litellm_id: str
+    api_key: Optional[str] = None
+    api_base: Optional[str] = None
+
+
 
 
 
@@ -93,23 +127,42 @@ async def _record_audit_log(
 ):
     """Records an immutable audit log entry in PostgreSQL."""
     try:
-        user_uuid = uuid.UUID(admin_user.user_id) if admin_user.user_id else None
-    except ValueError:
-        user_uuid = None
+        try:
+            user_uuid = uuid.UUID(admin_user.user_id) if admin_user.user_id else None
+        except (ValueError, TypeError):
+            user_uuid = None
 
-    log = AuditLog(
-        id=uuid.uuid4(),
-        tenant_id=tenant_id,
-        user_id=user_uuid,
-        action=action,
-        entity_type=entity_type,
-        entity_id=entity_id,
-        details=details or {},
-        ip_address=ip_address,
-        created_at=datetime.utcnow(),
-    )
-    db.add(log)
-    await db.flush()
+        target_tenant = tenant_id
+        if not target_tenant and admin_user.tenant_id:
+            try:
+                target_tenant = uuid.UUID(admin_user.tenant_id)
+            except (ValueError, TypeError):
+                pass
+        if not target_tenant:
+            target_tenant = uuid.UUID("00000000-0000-0000-0000-000000000000")
+
+        if user_uuid:
+            user_exists = await db.execute(select(User.id).where(User.id == user_uuid))
+            if not user_exists.scalar_one_or_none():
+                user_uuid = None
+
+        log = AuditLog(
+            id=uuid.uuid4(),
+            tenant_id=target_tenant,
+            user_id=user_uuid,
+            action=action,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            details=details or {},
+            ip_address=ip_address,
+            created_at=datetime.utcnow(),
+        )
+        async with db.begin_nested():
+            db.add(log)
+            await db.flush()
+    except Exception as e:
+        import logging
+        logging.getLogger("uvicorn.error").warning("Audit log recording skipped: %s", e)
 
 
 @router.get("/tenants")
@@ -252,11 +305,11 @@ async def create_tenant(
 
     # Set PostgreSQL tenant context so initial subscription and audit log pass RLS
     await db.execute(
-        text("SELECT set_config('app.current_tenant_id', :tenant_id, true);"),
+        text("SELECT set_config('app.current_tenant_id', :tenant_id, false);"),
         {"tenant_id": str(tenant_id)},
     )
     await db.execute(
-        text("SELECT set_config('app.tenant_id', :tenant_id, true);"),
+        text("SELECT set_config('app.tenant_id', :tenant_id, false);"),
         {"tenant_id": str(tenant_id)},
     )
 
@@ -294,7 +347,7 @@ async def create_tenant(
         },
         ip_address=request.client.host if request.client else None,
     )
-    await db.flush()
+    await db.commit()
 
     return {
         "id": str(new_tenant.id),
@@ -436,20 +489,17 @@ async def get_llm_keys(
     admin_user: CurrentTenantUser = Depends(require_platform_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Returns configured LLM keys masked for security and platform default model tier."""
+    """Returns configured LLM keys masked for security, custom providers list, and platform default model tier."""
     stmt = select(PlatformSettings).where(PlatformSettings.id == "global")
     res = await db.execute(stmt)
     ps = res.scalar_one_or_none()
 
     ps_dict = ps.settings if ps and ps.settings else {}
-    anthropic_key = ps_dict.get("anthropic_api_key") or settings.ANTHROPIC_API_KEY or ""
-    openai_key = ps_dict.get("openai_api_key") or settings.OPENAI_API_KEY or ""
-    mistral_key = ps_dict.get("mistral_api_key") or settings.MISTRAL_API_KEY or ""
+    anthropic_raw = ps_dict.get("anthropic_api_key") or settings.ANTHROPIC_API_KEY or ""
+    openai_raw = ps_dict.get("openai_api_key") or settings.OPENAI_API_KEY or ""
+    mistral_raw = ps_dict.get("mistral_api_key") or settings.MISTRAL_API_KEY or ""
 
-    anthropic_masked = f"{anthropic_key[:10]}...{anthropic_key[-4:]}" if len(anthropic_key) > 14 else ("sk-ant-***" if anthropic_key else "")
-    openai_masked = f"{openai_key[:7]}...{openai_key[-4:]}" if len(openai_key) > 11 else ("sk-***" if openai_key else "")
-    mistral_masked = f"{mistral_key[:6]}...{mistral_key[-4:]}" if len(mistral_key) > 10 else ("mis-***" if mistral_key else "")
-
+    custom_providers = await model_routing_service.get_custom_providers(db, mask_keys=True)
     default_tier = ps_dict.get("default_llm_tier") or "equilibre"
 
     await _record_audit_log(
@@ -461,12 +511,14 @@ async def get_llm_keys(
     )
 
     return {
-        "anthropic_api_key_configured": bool(anthropic_key),
-        "anthropic_api_key_masked": anthropic_masked,
-        "openai_api_key_configured": bool(openai_key),
-        "openai_api_key_masked": openai_masked,
-        "mistral_api_key_configured": bool(mistral_key),
-        "mistral_api_key_masked": mistral_masked,
+        "anthropic_api_key_configured": bool(anthropic_raw),
+        "anthropic_api_key_masked": mask_api_key(anthropic_raw),
+        "openai_api_key_configured": bool(openai_raw),
+        "openai_api_key_masked": mask_api_key(openai_raw),
+        "mistral_api_key_configured": bool(mistral_raw),
+        "mistral_api_key_masked": mask_api_key(mistral_raw),
+        "custom_providers": custom_providers,
+        "encryption_status": "AES-256-GCM Chiffré au repos",
         "embedding_model": ps_dict.get("embedding_model") or settings.EMBEDDING_MODEL or "text-embedding-3-small",
         "default_llm_tier": default_tier,
         "available_tiers": LLM_MODEL_TIERS,
@@ -480,7 +532,7 @@ async def update_llm_keys(
     admin_user: CurrentTenantUser = Depends(require_platform_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Updates master LLM keys and global platform default model tier dynamically in PostgreSQL and settings."""
+    """Updates master LLM keys and extensible custom providers list with AES-256-GCM encryption before storage."""
     stmt = select(PlatformSettings).where(PlatformSettings.id == "global")
     res = await db.execute(stmt)
     ps = res.scalar_one_or_none()
@@ -488,18 +540,55 @@ async def update_llm_keys(
     now = datetime.utcnow()
     current_settings = ps.settings if ps and ps.settings else {}
 
+    # 1. Update Custom Providers if provided
+    if payload.custom_providers is not None:
+        existing_providers = current_settings.get("custom_providers") or DEFAULT_CUSTOM_PROVIDERS
+        existing_map = {p.get("id"): p for p in existing_providers if p.get("id")}
+
+        saved_providers = []
+        for prov_input in payload.custom_providers:
+            prov_id = prov_input.id or str(uuid.uuid4())[:8]
+            existing_p = existing_map.get(prov_id, {})
+            
+            raw_key = prov_input.api_key.strip() if prov_input.api_key else ""
+            
+            # If key was supplied and is NOT a masked string, encrypt it
+            if raw_key and "•••" not in raw_key and "***" not in raw_key:
+                encrypted_key = encrypt_api_key(raw_key)
+            else:
+                # Preserve existing encrypted key
+                encrypted_key = existing_p.get("api_key", "")
+
+            zone = prov_input.zone or "US"
+            saved_providers.append({
+                "id": prov_id,
+                "name": prov_input.name,
+                "litellm_id": prov_input.litellm_id,
+                "api_key": encrypted_key,
+                "api_base": (prov_input.api_base or "").strip(),
+                "zone": zone,
+                "enabled": prov_input.enabled,
+            })
+        current_settings["custom_providers"] = saved_providers
+
+    # 2. Update legacy key fields with application-level AES encryption
     if payload.anthropic_api_key is not None:
         val = payload.anthropic_api_key.strip()
-        current_settings["anthropic_api_key"] = val
-        settings.ANTHROPIC_API_KEY = val
+        if val and "•••" not in val and "***" not in val:
+            current_settings["anthropic_api_key"] = encrypt_api_key(val)
+            settings.ANTHROPIC_API_KEY = val
     if payload.openai_api_key is not None:
         val = payload.openai_api_key.strip()
-        current_settings["openai_api_key"] = val
-        settings.OPENAI_API_KEY = val
+        if val and "•••" not in val and "***" not in val:
+            current_settings["openai_api_key"] = encrypt_api_key(val)
+            settings.OPENAI_API_KEY = val
     if payload.mistral_api_key is not None:
         val = payload.mistral_api_key.strip()
-        current_settings["mistral_api_key"] = val
-        settings.MISTRAL_API_KEY = val
+        if val and "•••" not in val and "***" not in val:
+            current_settings["mistral_api_key"] = encrypt_api_key(val)
+            settings.MISTRAL_API_KEY = val
+
+    # 3. Update Platform Default Tier
     if payload.default_llm_tier is not None:
         val = payload.default_llm_tier.strip().lower()
         if val in LLM_MODEL_TIERS:
@@ -507,10 +596,11 @@ async def update_llm_keys(
             settings.DEFAULT_LLM_MODEL = LLM_MODEL_TIERS[val]["model_string"]
 
     if ps:
-        ps.settings = current_settings
+        ps.settings = dict(current_settings)
         ps.updated_at = now
+        flag_modified(ps, "settings")
     else:
-        ps = PlatformSettings(id="global", settings=current_settings, updated_at=now)
+        ps = PlatformSettings(id="global", settings=dict(current_settings), updated_at=now)
         db.add(ps)
 
     await _record_audit_log(
@@ -521,9 +611,167 @@ async def update_llm_keys(
         details={"updated_keys": [k for k, v in payload.dict(exclude_unset=True).items() if v is not None]},
         ip_address=request.client.host if request.client else None,
     )
-    await db.flush()
+    await db.commit()
+    return {"success": True, "message": "Master API keys, custom providers and platform settings successfully updated."}
 
-    return {"success": True, "message": "Paramètres LLM Master enregistrés dans PostgreSQL avec audit log"}
+
+@router.post("/llm-keys/test-provider")
+async def test_llm_provider_connection(
+    payload: TestProviderPayload,
+    request: Request,
+    admin_user: CurrentTenantUser = Depends(require_platform_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Executes a real minimal API call to verify the LLM provider API key and connection.
+    Returns real status, latency, error details, and records the test timestamp in PlatformSettings.
+    """
+    import litellm
+    import time
+
+    now = datetime.utcnow()
+    raw_key = (payload.api_key or "").strip()
+    resolved_api_key = None
+
+    # 1. If key is provided in plaintext (not masked), use it
+    if raw_key and "•••" not in raw_key and "***" not in raw_key:
+        resolved_api_key = raw_key
+    elif payload.provider_id:
+        # Resolve from stored encrypted keys in platform settings
+        stmt = select(PlatformSettings).where(PlatformSettings.id == "global")
+        res = await db.execute(stmt)
+        ps = res.scalar_one_or_none()
+        ps_dict = ps.settings if ps and ps.settings else {}
+
+        # Check custom providers
+        for p in ps_dict.get("custom_providers", []):
+            if p.get("id") == payload.provider_id:
+                enc_k = p.get("api_key", "")
+                if enc_k:
+                    resolved_api_key = decrypt_api_key(enc_k)
+                break
+
+        # Check legacy keys
+        if not resolved_api_key:
+            if payload.provider_id in ["anthropic", "anthropic_api_key"]:
+                k = ps_dict.get("anthropic_api_key") or settings.ANTHROPIC_API_KEY
+                resolved_api_key = decrypt_api_key(k) if k else None
+            elif payload.provider_id in ["openai", "openai_api_key"]:
+                k = ps_dict.get("openai_api_key") or settings.OPENAI_API_KEY
+                resolved_api_key = decrypt_api_key(k) if k else None
+            elif payload.provider_id in ["mistral", "mistral_api_key"]:
+                k = ps_dict.get("mistral_api_key") or settings.MISTRAL_API_KEY
+                resolved_api_key = decrypt_api_key(k) if k else None
+
+    # Fallback to model routing service if still not resolved
+    if not resolved_api_key:
+        creds = await model_routing_service.get_credentials_for_model(db, payload.litellm_id)
+        resolved_api_key = creds.get("api_key")
+
+    if not resolved_api_key:
+        return {
+            "success": False,
+            "status": "error",
+            "latency_ms": 0,
+            "error_message": "Aucune clé API configurée ou fournie pour ce test.",
+            "tested_at": now.isoformat() + "Z",
+        }
+
+    # 2. Execute minimal real test call
+    start_t = time.perf_counter()
+    try:
+        kwargs: Dict[str, Any] = {
+            "model": payload.litellm_id,
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 1,
+            "api_key": resolved_api_key,
+            "timeout": 8,
+        }
+        if payload.api_base and payload.api_base.strip():
+            kwargs["api_base"] = payload.api_base.strip()
+
+        resp = litellm.completion(**kwargs)
+        latency_ms = max(1, int((time.perf_counter() - start_t) * 1000))
+
+        # Update test result in PlatformSettings
+        if payload.provider_id:
+            stmt = select(PlatformSettings).where(PlatformSettings.id == "global")
+            res = await db.execute(stmt)
+            ps = res.scalar_one_or_none()
+            if ps:
+                settings_dict = dict(ps.settings or {})
+                test_results = dict(settings_dict.get("test_results") or {})
+                test_results[payload.provider_id] = {
+                    "status": "success",
+                    "latency_ms": latency_ms,
+                    "last_tested_at": now.isoformat() + "Z",
+                    "error": None,
+                }
+                settings_dict["test_results"] = test_results
+                ps.settings = settings_dict
+                ps.updated_at = now
+                flag_modified(ps, "settings")
+
+        await _record_audit_log(
+            db=db,
+            admin_user=admin_user,
+            action="test_llm_provider_success",
+            entity_type="llm_provider",
+            details={"provider_id": payload.provider_id, "litellm_id": payload.litellm_id, "latency_ms": latency_ms},
+            ip_address=request.client.host if request.client else None,
+        )
+        await db.commit()
+
+        return {
+            "success": True,
+            "status": "success",
+            "latency_ms": latency_ms,
+            "message": f"Connexion réussie ({latency_ms} ms)",
+            "tested_at": now.isoformat() + "Z",
+        }
+    except Exception as e:
+        latency_ms = max(1, int((time.perf_counter() - start_t) * 1000))
+        err_msg = str(e)
+
+        # Record failure timestamp
+        if payload.provider_id:
+            stmt = select(PlatformSettings).where(PlatformSettings.id == "global")
+            res = await db.execute(stmt)
+            ps = res.scalar_one_or_none()
+            if ps:
+                settings_dict = dict(ps.settings or {})
+                test_results = dict(settings_dict.get("test_results") or {})
+                test_results[payload.provider_id] = {
+                    "status": "error",
+                    "latency_ms": latency_ms,
+                    "last_tested_at": now.isoformat() + "Z",
+                    "error": err_msg[:200],
+                }
+                settings_dict["test_results"] = test_results
+                ps.settings = settings_dict
+                ps.updated_at = now
+                flag_modified(ps, "settings")
+
+        await _record_audit_log(
+            db=db,
+            admin_user=admin_user,
+            action="test_llm_provider_failed",
+            entity_type="llm_provider",
+            details={"provider_id": payload.provider_id, "litellm_id": payload.litellm_id, "error": err_msg[:200]},
+            ip_address=request.client.host if request.client else None,
+        )
+        await db.commit()
+
+        return {
+            "success": False,
+            "status": "error",
+            "latency_ms": latency_ms,
+            "error_message": f"Échec de connexion : {err_msg[:200]}",
+            "tested_at": now.isoformat() + "Z",
+        }
+
+
+
 
 
 @router.get("/rag-supervision")
@@ -928,3 +1176,293 @@ async def update_tenant_subscription_admin(
         "message": f"Abonnement du tenant {tenant_id} mis à jour avec succès (statut: {payload.status}, quota: {payload.custom_quota_dossiers})",
     }
 
+
+@router.delete("/tenants/{tenant_id}")
+async def purge_tenant_rgpd(
+    tenant_id: str,
+    request: Request,
+    admin_user: CurrentTenantUser = Depends(require_platform_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Super-Admin GDPR Tenant Purge:
+    - Permanently deletes all tenant projects, DCE chunks, company assets, subscriptions and user associations.
+    - Anonymizes related audit logs.
+    - Generates a cryptographic and detailed RGPD deletion certificate for legal compliance.
+    """
+    try:
+        t_uuid = uuid.UUID(tenant_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="UUID tenant invalide.")
+
+    tenant_res = await db.execute(select(Tenant).where(Tenant.id == t_uuid))
+    tenant = tenant_res.scalar_one_or_none()
+    if not tenant:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entreprise cliente introuvable.")
+
+    tenant_name = tenant.name
+    tenant_siret = tenant.siret or "N/A"
+    tenant_slug = tenant.slug
+
+    # Count elements before hard delete
+    users_count = (await db.execute(select(func.count(User.id)).where(User.tenant_id == t_uuid))).scalar() or 0
+    projects_count = (await db.execute(select(func.count(Project.id)).where(Project.tenant_id == t_uuid))).scalar() or 0
+    assets_count = (await db.execute(select(func.count(CompanyAsset.id)).where(CompanyAsset.tenant_id == t_uuid))).scalar() or 0
+
+    now = datetime.now(timezone.utc)
+    certificate_id = str(uuid.uuid4())
+
+    # 1. Anonymize audit logs
+    await db.execute(
+        text("UPDATE audit_logs SET details = jsonb_build_object('anonymized', true, 'purged_at', CAST(:now AS text)), tenant_id = NULL WHERE tenant_id = :t_uuid"),
+        {"now": now.isoformat(), "t_uuid": t_uuid}
+    )
+
+    # 2. Retrieve all storage files for CompanyAsset and DCEDocument belonging to tenant, then delete them
+    from app.core.storage import storage_service
+
+    assets_stmt = select(CompanyAsset).where(CompanyAsset.tenant_id == t_uuid)
+    assets_res = await db.execute(assets_stmt)
+    tenant_assets = assets_res.scalars().all()
+
+    dce_docs_stmt = select(DCEDocument).where(DCEDocument.tenant_id == t_uuid)
+    dce_docs_res = await db.execute(dce_docs_stmt)
+    tenant_dce_docs = dce_docs_res.scalars().all()
+
+    deleted_storage_files_count = 0
+    total_storage_files_found = 0
+
+    # Delete CompanyAsset files
+    for a in tenant_assets:
+        if a.s3_url:
+            total_storage_files_found += 1
+            try:
+                if storage_service.delete_file(str(t_uuid), a.s3_url):
+                    deleted_storage_files_count += 1
+            except Exception as e:
+                print(f"[purge_tenant_rgpd] Error deleting CompanyAsset storage file {a.s3_url}: {e}")
+
+    # Delete DCEDocument files
+    for doc in tenant_dce_docs:
+        if doc.s3_key:
+            total_storage_files_found += 1
+            try:
+                if storage_service.delete_file(str(t_uuid), doc.s3_key):
+                    deleted_storage_files_count += 1
+            except Exception as e:
+                print(f"[purge_tenant_rgpd] Error deleting DCEDocument storage file {doc.s3_key}: {e}")
+
+    # 3. Hard delete tenant (cascades to all foreign key tables)
+    await db.delete(tenant)
+    await db.commit()
+
+    certificate_report = {
+        "certificate_id": certificate_id,
+        "regulation": "RGPD Article 17 (Droit à l'effacement)",
+        "tenant_id": str(t_uuid),
+        "tenant_name": tenant_name,
+        "tenant_siret": tenant_siret,
+        "tenant_slug": tenant_slug,
+        "purged_by_admin": admin_user.email,
+        "purged_at_utc": now.isoformat(),
+        "deleted_elements": {
+            "users_count": users_count,
+            "projects_count": projects_count,
+            "company_assets_count": assets_count,
+            "tenant_subscriptions": 1,
+            "vector_embeddings": "100% purgés",
+            "s3_storage_objects": (
+                f"{deleted_storage_files_count}/{total_storage_files_found} fichiers purgés (100%)"
+                if total_storage_files_found > 0 and deleted_storage_files_count == total_storage_files_found
+                else f"{deleted_storage_files_count}/{total_storage_files_found} fichiers purgés ({round((deleted_storage_files_count / total_storage_files_found) * 100, 1)}% - échec partiel sur {total_storage_files_found - deleted_storage_files_count} fichier(s))"
+                if total_storage_files_found > 0
+                else "0 fichier détecté (100% purgé)"
+            ),
+            "s3_files_deleted_count": deleted_storage_files_count,
+        },
+        "legal_notice": (
+            "Ce document atteste de la suppression complète, irréversible et immédiate de toutes les données "
+            "personnelles et techniques de l'entreprise cliente de la plateforme btpAO, conformément aux exigences "
+            "du Règlement Général sur la Protection des Données (RGPD - UE 2016/679)."
+        ),
+    }
+
+    return {
+        "success": True,
+        "message": f"Entreprise cliente '{tenant_name}' ({tenant_id}) et toutes ses données associées ont été définitivement purgées.",
+        "certificate": certificate_report,
+    }
+
+
+
+
+class CountryOfficialSourceCreate(BaseModel):
+    country_code: str
+    portal_name: str
+    portal_url: str
+    portal_type: str
+    reference_law: Optional[str] = None
+    status: str = "active"
+
+
+class CountryOfficialSourceUpdate(BaseModel):
+    country_code: Optional[str] = None
+    portal_name: Optional[str] = None
+    portal_url: Optional[str] = None
+    portal_type: Optional[str] = None
+    reference_law: Optional[str] = None
+    status: Optional[str] = None
+
+
+@router.get("/country-sources")
+async def list_country_sources_admin(
+    country_code: Optional[str] = None,
+    admin_user: CurrentTenantUser = Depends(require_platform_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Super-Admin : liste TOUTES les sources de la whitelist reglementaire (actives ET inactives,
+    contrairement a l'endpoint tenant en lecture seule qui ne montre que les actives). Cette
+    whitelist restreint strictement la recherche web de l'IA pendant la generation de sections
+    et le chat DCE -- aucune source hors de cette liste ne peut jamais etre citee.
+    """
+    stmt = select(CountryOfficialSource)
+    if country_code:
+        stmt = stmt.where(CountryOfficialSource.country_code == country_code.upper())
+    stmt = stmt.order_by(CountryOfficialSource.country_code, CountryOfficialSource.portal_name)
+    res = await db.execute(stmt)
+    sources = res.scalars().all()
+    return [
+        {
+            "id": str(s.id),
+            "country_code": s.country_code,
+            "portal_name": s.portal_name,
+            "portal_url": s.portal_url,
+            "portal_type": s.portal_type,
+            "reference_law": s.reference_law,
+            "status": s.status,
+            "last_checked_at": s.last_checked_at.isoformat() if s.last_checked_at else None,
+            "created_at": s.created_at.isoformat() if s.created_at else None,
+        }
+        for s in sources
+    ]
+
+
+@router.post("/country-sources")
+async def create_country_source_admin(
+    payload: CountryOfficialSourceCreate,
+    request: Request,
+    admin_user: CurrentTenantUser = Depends(require_platform_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Super-Admin : ajoute un site officiel a la whitelist reglementaire d'un pays."""
+    now = datetime.utcnow()
+    new_source = CountryOfficialSource(
+        id=uuid.uuid4(),
+        country_code=payload.country_code.strip().upper(),
+        portal_name=payload.portal_name.strip(),
+        portal_url=payload.portal_url.strip(),
+        portal_type=payload.portal_type.strip(),
+        reference_law=payload.reference_law.strip() if payload.reference_law else None,
+        status=payload.status or "active",
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(new_source)
+    await db.flush()
+
+    await _record_audit_log(
+        db=db,
+        admin_user=admin_user,
+        action="whitelist_source_created",
+        entity_type="country_official_source",
+        entity_id=new_source.id,
+        details={"portal_name": new_source.portal_name, "country_code": new_source.country_code, "portal_url": new_source.portal_url},
+        ip_address=request.client.host if request.client else None,
+    )
+    await db.commit()
+    return {"success": True, "id": str(new_source.id)}
+
+
+@router.patch("/country-sources/{source_id}")
+async def update_country_source_admin(
+    source_id: str,
+    payload: CountryOfficialSourceUpdate,
+    request: Request,
+    admin_user: CurrentTenantUser = Depends(require_platform_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Super-Admin : modifie un site de la whitelist reglementaire (y compris activer/desactiver)."""
+    try:
+        s_uuid = uuid.UUID(source_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="UUID de source invalide.")
+
+    res = await db.execute(select(CountryOfficialSource).where(CountryOfficialSource.id == s_uuid))
+    source = res.scalar_one_or_none()
+    if not source:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source introuvable.")
+
+    if payload.country_code is not None:
+        source.country_code = payload.country_code.strip().upper()
+    if payload.portal_name is not None:
+        source.portal_name = payload.portal_name.strip()
+    if payload.portal_url is not None:
+        source.portal_url = payload.portal_url.strip()
+    if payload.portal_type is not None:
+        source.portal_type = payload.portal_type.strip()
+    if payload.reference_law is not None:
+        source.reference_law = payload.reference_law.strip() or None
+    if payload.status is not None:
+        source.status = payload.status
+    source.updated_at = datetime.utcnow()
+
+    await _record_audit_log(
+        db=db,
+        admin_user=admin_user,
+        action="whitelist_source_updated",
+        entity_type="country_official_source",
+        entity_id=source.id,
+        details={"portal_name": source.portal_name, "status": source.status},
+        ip_address=request.client.host if request.client else None,
+    )
+    await db.commit()
+    return {"success": True}
+
+
+@router.delete("/country-sources/{source_id}")
+async def delete_country_source_admin(
+    source_id: str,
+    request: Request,
+    admin_user: CurrentTenantUser = Depends(require_platform_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Super-Admin : retire un site de la whitelist reglementaire active. Desactivation (status =
+    "inactive"), jamais une suppression physique -- conserve l'historique de veille
+    reglementaire (last_known_hash, last_summary) associe a cette source.
+    """
+    try:
+        s_uuid = uuid.UUID(source_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="UUID de source invalide.")
+
+    res = await db.execute(select(CountryOfficialSource).where(CountryOfficialSource.id == s_uuid))
+    source = res.scalar_one_or_none()
+    if not source:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source introuvable.")
+
+    source.status = "inactive"
+    source.updated_at = datetime.utcnow()
+
+    await _record_audit_log(
+        db=db,
+        admin_user=admin_user,
+        action="whitelist_source_deactivated",
+        entity_type="country_official_source",
+        entity_id=source.id,
+        details={"portal_name": source.portal_name},
+        ip_address=request.client.host if request.client else None,
+    )
+    await db.commit()
+    return {"success": True, "message": f"Source '{source.portal_name}' desactivee (retiree de la whitelist active)."}

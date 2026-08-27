@@ -60,10 +60,9 @@ async def upload_dce_document(
         filename=filename,
         doc_type=doc_type,
         s3_key=s3_key,
-        pages_count=0,
         file_size_bytes=len(file_bytes),
-        status="processing",
-        metadata_json={"task": "parse_dce_task"},
+        ocr_status="processing",
+        raw_metadata={"task": "parse_dce_task"},
         created_at=datetime.utcnow(),
     )
     db.add(dce_doc)
@@ -378,6 +377,8 @@ async def evaluate_tender_go_no_go(
         factors=analysis.factors,
         mandatory_criteria_met=bool(analysis.mandatory_criteria_met),
         blocking_issues=analysis.blocking_issues or [],
+        completion_rate=float(analysis.completion_rate) if analysis.completion_rate is not None else None,
+        has_sufficient_data=bool(analysis.has_sufficient_data),
         evaluated_by=str(analysis.evaluated_by) if analysis.evaluated_by else None,
         created_at=analysis.created_at,
         updated_at=analysis.updated_at,
@@ -408,10 +409,19 @@ async def get_tender_go_no_go(
     analysis = result.scalar_one_or_none()
 
     if not analysis:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Aucune analyse Go/No-Go calculée pour ce projet. Lancez l'analyse via POST /dce/go-no-go/{project_id}",
-        )
+        try:
+            u_uuid = uuid.UUID(current_user.user_id) if current_user.user_id else None
+            analysis = await go_no_go_service.evaluate_project(
+                db=db,
+                tenant_id=t_uuid,
+                project_id=p_uuid,
+                user_id=u_uuid,
+            )
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Erreur lors du calcul Go/No-Go : {str(e)}",
+            )
 
     return GoNoGoAnalysisOut(
         id=str(analysis.id),
@@ -423,6 +433,8 @@ async def get_tender_go_no_go(
         factors=analysis.factors,
         mandatory_criteria_met=bool(analysis.mandatory_criteria_met),
         blocking_issues=analysis.blocking_issues or [],
+        completion_rate=float(analysis.completion_rate) if analysis.completion_rate is not None else None,
+        has_sufficient_data=bool(analysis.has_sufficient_data),
         evaluated_by=str(analysis.evaluated_by) if analysis.evaluated_by else None,
         created_at=analysis.created_at,
         updated_at=analysis.updated_at,

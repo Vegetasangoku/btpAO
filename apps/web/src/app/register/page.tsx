@@ -24,7 +24,7 @@ const PLANS = [
     name: 'Starter BTP',
     price: '49 €',
     period: '/ mois',
-    features: ['3 DCE / mois', 'Génération RAG IA', 'Export Word (.docx)', '1 utilisateur'],
+    features: ['3 DCE / mois', 'Rédaction assistée par IA', 'Export Word (.docx)', '1 utilisateur'],
   },
   {
     id: 'pro',
@@ -32,14 +32,14 @@ const PLANS = [
     price: '199 €',
     period: '/ mois',
     popular: true,
-    features: ['15 DCE / mois', 'Gantt HD 300 DPI', 'Organigrammes', 'Export PDF LibreOffice', '5 utilisateurs'],
+    features: ['15 DCE / mois', 'Plannings Gantt HD & Organigrammes', 'Export PDF & Word', '5 utilisateurs'],
   },
   {
     id: 'enterprise',
     name: 'Entreprise Major',
     price: '499 €',
     period: '/ mois',
-    features: ['DCE illimités', 'OCR Azure dédié', 'Multi-agences & filiales', 'Support 24/7 BTP'],
+    features: ['DCE illimités', 'Analyse documentaire haute précision', 'Multi-agences & filiales', 'Support prioritaire 24/7'],
   },
 ];
 
@@ -51,6 +51,7 @@ export default function RegisterPage() {
     siret: '',
     email: '',
     password: '',
+    confirmPassword: '',
     plan: 'pro',
   });
   const [loading, setLoading] = useState(false);
@@ -59,8 +60,18 @@ export default function RegisterPage() {
 
   async function handleRegister(e: React.FormEvent) {
     e.preventDefault();
-    if (!formData.email || !formData.password || !formData.companyName) {
+    if (!formData.email || !formData.password || !formData.confirmPassword || !formData.companyName) {
       setError('Veuillez remplir tous les champs obligatoires.');
+      return;
+    }
+
+    if (formData.password.length < 8) {
+      setError('Le mot de passe doit comporter au moins 8 caractères.');
+      return;
+    }
+
+    if (formData.password !== formData.confirmPassword) {
+      setError('Les deux mots de passe ne correspondent pas.');
       return;
     }
 
@@ -70,13 +81,13 @@ export default function RegisterPage() {
     try {
       // 1. Supabase Auth signup with custom metadata
       const { data, error: authError } = await supabase.auth.signUp({
-        email: formData.email,
+        email: formData.email.trim(),
         password: formData.password,
         options: {
           data: {
-            full_name: formData.fullName,
-            company_name: formData.companyName,
-            siret: formData.siret,
+            full_name: formData.fullName.trim(),
+            company_name: formData.companyName.trim(),
+            siret: formData.siret.trim(),
             plan: formData.plan,
             role: 'owner',
           },
@@ -89,12 +100,52 @@ export default function RegisterPage() {
         throw authError;
       }
 
+      if (data?.user && (!data.user.identities || data.user.identities.length === 0)) {
+        throw new Error('Cette adresse e-mail est déjà enregistrée. Veuillez vous connecter.');
+      }
+
       setSuccess(true);
-      setTimeout(() => {
-        router.push('/projects');
-      }, 1500);
+
+      // Si Supabase a la confirmation d'email activée, data.session sera null.
+      // Dans ce cas on ne redirige pas vers /projects (l'user n'a pas de session active).
+      // On laisse le message de succès visible et on redirige seulement si session active.
+      if (data?.session) {
+        setTimeout(() => {
+          router.push('/projects');
+        }, 1500);
+      }
+      // Sinon : le message "check your email" reste affiché (setSuccess(true) suffit)
     } catch (err: any) {
-      setError(err?.message || "Erreur lors de la création de l'organisation.");
+      console.error('Signup error:', err);
+      let message = "Erreur lors de la création de l'organisation.";
+      if (typeof err === 'string' && err !== '{}') {
+        message = err;
+      } else if (err?.message && typeof err.message === 'string' && err.message !== '{}') {
+        message = err.message;
+      } else if (err?.error_description && typeof err.error_description === 'string') {
+        message = err.error_description;
+      } else if (err?.error && typeof err.error === 'string') {
+        message = err.error;
+      } else if (err?.msg && typeof err.msg === 'string') {
+        message = err.msg;
+      } else if (err?.statusText && typeof err.statusText === 'string') {
+        message = err.statusText;
+      }
+
+      // Friendly translations
+      if (message.includes('User already registered') || message.includes('already registered')) {
+        message = 'Cette adresse e-mail est déjà associée à un compte. Veuillez vous connecter.';
+      } else if (message.includes('Password should be at least')) {
+        message = 'Le mot de passe doit comporter au moins 8 caractères.';
+      } else if (message.includes('rate limit') || message.includes('security purposes')) {
+        message = 'Trop de tentatives. Veuillez patienter quelques instants avant de réessayer.';
+      } else if (message.includes('Database error saving new user')) {
+        message = "Erreur lors de l'enregistrement de l'entreprise. Veuillez vérifier les informations saisies.";
+      } else if (message === '{}' || !message.trim()) {
+        message = "Erreur lors de la création du compte. Veuillez vérifier vos informations ou vous connecter.";
+      }
+
+      setError(message);
     } finally {
       setLoading(false);
     }
@@ -109,13 +160,13 @@ export default function RegisterPage() {
       <div className="sm:mx-auto sm:w-full sm:max-w-2xl text-center space-y-3 relative z-10">
         <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-sky-500/10 border border-sky-500/30 text-sky-400 text-xs font-semibold">
           <Sparkles className="w-3.5 h-3.5" />
-          <span>Inscription Espace Entreprise Multi-Tenant</span>
+          <span>Création de votre Espace Entreprise</span>
         </div>
         <h1 className="text-3xl font-black text-white tracking-tight">
           Créez votre compte <span className="gradient-text-btp">btpAO</span>
         </h1>
         <p className="text-sm text-slate-400">
-          Chaque entreprise dispose d'un espace sécurisé avec isolation totale des données (PostgreSQL RLS).
+          Votre espace dédié et vos données d'entreprise sont 100% confidentiels et sécurisés.
         </p>
       </div>
 
@@ -133,7 +184,11 @@ export default function RegisterPage() {
               <CheckCircle2 className="w-12 h-12 text-emerald-400 mx-auto" />
               <h2 className="text-base font-bold text-emerald-300">Organisation créée avec succès !</h2>
               <p className="text-xs text-slate-300">
-                Redirection automatique vers votre espace de travail <strong>{formData.companyName}</strong>...
+                Votre espace entreprise <strong>{formData.companyName}</strong> est prêt.
+              </p>
+              <p className="text-xs text-sky-300 font-semibold">
+                📧 Un e-mail de confirmation vous a été envoyé à <strong>{formData.email}</strong>.<br />
+                Cliquez sur le lien pour activer votre compte et accéder à votre espace.
               </p>
             </div>
           ) : (
@@ -205,21 +260,41 @@ export default function RegisterPage() {
                 </div>
               </div>
 
-              <div>
-                <label className="block text-xs font-semibold text-slate-300 mb-1.5">
-                  Mot de passe (8 caractères minimum) *
-                </label>
-                <div className="relative">
-                  <Lock className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
-                  <input
-                    type="password"
-                    required
-                    minLength={8}
-                    placeholder="••••••••••••"
-                    value={formData.password}
-                    onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-                    className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-slate-800 border border-slate-700 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-sky-500 transition-colors"
-                  />
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+                    Mot de passe (8 caractères min.) *
+                  </label>
+                  <div className="relative">
+                    <Lock className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+                    <input
+                      type="password"
+                      required
+                      minLength={8}
+                      placeholder="••••••••••••"
+                      value={formData.password}
+                      onChange={(e) => setFormData({ ...formData, password: e.target.value })}
+                      className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-slate-800 border border-slate-700 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-sky-500 transition-colors"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+                    Confirmer le mot de passe *
+                  </label>
+                  <div className="relative">
+                    <Lock className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+                    <input
+                      type="password"
+                      required
+                      minLength={8}
+                      placeholder="••••••••••••"
+                      value={formData.confirmPassword}
+                      onChange={(e) => setFormData({ ...formData, confirmPassword: e.target.value })}
+                      className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-slate-800 border border-slate-700 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-sky-500 transition-colors"
+                    />
+                  </div>
                 </div>
               </div>
 
@@ -289,7 +364,7 @@ export default function RegisterPage() {
         {/* Security badge */}
         <div className="mt-6 flex items-center justify-center gap-2 text-xs text-slate-500">
           <ShieldCheck className="w-4 h-4 text-emerald-400" />
-          <span>Données BTP hébergées en France/UE avec chiffrement AES-256 & RLS</span>
+          <span>Données BTP hébergées en France/UE • Confidentialité et sécurité maximale garanties</span>
         </div>
       </div>
     </div>

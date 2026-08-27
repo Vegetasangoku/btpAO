@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { createServerClient } from '@supabase/ssr';
 import { cookies } from 'next/headers';
 
-const PYTHON_API = 'http://localhost:8000/api';
+const PYTHON_API = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000').replace(/\/$/, '') + '/api';
 
 export async function POST(request: Request) {
   try {
@@ -27,13 +27,15 @@ export async function POST(request: Request) {
     const { data: { session } } = await supabase.auth.getSession();
     const authToken = session?.access_token;
 
-    // 2. Resolve tenant_id
-    let targetTenantId: string | null = null;
-    const { data: { user } } = await supabase.auth.getUser();
-    targetTenantId = user?.app_metadata?.tenant_id || user?.user_metadata?.tenant_id;
+    // 2. Resolve tenant_id strictly from user session
+    const { data: { user }, error: userErr } = await supabase.auth.getUser();
+    if (userErr || !user) {
+      return NextResponse.json({ success: false, error: 'Session requise pour générer une offre.' }, { status: 401 });
+    }
+
+    const targetTenantId = user.app_metadata?.tenant_id || user.user_metadata?.tenant_id;
     if (!targetTenantId) {
-      const { data: firstTenant } = await supabase.from('tenants').select('id').limit(1).single();
-      targetTenantId = firstTenant?.id || null;
+      return NextResponse.json({ success: false, error: 'Aucun tenant associé à la session utilisateur.' }, { status: 403 });
     }
 
     // 3. Load real system prompt memory from Supabase
@@ -53,16 +55,16 @@ export async function POST(request: Request) {
       }
     }
 
-    // 4. Count real RAG documents
+    // 4. Count real RAG documents from company_assets
     let ragDocsCount = 0;
     if (targetTenantId) {
       const { count } = await supabase
-        .from('tenant_documents')
+        .from('company_assets')
         .select('*', { count: 'exact', head: true })
-        .eq('tenant_id', targetTenantId)
-        .eq('status', 'ready');
+        .eq('tenant_id', targetTenantId);
       ragDocsCount = count || 0;
     }
+
 
     const title = projectTitle?.trim() || 'Nouveau Projet BTP';
     const client = clientName?.trim() || 'Maître d\'Ouvrage';

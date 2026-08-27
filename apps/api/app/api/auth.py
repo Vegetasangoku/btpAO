@@ -146,24 +146,16 @@ async def request_password_reset(
         # 4. Construct URL and send branded email
         frontend_url = os.getenv("NEXT_PUBLIC_APP_URL", "http://localhost:3000")
         reset_url = f"{frontend_url}/reset-password?token={raw_token}"
-        reset_url_dev = reset_url
-
         send_password_reset_email(
             to_email=user.email,
             reset_url=reset_url,
             user_name=user.full_name or user.email.split("@")[0]
         )
 
-    response_data = {
+    return {
         "success": True,
         "message": "Si cette adresse est associée à un compte, un e-mail de réinitialisation vient d'être envoyé.",
     }
-    
-    # In development/test mode, expose dev reset URL for easy testing
-    if settings.DEBUG or os.getenv("APP_ENV") == "development":
-        response_data["reset_url_dev"] = reset_url_dev
-
-    return response_data
 
 
 @router.post("/verify-reset-token")

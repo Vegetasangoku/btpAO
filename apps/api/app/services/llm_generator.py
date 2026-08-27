@@ -50,7 +50,7 @@ DIRECTIVES DE RÉDACTION STRICTES :
    - Pour les éléments issus de la recherche web externe (normes techniques, guides professionnels, {env_reg}, données acheteur) : cite obligatoirement sous la forme explicite [Source web : Titre de la source — URL].
 4. RÈGLE STRICTE ANTI-HALLUCINATION / TRANSPARENCE :
    - Si une exigence particulière du DCE ou une consigne ne trouve de réponse ni dans les documents internes de l'entreprise ni dans les sources web fiables fournies, NE RIEN INVENTER.
-   - Insère immédiatement un marqueur explicite sous la forme : [Information requise de l'entreprise : Préciser le choix technique ou la référence manquante].
+   - Insère immédiatement un marqueur explicite sous la forme : [Donnée non trouvée / Manquante : Préciser le choix technique ou la référence manquante].
 5. FORMAT DE SORTIE :
    - Le contenu doit être structuré avec des balises HTML riches (<h2>, <h3>, <p>, <ul>, <ol>, <li>, <strong>, <table>, <tr>, <th>, <td>).
    - Fournis également une note de conformité (compliance_score /100) et une justification des points forts vis-à-vis des critères du RC.
@@ -63,6 +63,32 @@ DIRECTIVES ET POSITIONNEMENT SPÉCIFIQUES DE L'ENTREPRISE (PROMPT SYSTÈME PERSO
 """
 
     return base_prompt
+
+
+CONTEXT_LIMITS = {
+    "dce": 8000,
+    "assets": 6000,
+    "apprentissages": 4000,
+    "web": 4000,
+}
+
+
+def bounded_context_join(items: List[str], max_chars: int, section_name: str) -> str:
+    """
+    Joint les éléments de contexte avec vérification et log explicite de troncature.
+    Ne tronque jamais silencieusement.
+    """
+    joined = "\n\n".join([it for it in items if it and it.strip()])
+    if len(joined) > max_chars:
+        print(
+            f"[CONTEXT BUDGET WARNING] Dépassement sur la section '{section_name}' : "
+            f"{len(joined)} caractères (plafond : {max_chars}). Troncature explicite appliquée."
+        )
+        return (
+            joined[:max_chars]
+            + f"\n\n[... Troncature explicite : limite de {max_chars} caractères atteinte pour la section {section_name} ...]"
+        )
+    return joined
 
 
 class LLMGeneratorService:
@@ -86,7 +112,10 @@ class LLMGeneratorService:
         tenant_system_prompt: Optional[str] = None,
         custom_instructions: Optional[str] = None,
         llm_model: Optional[str] = None,
+        api_key: Optional[str] = None,
+        api_base: Optional[str] = None,
     ) -> Dict[str, Any]:
+
         """
         Generates a high-value BTP technical memo section using RAG context + chantier decisions + web enrichment + tenant experience learnings + country regulatory profile + tenant custom system prompt.
         Strictly requires a valid regulatory_profile (No silent fallback).
@@ -104,31 +133,28 @@ class LLMGeneratorService:
 
 
 
-        # Build prompt context
-        dce_context_text = "\n\n".join(
-            [
-                f"--- Extrait DCE ({c.get('section_title', 'Pièce')}, p.{c.get('page_number', 1)}) ---\n{c.get('content', '')}"
-                for c in rag_dce_chunks
-            ]
-        )
-        assets_context_text = "\n\n".join(
-            [
-                f"--- Savoir-faire Entreprise ({a.get('category', 'Asset')}) ---\n{a.get('description', a.get('content', ''))}"
-                for a in rag_company_assets
-            ]
-        )
-        web_context_text = "\n\n".join(
-            [
-                f"--- Source Web ({w.get('title', 'Web')}) ---\nURL: {w.get('url', '')}\nExtrait: {w.get('snippet', '')}"
-                for w in web_sources
-            ]
-        )
-        learnings_context_text = "\n".join(
-            [
-                f"- [Enseignement AO antérieur ({l.get('category', 'général')})] {l.get('title', '')} : {l.get('insight', '')} => Directive : {l.get('directive', '')}"
-                for l in learnings_list
-            ]
-        )
+        # Build prompt context with strict section character budgets and explicit logging
+        dce_items = [
+            f"--- Extrait DCE ({c.get('section_title', 'Pièce')}, p.{c.get('page_number', 1)}) ---\n{c.get('content', '')}"
+            for c in rag_dce_chunks
+        ]
+        assets_items = [
+            f"--- Savoir-faire Entreprise ({a.get('category', 'Asset')}) ---\n{a.get('description', a.get('content', ''))}"
+            for a in rag_company_assets
+        ]
+        web_items = [
+            f"--- Source Web ({w.get('title', 'Web')}) ---\nURL: {w.get('url', '')}\nExtrait: {w.get('snippet', '')}"
+            for w in web_sources
+        ]
+        learnings_items = [
+            f"- [Enseignement AO antérieur ({l.get('category', 'général')})] {l.get('title', '')} : {l.get('insight', '')} => Directive : {l.get('directive', '')}"
+            for l in learnings_list
+        ]
+
+        dce_context_text = bounded_context_join(dce_items, CONTEXT_LIMITS["dce"], "DCE")
+        assets_context_text = bounded_context_join(assets_items, CONTEXT_LIMITS["assets"], "Company Assets")
+        web_context_text = bounded_context_join(web_items, CONTEXT_LIMITS["web"], "Web Sources")
+        learnings_context_text = bounded_context_join(learnings_items, CONTEXT_LIMITS["apprentissages"], "Apprentissages")
 
         user_prompt = f"""
 PROJET : {project_title} (Réf : {reference_code})
@@ -159,7 +185,7 @@ SECTION À RÉDIGER : {section_title} (Clé : {section_key})
 7. SOURCES WEB TECHNIQUES & RÉGLEMENTAIRES (SERPER) :
 {web_context_text or "Aucune recherche web externe nécessaire."}
 
-8. CONSIGNES PARTICULIÈRES :
+8. CONSIGNES PARTICULIÈRES (PRIORITAIRES — SURCHARGENT LES SECTIONS 1 À 7 CI-DESSUS EN CAS DE CONFLIT) :
 {custom_instructions or "Aucune instruction supplémentaire."}
 
 
@@ -180,24 +206,32 @@ Génère une réponse au format JSON strict avec la structure suivante :
         # 1. Try LiteLLM call with dynamic country system prompt and tenant customization
         system_prompt = build_btp_system_prompt(reg, tenant_system_prompt=tenant_system_prompt)
 
-        if settings.ANTHROPIC_API_KEY or settings.MISTRAL_API_KEY or settings.OPENAI_API_KEY:
+        has_api_key = bool(api_key or settings.ANTHROPIC_API_KEY or settings.MISTRAL_API_KEY or settings.OPENAI_API_KEY)
+        if has_api_key:
             try:
-                response = litellm.completion(
-                    model=target_model,
-                    messages=[
+                kwargs: Dict[str, Any] = {
+                    "model": target_model,
+                    "messages": [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt},
                     ],
-                    response_format={"type": "json_object"},
-                    temperature=0.3,
-                    max_tokens=2500,
-                )
+                    "response_format": {"type": "json_object"},
+                    "temperature": 0.3,
+                    "max_tokens": 2500,
+                }
+                if api_key:
+                    kwargs["api_key"] = api_key
+                if api_base:
+                    kwargs["api_base"] = api_base
+
+                response = litellm.completion(**kwargs)
                 raw_content = response.choices[0].message.content
                 parsed = json.loads(raw_content)
                 parsed["model_used"] = target_model
                 return parsed
             except Exception as e:
                 print(f"[LLMGenerator] LiteLLM call notice with model '{target_model}': {e}, falling back to intelligent BTP template engine.")
+
 
         # 2. Resilient BTP Domain Template Engine with Citations, Learnings & Anti-Hallucination
         res = self._generate_specialized_btp_section(
@@ -276,7 +310,7 @@ Génère une réponse au format JSON strict avec la structure suivante :
         # Missing data / Anti-hallucination check
         missing_data_alert = ""
         if (custom_instructions and "introuvable" in custom_instructions.lower()) or (not dce_chunks and not web_sources and not rag_company_assets):
-            missing_data_alert = "<p style='color: #b91c1c; background: #fef2f2; padding: 8px; border-left: 4px solid #ef4444;'><strong>[Information requise de l'entreprise :</strong> Les données relatives à cette exigence spécifique ne figurent ni dans le DCE ni dans les sources web. Préciser le choix technique requis.]</p>"
+            missing_data_alert = "<p style='color: #b91c1c; background: #fef2f2; padding: 8px; border-left: 4px solid #ef4444;'><strong>[Donnée non trouvée / Manquante :</strong> Les données relatives à cette exigence spécifique ne figurent ni dans le corpus client (RAG) ni dans les sources web officielles autorisées. Préciser le choix ou l'information requise.]</p>"
 
         if section_key == "moyens_humains":
             cadres_html = "".join([
@@ -328,14 +362,14 @@ Génère une réponse au format JSON strict avec la structure suivante :
             score = 97.0
             notes = "Chemin critique validé avec citations techniques."
 
-        elif section_key == "qse_environnement":
+        elif section_key in ("qse_environnement", "rse_environnement"):
             html = f"""
-            <h2>4. Démarche Environnementale (RSE) & Gestion des Déchets</h2>
+            <h2>{section_title}</h2>
             <p>Notre démarche s'inscrit dans les plus hauts standards de la construction durable :</p>
             <p><strong>Engagements environnementaux :</strong> {rse}. [Source : Entreprise - Charte RSE]</p>
             {internal_cite}
             <p><strong>Plan de gestion et valorisation des déchets :</strong> {dechets}.</p>
-            <h3>4.1 Traçabilité des déchets et filières agréées</h3>
+            <h3>Traçabilité des déchets et filières agréées</h3>
             <p>Chaque rotation de benne fait l'objet d'un suivi strict sous le régime : <strong>{reg.get('waste_tracking_regime', 'BSD dématérialisé')}</strong>.</p>
             {missing_data_alert}
             {learnings_html}
@@ -344,9 +378,9 @@ Génère une réponse au format JSON strict avec la structure suivante :
             score = 99.0
             notes = "Taux de valorisation 88%, béton bas carbone et sources web intégrées."
 
-        else:  # securite_ppsps
+        elif section_key == "securite_ppsps":
             html = f"""
-            <h2>5. Sécurité, Santé et Assurance Qualité</h2>
+            <h2>{section_title}</h2>
             <p>La politique Zéro Accident constitue l'engagement fondamental de notre encadrement sous le régime : <strong>{reg.get('safety_plan_regime')}</strong>.</p>
             <p><strong>Mesures de sécurité opérationnelles :</strong> {securite}.</p>
             {internal_cite}
@@ -357,6 +391,23 @@ Génère une réponse au format JSON strict avec la structure suivante :
 
             score = 98.0
             notes = "Procédure de sécurité complète avec PAQ et causeries hebdomadaires."
+
+        else:
+            # Gabarit générique mais honnête pour toute clé sans template dédié
+            # (presentation_entreprise, references_similaires, qualite_controle,
+            # sous_traitance, ou toute clé future). N'invente JAMAIS un contenu hors-sujet :
+            # utilise le vrai section_title au lieu d'un intitulé codé en dur. Ce chemin ne
+            # s'exécute que si l'appel LLM réel (Claude/Mistral/OpenAI) a échoué au-dessus.
+            html = f"""
+            <h2>{section_title}</h2>
+            <p>Cette section est rédigée pour le projet <strong>{project_title}</strong>, conformément au cadre réglementaire applicable ({reg.get('technical_standards_reference', 'normes en vigueur')}).</p>
+            {internal_cite}
+            {missing_data_alert or "<p style='color: #b91c1c; background: #fef2f2; padding: 8px; border-left: 4px solid #ef4444;'><strong>[Donnée non trouvée / Manquante :</strong> le moteur de génération de secours ne dispose pas encore d'un gabarit dédié pour cette section précise — merci de relire et compléter ce contenu manuellement, ou de relancer la génération (un nouvel essai peut aboutir sur un appel IA réel).]</p>"}
+            {learnings_html}
+            {web_cites_html}
+            """
+            score = 75.0
+            notes = "Contenu généré par le moteur de secours générique — relecture et complément manuel recommandés."
 
         return {
             "title": section_title,

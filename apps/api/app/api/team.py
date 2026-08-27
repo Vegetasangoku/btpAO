@@ -2,6 +2,7 @@
 Team & User Management Endpoints with Multi-User Support and RBAC (owner, member, read_only).
 Strictly isolated by tenant_id via SQLAlchemy 2 Async and Postgres RLS.
 """
+import os
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -16,7 +17,7 @@ from app.core.security import (
     require_tenant_owner,
 )
 
-from app.models.entities import TenantInvitation, User
+from app.models.entities import Tenant, TenantInvitation, User
 from app.models.schemas import (
     TeamInvitationAccept,
     TeamInvitationCreate,
@@ -24,6 +25,7 @@ from app.models.schemas import (
     TeamMemberOut,
     TeamMemberUpdateRole,
 )
+from app.services.email_service import send_team_invitation_email
 
 router = APIRouter(prefix="/team", tags=["Team & User Management"])
 
@@ -98,7 +100,19 @@ async def invite_team_member(
     for prev in prev_res.scalars().all():
         prev.status = "revoked"
 
-    # 3. Create new secure invitation
+    # 3. Fetch tenant and inviter name for rich email template
+    tenant_res = await db.execute(select(Tenant).where(Tenant.id == t_uuid))
+    tenant = tenant_res.scalar_one_or_none()
+    tenant_name = tenant.name if tenant else "Votre Entreprise"
+
+    inviter_name = None
+    if u_uuid:
+        inviter_res = await db.execute(select(User).where(User.id == u_uuid))
+        inviter = inviter_res.scalar_one_or_none()
+        if inviter:
+            inviter_name = inviter.full_name or inviter.email
+
+    # 4. Create new secure invitation
     token = secrets.token_urlsafe(32)
     now = datetime.now(timezone.utc)
     expires = now + timedelta(days=7)
@@ -117,6 +131,17 @@ async def invite_team_member(
     )
     db.add(invitation)
     await db.flush()
+
+    # 5. Send real transactional invitation email
+    base_web_url = os.getenv("NEXT_PUBLIC_APP_URL", os.getenv("FRONTEND_URL", "http://localhost:3000")).rstrip('/')
+    invitation_url = f"{base_web_url}/register?invitation_token={token}"
+    send_team_invitation_email(
+        to_email=email_clean,
+        invitation_url=invitation_url,
+        tenant_name=tenant_name,
+        role=role_clean,
+        invited_by_name=inviter_name,
+    )
 
     return TeamInvitationOut(
         id=str(invitation.id),
@@ -223,9 +248,33 @@ async def accept_invitation(
     u_res = await db.execute(u_stmt)
     user = u_res.scalar_one_or_none()
 
+    # Sync with auth.users if available (protected by savepoint so missing table or RLS does not abort tx)
+    auth_uid = None
+    try:
+        async with db.begin_nested():
+            auth_res = await db.execute(
+                text("SELECT id FROM auth.users WHERE lower(email) = lower(:email)"),
+                {"email": invitation.email},
+            )
+            auth_row = auth_res.fetchone()
+            if auth_row and auth_row[0]:
+                auth_uid = auth_row[0]
+                await db.execute(
+                    text("""
+                        UPDATE auth.users
+                        SET raw_app_meta_data = COALESCE(raw_app_meta_data, '{}'::jsonb) || 
+                            jsonb_build_object('tenant_id', :tenant_id, 'role', :role)
+                        WHERE id = :auth_uid
+                    """),
+                    {"tenant_id": str(invitation.tenant_id), "role": invitation.role, "auth_uid": auth_uid},
+                )
+    except Exception:
+        auth_uid = None
+
+
     if not user:
         user = User(
-            id=uuid.uuid4(),
+            id=auth_uid or uuid.uuid4(),
             tenant_id=invitation.tenant_id,
             email=invitation.email,
             full_name=payload.full_name or invitation.email.split("@")[0].capitalize(),
@@ -253,6 +302,7 @@ async def accept_invitation(
         avatar_url=user.avatar_url,
         created_at=user.created_at,
     )
+
 
 
 

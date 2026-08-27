@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 from jose import jwt
 from app.core.config import settings
 from app.main import app
+from app.models.entities import Tenant, User, Project, DCEEmbedding, CompanyAsset, DCEDocument
 
 JWT_SECRET = settings.SUPABASE_JWT_SECRET or settings.SECRET_KEY
 ALGORITHM = "HS256"
@@ -39,69 +40,92 @@ def create_token(user_id: str, tenant_id: str, role: str = "member") -> str:
     return jwt.encode(claims, JWT_SECRET, algorithm=ALGORITHM)
 
 
+import asyncio
+from app.core.db import AsyncSessionLocal
+from sqlalchemy import text
+
+
 @pytest.fixture(autouse=True)
 def setup_ask_assistant_test_data():
-    conn = psycopg2.connect(dbname="postgres")
-    conn.autocommit = True
-    cur = conn.cursor()
+    async def _setup():
+        async with AsyncSessionLocal() as db:
+            await db.execute(text("SET ROLE postgres;"))
+            
+            # 1. Tenants
+            t_a = Tenant(id=uuid.UUID(TENANT_A_ID), name="Groupe MEA BTP", slug="groupe-mea-ask", plan="enterprise", country_code="FR")
+            t_b = Tenant(id=uuid.UUID(TENANT_B_ID), name="Autre Entreprise", slug="autre-btp-ask", plan="pro", country_code="FR")
+            db.add_all([t_a, t_b])
+            await db.flush()
 
-    try:
-        cur.execute("RESET ROLE;")
-        # 1. Tenants
-        cur.execute("""
-            INSERT INTO public.tenants (id, name, slug, plan, country_code)
-            VALUES 
-                (%s, 'Groupe MEA BTP', 'groupe-mea-ask', 'enterprise', 'FR'),
-                (%s, 'Autre Entreprise', 'autre-btp-ask', 'pro', 'FR')
-            ON CONFLICT (id) DO NOTHING;
-        """, (TENANT_A_ID, TENANT_B_ID))
+            # 2. Users
+            u_a = User(id=uuid.UUID(USER_A_ID), tenant_id=uuid.UUID(TENANT_A_ID), email="directeur@mea.fr", full_name="Marc Directeur", role="owner")
+            u_b = User(id=uuid.UUID(USER_B_ID), tenant_id=uuid.UUID(TENANT_B_ID), email="conducteur@autre.fr", full_name="Paul Conducteur", role="owner")
+            db.add_all([u_a, u_b])
+            await db.flush()
 
-        # 2. Users
-        cur.execute("""
-            INSERT INTO public.users (id, tenant_id, email, full_name, role)
-            VALUES 
-                (%s, %s, 'directeur@mea.fr', 'Marc Directeur', 'owner'),
-                (%s, %s, 'conducteur@autre.fr', 'Paul Conducteur', 'owner')
-            ON CONFLICT (id) DO NOTHING;
-        """, (USER_A_ID, TENANT_A_ID, USER_B_ID, TENANT_B_ID))
+            # 3. Project for Tenant A
+            p_a = Project(id=uuid.UUID(PROJ_A_ID), tenant_id=uuid.UUID(TENANT_A_ID), title="Construction Pôle Scolaire HQE", reference_code="AO-2026-HQE", client_name="Mairie de Bordeaux", status="draft")
+            db.add(p_a)
+            await db.flush()
 
-        # 3. Project for Tenant A
-        cur.execute("""
-            INSERT INTO public.projects (id, tenant_id, title, reference_code, client_name, status)
-            VALUES (%s, %s, 'Construction Pôle Scolaire HQE', 'AO-2026-HQE', 'Mairie de Bordeaux', 'draft')
-            ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title;
-        """, (PROJ_A_ID, TENANT_A_ID))
+            doc_id = uuid.uuid4()
+            dce_doc = DCEDocument(
+                id=doc_id,
+                tenant_id=uuid.UUID(TENANT_A_ID),
+                project_id=uuid.UUID(PROJ_A_ID),
+                filename="cctp_scolaire.pdf",
+                s3_key=f"dce/{PROJ_A_ID}/cctp_scolaire.pdf",
+            )
+            db.add(dce_doc)
+            await db.flush()
 
+            # 4. DCE Embeddings for Project A
+            emb1 = DCEEmbedding(
+                id=uuid.uuid4(),
+                tenant_id=uuid.UUID(TENANT_A_ID),
+                project_id=uuid.UUID(PROJ_A_ID),
+                document_id=doc_id,
+                section_title="CCTP Lot 01 - Gros Oeuvre",
+                page_number=18,
+                chunk_index=0,
+                content="Article 4.2 : Pénalités de retard fixées à 1/1000ème du montant HT par jour calendaire. Béton bas carbone CEM III obligatoire.",
+            )
+            emb2 = DCEEmbedding(
+                id=uuid.uuid4(),
+                tenant_id=uuid.UUID(TENANT_A_ID),
+                project_id=uuid.UUID(PROJ_A_ID),
+                document_id=doc_id,
+                section_title="Règlement de Consultation",
+                page_number=7,
+                chunk_index=1,
+                content="Article 6 : Délai global d'exécution de 8 mois calendaires impératifs.",
+            )
+            db.add_all([emb1, emb2])
 
-        # 4. DCE Embeddings for Project A
-        cur.execute("""
-            INSERT INTO public.dce_embeddings (id, tenant_id, project_id, section_title, page_number, content)
-            VALUES 
-                (%s, %s, %s, 'CCTP Lot 01 - Gros Oeuvre', 18, 'Article 4.2 : Pénalités de retard fixées à 1/1000ème du montant HT par jour calendaire. Béton bas carbone CEM III obligatoire.'),
-                (%s, %s, %s, 'Règlement de Consultation', 7, 'Article 6 : Délai global d''exécution de 8 mois calendaires impératifs.')
-            ON CONFLICT (id) DO NOTHING;
-        """, (
-            str(uuid.uuid4()), TENANT_A_ID, PROJ_A_ID,
-            str(uuid.uuid4()), TENANT_A_ID, PROJ_A_ID,
-        ))
+            # 5. Company Asset for Tenant A
+            asset = CompanyAsset(
+                id=uuid.uuid4(),
+                tenant_id=uuid.UUID(TENANT_A_ID),
+                category="qualifications",
+                title="Qualibat 2112 & 2152",
+                description="Qualification Gros Œuvre et Maçonnerie supérieure avec parc propre de 4 grues Potain.",
+            )
+            db.add(asset)
+            await db.commit()
 
-        # 5. Company Asset for Tenant A
-        cur.execute("""
-            INSERT INTO public.company_assets (id, tenant_id, category, title, description)
-            VALUES (%s, %s, 'qualifications', 'Qualibat 2112 & 2152', 'Qualification Gros Œuvre et Maçonnerie supérieure avec parc propre de 4 grues Potain.')
-            ON CONFLICT (id) DO NOTHING;
-        """, (str(uuid.uuid4()), TENANT_A_ID))
+    async def _teardown():
+        async with AsyncSessionLocal() as db:
+            await db.execute(text("SET ROLE postgres;"))
+            await db.execute(text("DELETE FROM public.dce_embeddings WHERE tenant_id = :t_id"), {"t_id": uuid.UUID(TENANT_A_ID)})
+            await db.execute(text("DELETE FROM public.company_assets WHERE tenant_id = :t_id"), {"t_id": uuid.UUID(TENANT_A_ID)})
+            await db.execute(text("DELETE FROM public.projects WHERE id = :p_id"), {"p_id": uuid.UUID(PROJ_A_ID)})
+            await db.execute(text("DELETE FROM public.users WHERE tenant_id IN (:t1, :t2)"), {"t1": uuid.UUID(TENANT_A_ID), "t2": uuid.UUID(TENANT_B_ID)})
+            await db.execute(text("DELETE FROM public.tenants WHERE id IN (:t1, :t2)"), {"t1": uuid.UUID(TENANT_A_ID), "t2": uuid.UUID(TENANT_B_ID)})
+            await db.commit()
 
-        yield
-    finally:
-        cur.execute("RESET ROLE;")
-        cur.execute("DELETE FROM public.dce_embeddings WHERE tenant_id = %s;", (TENANT_A_ID,))
-        cur.execute("DELETE FROM public.company_assets WHERE tenant_id = %s;", (TENANT_A_ID,))
-        cur.execute("DELETE FROM public.projects WHERE id = %s;", (PROJ_A_ID,))
-        cur.execute("DELETE FROM public.users WHERE id IN (%s, %s);", (USER_A_ID, USER_B_ID))
-        cur.execute("DELETE FROM public.tenants WHERE id IN (%s, %s);", (TENANT_A_ID, TENANT_B_ID))
-        cur.close()
-        conn.close()
+    asyncio.run(_setup())
+    yield
+    asyncio.run(_teardown())
 
 
 def test_ask_project_mode_corpus():

@@ -89,6 +89,7 @@ class ProjectCreate(BaseModel):
     scoring_notes: Dict[str, Any] = Field(
         default_factory=lambda: {"technical_weight": 60, "price_weight": 40}
     )
+    strategic_directives: Optional[str] = None
 
 
 class ProjectUpdate(BaseModel):
@@ -101,6 +102,18 @@ class ProjectUpdate(BaseModel):
     budget_estimate: Optional[float] = None
     submission_deadline: Optional[datetime] = None
     scoring_notes: Optional[Dict[str, Any]] = None
+    strategic_directives: Optional[str] = None
+
+
+class GoNoGoSummaryOut(BaseModel):
+    id: Optional[str] = None
+    recommendation: str  # "GO", "RESERVES", "NO_GO"
+    score: float
+    summary: str
+    mandatory_criteria_met: bool = True
+    blocking_issues: List[str] = Field(default_factory=list)
+    completion_rate: Optional[float] = None
+    has_sufficient_data: bool = True
 
 
 class ProjectOut(BaseModel):
@@ -115,9 +128,11 @@ class ProjectOut(BaseModel):
     budget_estimate: Optional[float]
     submission_deadline: Optional[datetime]
     scoring_notes: Dict[str, Any]
+    strategic_directives: Optional[str] = None
     outcome_status: str = "pending"
     buyer_feedback: Dict[str, Any] = Field(default_factory=dict)
     outcome_recorded_at: Optional[datetime] = None
+    go_no_go: Optional[GoNoGoSummaryOut] = None
     created_at: datetime
     updated_at: datetime
 
@@ -144,12 +159,27 @@ class TenantLearningOut(BaseModel):
     project_id: Optional[str] = None
     category: str
     title: str
-    learning_insight: str
-    actionable_directive: str
-    source_outcome: str
-    is_active: bool
+    learning_insight: Optional[str] = ""
+    actionable_directive: Optional[str] = ""
+    section_type: Optional[str] = None
+    learned_content: Optional[str] = None
+    source_diff: Dict[str, Any] = Field(default_factory=dict)
+    source_outcome: str = "manual"
+    is_active: bool = True
     created_at: datetime
     updated_at: datetime
+
+
+class CreateTenantLearningRequest(BaseModel):
+    title: str
+    category: Optional[str] = "methodology"
+    section_type: Optional[str] = None
+    project_id: Optional[str] = None
+    learned_content: str
+    actionable_directive: Optional[str] = None
+    learning_insight: Optional[str] = None
+    source_diff: Optional[Dict[str, Any]] = None
+    source_outcome: Optional[str] = "manual"
 
 
 class TenantLearningUpdate(BaseModel):
@@ -237,6 +267,8 @@ class GoNoGoAnalysisOut(BaseModel):
     factors: List[GoNoGoFactor]
     mandatory_criteria_met: bool
     blocking_issues: List[str] = Field(default_factory=list)
+    completion_rate: Optional[float] = None
+    has_sufficient_data: bool = True
     evaluated_by: Optional[str] = None
     created_at: datetime
     updated_at: datetime
@@ -306,6 +338,7 @@ class GenerateSectionRequest(BaseModel):
     section_key: str = Field(..., example="moyens_humains") # 'moyens_humains', 'moyens_materiels', 'methodologie_phasage', 'qse_environnement', 'securite_ppsps'
     custom_instructions: Optional[str] = None
     target_word_count: int = Field(default=600, ge=200, le=3000)
+    mode: Optional[str] = "standard"  # 'standard', 'prefill_draft'
 
 
 class GeneratedSectionOut(BaseModel):
@@ -321,8 +354,24 @@ class GeneratedSectionOut(BaseModel):
     compliance_score: float = 100.0
     compliance_notes: Optional[str] = None
     status: str
+    prefill_source: List[Dict[str, Any]] = Field(default_factory=list)
+    is_prefilled: bool = False
     locked_for_export: bool = False
     updated_at: datetime
+
+
+class LearningProposal(BaseModel):
+    section_type: str
+    summary: str
+    suggested_content: str
+    diff_percentage: float = 0.0
+
+
+class UpdateSectionResponse(BaseModel):
+    success: bool
+    section: GeneratedSectionOut
+    learning_opportunity: bool = False
+    learning_proposal: Optional[LearningProposal] = None
 
 
 class UpdateSectionContent(BaseModel):
@@ -359,6 +408,38 @@ class GanttGenerationRequest(BaseModel):
     project_title: Optional[str] = "Chantier BTP"
     phases: Optional[List[PhaseChantier]] = None
     start_date: Optional[str] = "2026-10-01"
+
+
+# --- Interactive Gantt tasks (Batch 11, cahier des charges majeur) ---
+class GanttTaskBase(BaseModel):
+    name: str
+    start_date: str = Field(..., example="2026-10-01")
+    end_date: str = Field(..., example="2026-10-08")
+    progress: int = Field(default=0, ge=0, le=100)
+    is_milestone: bool = False
+    milestone_label: Optional[str] = None
+    depends_on: List[str] = Field(default_factory=list)
+
+
+class GanttTaskCreate(GanttTaskBase):
+    pass
+
+
+class GanttTaskUpdate(BaseModel):
+    name: Optional[str] = None
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    progress: Optional[int] = Field(default=None, ge=0, le=100)
+    is_milestone: Optional[bool] = None
+    milestone_label: Optional[str] = None
+    depends_on: Optional[List[str]] = None
+
+
+class GanttTaskOut(GanttTaskBase):
+    id: str
+    project_id: str
+    sequence: int
+    is_critical: bool = False
 
 
 class DiagramGenerationRequest(BaseModel):
@@ -411,6 +492,80 @@ class CompanyAssetOut(BaseModel):
     title: str
     description: Optional[str]
     s3_url: Optional[str]
-    tags: List[str]
-    metadata_json: Dict[str, Any]
+    source_type: str = "manual_upload"
+    collected_at: Optional[datetime] = None
+    validated_by_user: bool = True
+    tags: List[str] = Field(default_factory=list)
+    metadata_json: Dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
+
+
+class KnowledgeWebSourceInput(BaseModel):
+    url: str
+    title: Optional[str] = None
+    category: Optional[str] = "web_source"
+
+
+class KnowledgeUploadResponse(BaseModel):
+    success: bool
+    asset_id: str
+    title: str
+    category: str
+    status: str
+    file_size_bytes: int
+    word_count: int
+    message: str
+
+
+class KnowledgeStatsOut(BaseModel):
+    total_assets: int
+    max_allowed: Optional[int]
+    plan: str
+    category_counts: Dict[str, int]
+
+
+# -----------------------------------------------------------------------------
+# Company Profile Bootstrap & Reference URLs Models
+# -----------------------------------------------------------------------------
+class CompanyBootstrapTriggerRequest(BaseModel):
+    company_name: str
+    siret: Optional[str] = None
+    reference_urls: List[str] = Field(default_factory=list)
+
+
+class CompanyBootstrapRunOut(BaseModel):
+    id: str
+    tenant_id: str
+    status: str
+    triggered_by: Optional[str] = None
+    started_at: datetime
+    completed_at: Optional[datetime] = None
+    sources_found: List[Dict[str, Any]] = Field(default_factory=list)
+    error_message: Optional[str] = None
+    created_at: datetime
+    extracted_assets: List[CompanyAssetOut] = Field(default_factory=list)
+
+
+class CompanyAssetValidationRequest(BaseModel):
+    validated: bool = True
+    title: Optional[str] = None
+    description: Optional[str] = None
+    category: Optional[str] = None
+
+
+class TenantReferenceUrlCreate(BaseModel):
+    url: str
+    label: Optional[str] = None
+
+
+class TenantReferenceUrlOut(BaseModel):
+    id: str
+    tenant_id: str
+    url: str
+    label: Optional[str] = None
+    added_by: Optional[str] = None
+    added_at: datetime
+    last_fetched_at: Optional[datetime] = None
+    status: str = "active"
+
+

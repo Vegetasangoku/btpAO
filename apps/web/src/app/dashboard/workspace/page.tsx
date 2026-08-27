@@ -32,7 +32,6 @@ import {
   Link2,
   X,
   Globe,
-  MessageSquare,
   FolderPlus,
   RefreshCw,
   XCircle,
@@ -44,7 +43,6 @@ import { TiptapEditor } from '@/components/editor/tiptap-editor';
 import { GeneratedSection, Project, GoNoGoAnalysis, ProjectDecisionsForm, DCECriterion } from '@/lib/types';
 import { api } from '@/lib/api';
 import { supabase } from '@/lib/supabase/client';
-import { DCEChatSidebar } from '@/components/chat/dce-chat-sidebar';
 
 function WorkspaceContent() {
   const searchParams = useSearchParams();
@@ -52,7 +50,6 @@ function WorkspaceContent() {
 
   const [activeDeliverable, setActiveDeliverable] = useState<'gonogo' | 'planning' | 'editor' | 'download'>('gonogo');
   const [showNewAOWizard, setShowNewAOWizard] = useState(false);
-  const [showChatSidebar, setShowChatSidebar] = useState(false);
 
   // New AO Form state
   const [aoTitle, setAoTitle] = useState('');
@@ -381,14 +378,6 @@ function WorkspaceContent() {
           </div>
 
           <div className="flex items-center gap-3">
-            <button
-              onClick={() => setShowChatSidebar(true)}
-              className="flex items-center gap-2 px-4 py-3 rounded-2xl bg-slate-800 hover:bg-slate-700 text-sky-400 hover:text-sky-300 border border-slate-700 text-xs font-bold transition-all shadow-lg"
-            >
-              <MessageSquare className="w-4 h-4 text-sky-400" />
-              <span>Assistant DCE & Normes</span>
-            </button>
-
             <button
               onClick={() => setShowNewAOWizard(true)}
               className="flex items-center gap-2 px-5 py-3 rounded-2xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-bold shadow-glow hover:shadow-sky-500/40 transition-all group"
@@ -809,8 +798,9 @@ function WorkspaceContent() {
                 try {
                   const { data: { session } } = await supabase.auth.getSession();
                   const token = session?.access_token;
+                  const apiBase = (process.env.NEXT_PUBLIC_API_URL || '').replace(/\/$/, '');
                   const res = await fetch(
-                    `http://localhost:8000/api/export/stream/${project.id}.docx`,
+                    `${apiBase}/api/export/stream/${project.id}.docx`,
                     { headers: { Authorization: `Bearer ${token}` } }
                   );
                   if (!res.ok) throw new Error(await res.text());
@@ -833,7 +823,22 @@ function WorkspaceContent() {
             </button>
 
             <button
-              onClick={() => alert('Export PDF généré à partir du modèle Word.')}
+              onClick={async () => {
+                try {
+                  const res = await api.exportProject(project.id, { format: 'pdf' });
+                  if (res.pdf_url) {
+                    const a = document.createElement('a');
+                    a.href = res.pdf_url;
+                    a.download = res.filename || `Memoire_Technique_${project.title.replace(/[^a-zA-Z0-9]/g, '_')}.pdf`;
+                    a.target = '_blank';
+                    a.click();
+                  } else {
+                    window.location.href = `/projects/${project.id}/export`;
+                  }
+                } catch (err: any) {
+                  alert('Erreur export PDF : ' + (err.message || 'Erreur inconnue'));
+                }
+              }}
               className="flex flex-col items-center justify-center p-6 rounded-2xl bg-slate-800 hover:bg-slate-700 text-white border border-slate-700 hover:border-slate-600 shadow-xl transition-all group cursor-pointer"
             >
               <Download className="w-8 h-8 mb-2 group-hover:scale-110 transition-transform text-rose-400" />
@@ -851,14 +856,6 @@ function WorkspaceContent() {
 
       {/* NEW AO WIZARD MODAL */}
       {showNewAOWizard && renderWizardModal()}
-
-      {/* CHAT SIDEBAR WITH REAL DCE CONTEXT */}
-      <DCEChatSidebar
-        projectId={project.id}
-        projectTitle={project.title}
-        isOpen={showChatSidebar}
-        onClose={() => setShowChatSidebar(false)}
-      />
 
     </div>
   );

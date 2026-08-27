@@ -3,18 +3,52 @@
 @tailwind utilities;
 
 @layer base {
+  /* LIGHT MODE (DEFAULT) */
   :root {
-    --background: 222.2 84% 4.9%;
+    --background: 210 40% 98%;
+    --foreground: 222.2 47.4% 11.2%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 47.4% 11.2%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 222.2 47.4% 11.2%;
+
+    --primary: 38 92% 50%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 210 40% 96.1%;
+    --secondary-foreground: 222.2 47.4% 11.2%;
+
+    --muted: 210 40% 96.1%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+
+    --accent: 210 40% 96.1%;
+    --accent-foreground: 222.2 47.4% 11.2%;
+
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 214.3 31.8% 91.4%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 38 92% 50%;
+
+    --radius: 0.75rem;
+  }
+
+  /* DARK MODE */
+  .dark {
+    --background: 224 35% 7%;
     --foreground: 210 40% 98%;
 
-    --card: 222.2 84% 7.5%;
+    --card: 222 28% 11%;
     --card-foreground: 210 40% 98%;
 
-    --popover: 222.2 84% 7.5%;
+    --popover: 222 28% 11%;
     --popover-foreground: 210 40% 98%;
 
-    --primary: 199 89% 48%;
-    --primary-foreground: 210 40% 98%;
+    --primary: 38 92% 50%;
+    --primary-foreground: 222.2 47.4% 11.2%;
 
     --secondary: 217.2 32.6% 17.5%;
     --secondary-foreground: 210 40% 98%;
@@ -22,17 +56,15 @@
     --muted: 217.2 32.6% 17.5%;
     --muted-foreground: 215 20.2% 65.1%;
 
-    --accent: 160 84% 39%;
+    --accent: 217.2 32.6% 17.5%;
     --accent-foreground: 210 40% 98%;
 
     --destructive: 0 62.8% 30.6%;
     --destructive-foreground: 210 40% 98%;
 
-    --border: 217.2 32.6% 17.5%;
-    --input: 217.2 32.6% 17.5%;
-    --ring: 199 89% 48%;
-
-    --radius: 0.75rem;
+    --border: 221 28% 17%;
+    --input: 221 28% 17%;
+    --ring: 38 92% 50%;
   }
 }
 
@@ -41,68 +73,66 @@
     @apply border-border;
   }
   body {
-    @apply bg-background text-foreground font-sans antialiased selection:bg-btp-steel selection:text-white;
+    @apply font-sans antialiased;
+  }
+  h1, h2, h3, h4, h5, h6 {
+    @apply font-heading tracking-tight text-slate-900 dark:text-[#F9FAFB];
   }
 }
 
-/* Glassmorphism Classes */
-.glass-panel {
-  background: rgba(15, 23, 42, 0.75);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+/* Custom Scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(156, 163, 175, 0.25);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(156, 163, 175, 0.45);
 }
 
-.glass-panel-hover {
-  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-}
-.glass-panel-hover:hover {
-  background: rgba(15, 23, 42, 0.9);
-  border-color: rgba(2, 132, 199, 0.4);
-  box-shadow: 0 10px 30px -10px rgba(2, 132, 199, 0.2);
-  transform: translateY(-2px);
-}
-
-/* Gradient text */
-.gradient-text-btp {
-  background: linear-gradient(135deg, #38bdf8 0%, #0284c7 50%, #10b981 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-}
-
-/* Tiptap Custom Typography inside Editor */
+/* Tiptap Editor Clean Typography */
 .tiptap {
   outline: none;
   min-height: 420px;
+  font-family: var(--font-ibm-plex), 'IBM Plex Sans', sans-serif;
 }
 
 .tiptap h1 {
-  font-size: 1.75rem;
+  font-family: var(--font-manrope), 'Manrope', sans-serif;
+  font-size: 1.5rem;
   font-weight: 700;
-  color: #38bdf8;
+  color: #F59E0B;
   margin-top: 1.5rem;
   margin-bottom: 0.75rem;
 }
 
 .tiptap h2 {
-  font-size: 1.35rem;
+  font-family: var(--font-manrope), 'Manrope', sans-serif;
+  font-size: 1.25rem;
   font-weight: 600;
-  color: #f1f5f9;
+  color: #F9FAFB;
   margin-top: 1.25rem;
   margin-bottom: 0.5rem;
 }
 
 .tiptap h3 {
-  font-size: 1.15rem;
+  font-family: var(--font-manrope), 'Manrope', sans-serif;
+  font-size: 1.1rem;
   font-weight: 600;
-  color: #94a3b8;
+  color: #9CA3AF;
   margin-top: 1rem;
   margin-bottom: 0.5rem;
 }
 
 .tiptap p {
   line-height: 1.7;
-  color: #cbd5e1;
+  color: #D1D5DB;
   margin-bottom: 0.85rem;
 }
 
@@ -110,47 +140,47 @@
   list-style-type: disc;
   padding-left: 1.5rem;
   margin-bottom: 0.85rem;
-  color: #cbd5e1;
+  color: #D1D5DB;
 }
 
 .tiptap ol {
   list-style-type: decimal;
   padding-left: 1.5rem;
   margin-bottom: 0.85rem;
-  color: #cbd5e1;
+  color: #D1D5DB;
 }
 
 .tiptap table {
   border-collapse: collapse;
   width: 100%;
   margin: 1.25rem 0;
-  border-radius: 0.5rem;
+  border-radius: 8px;
   overflow: hidden;
 }
 
 .tiptap th {
-  background-color: #1e293b;
-  color: #38bdf8;
+  background-color: #131823;
+  color: #F59E0B;
   font-weight: 600;
   padding: 0.75rem 1rem;
-  border: 1px solid #334155;
+  border: 1px solid #1E2638;
   text-align: left;
 }
 
 .tiptap td {
   padding: 0.65rem 1rem;
-  border: 1px solid #334155;
-  color: #e2e8f0;
+  border: 1px solid #1E2638;
+  color: #E5E7EB;
 }
 
 .tiptap tr:nth-child(even) {
-  background-color: rgba(30, 41, 59, 0.4);
+  background-color: rgba(19, 24, 35, 0.5);
 }
 
 .tiptap blockquote {
-  border-left: 4px solid #0284c7;
+  border-left: 3px solid #D97706;
   padding-left: 1rem;
   font-style: italic;
-  color: #94a3b8;
+  color: #9CA3AF;
   margin: 1rem 0;
 }

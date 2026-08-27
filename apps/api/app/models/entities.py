@@ -7,6 +7,7 @@ from datetime import datetime
 from sqlalchemy import (
     Boolean,
     Column,
+    Date,
     DateTime,
     ForeignKey,
     Integer,
@@ -14,7 +15,11 @@ from sqlalchemy import (
     String,
     Text,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
+try:
+    from pgvector.sqlalchemy import Vector
+except ImportError:
+    Vector = None
 from app.core.db import Base
 
 
@@ -39,13 +44,37 @@ class CountryRegulatoryProfile(Base):
 
     country_code = Column(String(2), primary_key=True)
     country_name = Column(Text, nullable=False)
-    technical_standards_reference = Column(Text, nullable=False)
-    environmental_regulation = Column(Text, nullable=False)
-    public_procurement_regime = Column(Text, nullable=False)
-    recognized_qualifications = Column(JSONB, default=list, nullable=False)
-    waste_tracking_regime = Column(Text, nullable=False)
-    safety_plan_regime = Column(Text, nullable=False)
-    is_active = Column(Boolean, nullable=False, default=True)
+    procurement_framework = Column(Text, nullable=True)
+    key_regulations = Column(JSONB, default=list)
+    standard_requirements = Column(JSONB, default=list)
+    mandatory_certifications = Column(JSONB, default=list)
+    currency = Column(Text, default="EUR")
+    tender_document_structure = Column(JSONB, default=dict)
+    is_active = Column(Boolean, default=True, nullable=False)
+    technical_standards_reference = Column(Text, nullable=True)
+    environmental_regulation = Column(Text, nullable=True)
+    public_procurement_regime = Column(Text, nullable=True)
+    recognized_qualifications = Column(JSONB, default=list)
+    waste_tracking_regime = Column(Text, nullable=True)
+    safety_plan_regime = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class CountryOfficialSource(Base):
+    __tablename__ = "country_official_sources"
+    __table_args__ = {"schema": "public"}
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    country_code = Column(String(2), nullable=False, index=True)
+    portal_name = Column(Text, nullable=False)
+    portal_url = Column(Text, nullable=False)
+    portal_type = Column(Text, nullable=False, index=True)
+    reference_law = Column(Text, nullable=True)
+    last_checked_at = Column(DateTime(timezone=True), nullable=True)
+    last_known_hash = Column(Text, nullable=True)
+    last_summary = Column(Text, nullable=True)
+    status = Column(Text, nullable=False, default="active")
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
@@ -98,6 +127,7 @@ class Project(Base):
     budget_estimate = Column(Numeric(15, 2), nullable=True)
     submission_deadline = Column(DateTime(timezone=True), nullable=True)
     scoring_notes = Column(JSONB, default=lambda: {"technical_weight": 60, "price_weight": 40})
+    strategic_directives = Column(Text, nullable=True)
     metadata_json = Column(JSONB, default=dict)
     outcome_status = Column(Text, default="pending", nullable=False)
     buyer_feedback = Column(JSONB, default=dict)
@@ -119,7 +149,33 @@ class TenantLearning(Base):
     learning_insight = Column(Text, nullable=False)
     actionable_directive = Column(Text, nullable=False)
     source_outcome = Column(Text, nullable=False, default="lost")
+    section_type = Column(Text, nullable=True)
+    learned_content = Column(Text, nullable=True)
+    source_diff = Column(JSONB, default=dict)
     is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class ProjectGanttTask(Base):
+    """
+    Interactive Gantt task (Batch 11, cahier des charges majeur). Separate from
+    ProjectDecision.form_data['phasage_travaux'] -- see migration 00026 for why the
+    two are kept apart rather than merged.
+    """
+    __tablename__ = "project_gantt_tasks"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    name = Column(Text, nullable=False)
+    start_date = Column(Date, nullable=False)
+    end_date = Column(Date, nullable=False)
+    progress = Column(Integer, nullable=False, default=0)
+    sequence = Column(Integer, nullable=False, default=0)
+    is_milestone = Column(Boolean, nullable=False, default=False)
+    milestone_label = Column(Text, nullable=True)
+    depends_on = Column(ARRAY(UUID(as_uuid=True)), nullable=False, default=list)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
@@ -134,11 +190,27 @@ class DCEDocument(Base):
     filename = Column(Text, nullable=False)
     doc_type = Column(Text, nullable=False, default="cctp")
     s3_key = Column(Text, nullable=False)
-    pages_count = Column(Numeric, default=0)
     file_size_bytes = Column(Numeric, default=0)
-    status = Column(Text, default="uploaded")
-    metadata_json = Column(JSONB, default=dict)
+    ocr_status = Column(Text, default="uploaded")
+    parsed_summary = Column(Text, nullable=True)
+    raw_metadata = Column(JSONB, default=dict)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+
+    @property
+    def status(self):
+        return self.ocr_status
+
+    @status.setter
+    def status(self, val):
+        self.ocr_status = val
+
+    @property
+    def metadata_json(self):
+        return self.raw_metadata
+
+    @metadata_json.setter
+    def metadata_json(self, val):
+        self.raw_metadata = val
 
 
 class DCECriterionEntity(Base):
@@ -167,6 +239,7 @@ class DCEEmbedding(Base):
     page_number = Column(Numeric, nullable=False, default=1)
     section_title = Column(Text, nullable=True)
     content = Column(Text, nullable=False)
+    embedding = Column(Vector(1536) if Vector is not None else Text, nullable=True)
     metadata_json = Column(JSONB, default=dict)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
 
@@ -197,6 +270,8 @@ class GeneratedSection(Base):
     compliance_score = Column(Numeric(4, 1), default=100.0)
     compliance_notes = Column(Text, nullable=True)
     status = Column(Text, nullable=False, default="generated")
+    prefill_source = Column(JSONB, default=list)
+    is_prefilled = Column(Boolean, default=False)
     locked_for_export = Column(Boolean, default=False)
     validated_by = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     validated_at = Column(DateTime(timezone=True), nullable=True)
@@ -234,14 +309,17 @@ class ProjectGoNoGoAnalysis(Base):
     factors = Column(JSONB, default=list, nullable=False)
     mandatory_criteria_met = Column(Boolean, default=True, nullable=False)
     blocking_issues = Column(JSONB, default=list, nullable=False)
+    completion_rate = Column(Numeric(5, 2), nullable=True)
+    has_sufficient_data = Column(Boolean, default=True, nullable=False)
     evaluated_by = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
 
+from pgvector.sqlalchemy import Vector
+
+
 class CompanyAsset(Base):
-
-
     __tablename__ = "company_assets"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -250,9 +328,59 @@ class CompanyAsset(Base):
     title = Column(Text, nullable=False)
     description = Column(Text, nullable=True)
     s3_url = Column(Text, nullable=True)
+    status = Column(Text, nullable=False, default="indexed")
+    source_type = Column(Text, nullable=False, default="manual_upload")  # 'manual_upload', 'web_auto_bootstrap', 'learned_adjustment', 'tenant_provided_url'
+    collected_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+    validated_by_user = Column(Boolean, default=True, nullable=False)
+    embedding = Column(Vector(1536), nullable=True)
+    obsolete_at = Column(DateTime(timezone=True), nullable=True)
     metadata_json = Column(JSONB, default=dict)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class CompanyBootstrapRun(Base):
+    __tablename__ = "company_bootstrap_runs"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    status = Column(Text, nullable=False, default="pending")  # 'pending', 'running', 'completed', 'failed'
+    triggered_by = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    started_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    sources_found = Column(JSONB, default=list, nullable=False)
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+
+
+class TenantReferenceUrl(Base):
+    __tablename__ = "tenant_reference_urls"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    url = Column(Text, nullable=False)
+    label = Column(Text, nullable=True)
+    added_by = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    added_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+    last_fetched_at = Column(DateTime(timezone=True), nullable=True)
+    status = Column(Text, nullable=False, default="active")  # 'active', 'broken', 'fetching'
+
+
+class TenantSettings(Base):
+    __tablename__ = "tenants_settings"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), unique=True, nullable=False)
+    custom_system_prompt = Column(Text, nullable=True)
+    system_prompt_memory = Column(Text, nullable=True)
+    taux_inflation_pct = Column(Numeric(5, 2), default=3.5)
+    marge_cible_pct = Column(Numeric(5, 2), default=12.0)
+    taux_horaires = Column(JSONB, default=dict)
+    economic_settings = Column(JSONB, default=dict)
+    cree_le = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+    mis_a_jour_le = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
 
 
 class ExportTemplate(Base):
@@ -347,6 +475,7 @@ class TenantUsageCounter(Base):
     dossiers_generated = Column(Integer, default=0, nullable=False)
     sections_generated = Column(Integer, default=0, nullable=False)
     exports_count = Column(Integer, default=0, nullable=False)
+    web_searches_count = Column(Integer, default=0, nullable=False)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 

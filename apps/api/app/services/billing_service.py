@@ -48,6 +48,7 @@ class BillingService:
                 dossiers_generated=0,
                 sections_generated=0,
                 exports_count=0,
+                web_searches_count=0,
                 created_at=datetime.now(timezone.utc),
                 updated_at=datetime.now(timezone.utc),
             )
@@ -142,5 +143,60 @@ class BillingService:
         usage.updated_at = datetime.utcnow()
         await db.flush()
 
+    async def check_and_enforce_knowledge_quota(
+        self,
+        tenant_id: uuid.UUID,
+        db: AsyncSession,
+    ) -> Dict[str, Any]:
+        """
+        Enforces tenant document quota in knowledge base:
+        - starter: 20 documents max
+        - pro: 100 documents max
+        - enterprise: unlimited
+        Raises 403 FORBIDDEN if quota is reached.
+        """
+        from app.models.entities import CompanyAsset, Tenant
+        from sqlalchemy import func
+
+        # 1. Determine tenant plan
+        sub = await self.get_tenant_subscription(tenant_id, db)
+        plan_id = sub.plan_id if sub else "starter"
+
+        if not sub:
+            t_stmt = select(Tenant).where(Tenant.id == tenant_id)
+            t_res = await db.execute(t_stmt)
+            t = t_res.scalar_one_or_none()
+            if t and t.plan:
+                plan_id = t.plan
+
+        plan_id = plan_id.lower()
+        quotas = {
+            "starter": 20,
+            "pro": 100,
+            "enterprise": None,  # Unlimited
+        }
+        max_allowed = quotas.get(plan_id, 20)
+
+        # 2. Count existing assets for this tenant
+        count_stmt = select(func.count(CompanyAsset.id)).where(CompanyAsset.tenant_id == tenant_id)
+        count_res = await db.execute(count_stmt)
+        current_count = count_res.scalar() or 0
+
+        if max_allowed is not None and current_count >= max_allowed:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    f"Quota de documents atteint pour votre plan {plan_id.upper()} ({current_count}/{max_allowed} max). "
+                    f"Mettez à niveau votre forfait vers le plan supérieur pour indexer plus de documents dans votre base de connaissances."
+                ),
+            )
+
+        return {
+            "plan": plan_id,
+            "current_count": current_count,
+            "max_allowed": max_allowed,
+        }
+
 
 billing_service = BillingService()
+

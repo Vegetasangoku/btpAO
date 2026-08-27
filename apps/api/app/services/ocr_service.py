@@ -87,7 +87,7 @@ class OCRService:
                         "tables": tables,
                     })
                     full_text_list.append(text)
-        except Exception:
+        except Exception as e_pdfplumber:
             # Secondary fallback with pypdf
             try:
                 import pypdf
@@ -100,18 +100,24 @@ class OCRService:
                         "tables": [],
                     })
                     full_text_list.append(text)
-            except Exception as e:
-                # Text fallback for non-PDF or damaged file
-                sample_text = f"Contenu extrait du document BTP {filename}.\nExigences techniques, CCTP gros oeuvre, RC délai 6 mois."
-                pages_data.append({"page_number": 1, "text": sample_text, "tables": []})
-                full_text_list.append(sample_text)
+            except Exception as e_pypdf:
+                raise RuntimeError(
+                    f"Échec d'extraction OCR : le document '{filename}' est illisible ou corrompu "
+                    f"(pdfplumber: {e_pdfplumber}, pypdf: {e_pypdf})"
+                )
 
-        full_text = "\n\n".join(full_text_list)
+        full_text = "\n\n".join(full_text_list).strip()
+        if not full_text:
+            raise RuntimeError(
+                f"Échec d'extraction OCR : aucun contenu textuel n'a pu être extrait du document '{filename}'."
+            )
+
         return {
             "provider": "local_pdf_parser",
             "full_text": full_text,
             "pages": pages_data,
         }
+
 
 
 ocr_service = OCRService()

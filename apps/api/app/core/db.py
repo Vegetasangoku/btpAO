@@ -59,17 +59,27 @@ async def get_db(
         async with session.begin():
             # 1. Switch to application role to enforce RLS (neither superuser nor bypassrls)
             await session.execute(text("SET ROLE btp_app_user;"))
+            await session.execute(text("SET search_path TO public, extensions;"))
 
-            # 2. Inject verified JWT tenant_id into transaction context for Postgres RLS
+            # 2. Inject verified JWT tenant_id and platform_admin flag into session context for Postgres RLS
+            # NOTE: We use is_local=false (session-level) NOT true (transaction-local).
+            # SET ROLE resets transaction-local settings, so they must be set at session level.
+            # This is safe because NullPool gives each request its own connection.
             effective_tenant = current_user.tenant_id or ""
+            is_admin_flag = "true" if current_user.is_platform_admin else "false"
             await session.execute(
-                text("SELECT set_config('app.current_tenant_id', :tenant_id, true);"),
+                text("SELECT set_config('app.is_platform_admin', :is_admin, false);"),
+                {"is_admin": is_admin_flag},
+            )
+            await session.execute(
+                text("SELECT set_config('app.current_tenant_id', :tenant_id, false);"),
                 {"tenant_id": effective_tenant},
             )
             await session.execute(
-                text("SELECT set_config('app.tenant_id', :tenant_id, true);"),
+                text("SELECT set_config('app.tenant_id', :tenant_id, false);"),
                 {"tenant_id": effective_tenant},
             )
+
 
             try:
                 yield session
@@ -83,11 +93,11 @@ async def get_db(
 async def get_public_auth_db() -> AsyncGenerator[AsyncSession, None]:
     """
     FastAPI dependency for unauthenticated auth operations (forgot password, reset password token verification).
-    Switches to application role 'btp_app_user' without tenant scoping.
+    Allows looking up users across tenants before authentication is established.
     """
     async with AsyncSessionLocal() as session:
         async with session.begin():
-            await session.execute(text("SET ROLE btp_app_user;"))
+            await session.execute(text("SET ROLE service_role;"))
             try:
                 yield session
             finally:

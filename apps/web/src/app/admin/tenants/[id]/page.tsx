@@ -23,7 +23,9 @@ import {
   Upload,
   FileUp,
   HardDrive,
+  AlertTriangle,
 } from 'lucide-react';
+
 import { supabase } from '@/lib/supabase/client';
 import { api } from '@/lib/api';
 import { LLM_MODEL_TIERS } from '@/lib/types';
@@ -68,8 +70,10 @@ interface TenantDocument {
 }
 
 export default function TenantDetailPage() {
+  const router = useRouter();
   const params = useParams();
   const rawId = params?.id;
+
   const tenantId = Array.isArray(rawId) ? rawId[0] : (rawId as string);
 
   const [activeTab, setActiveTab] = useState<'info' | 'routing' | 'rag' | 'memory' | 'economic'>('routing');
@@ -84,11 +88,15 @@ export default function TenantDetailPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const AVAILABLE_MODELS = [
-    { id: 'claude-3-5-sonnet-20241022', provider: 'Anthropic', name: 'Claude 3.5 Sonnet (Rédaction Haute Qualité)' },
+    { id: 'claude-sonnet-5', provider: 'Anthropic', name: 'Claude Sonnet 5 (Rédaction Haute Qualité)' },
+    { id: 'claude-haiku-4-5-20251001', provider: 'Anthropic', name: 'Claude Haiku 4.5 (Synthèse Rapide)' },
+    { id: 'claude-opus-5', provider: 'Anthropic', name: 'Claude Opus 5 (Analyse Complexe)' },
+    { id: 'claude-fable-5', provider: 'Anthropic', name: 'Claude Fable 5 (Performance Max)' },
     { id: 'gpt-4o', provider: 'OpenAI', name: 'GPT-4o (Synthèse Rapide & Go/No-Go)' },
     { id: 'gemini-1.5-pro', provider: 'Google', name: 'Gemini 1.5 Pro (Grand Contexte DCE)' },
-    { id: 'mistral-large-2407', provider: 'Mistral AI', name: 'Mistral Large 2 (Souveraineté RGPD)' },
+    { id: 'mistral-large-latest', provider: 'Mistral AI', name: 'Mistral Large 2 (Souveraineté RGPD)' },
   ];
+
 
   useEffect(() => {
     async function loadData() {
@@ -299,12 +307,13 @@ export default function TenantDetailPage() {
   }
 
   async function handleDelete() {
-    if (!confirm('Supprimer définitivement cette entreprise cliente et tous ses accès ?')) return;
-    const { error } = await supabase.from('tenants').delete().eq('id', tenantId);
-    if (error) {
-      alert('Erreur suppression : ' + error.message);
-    } else {
+    if (!confirm(`Supprimer définitivement l'entreprise "${tenant?.name}" et tous ses projets/données associées (RGPD) ?`)) return;
+    try {
+      await api.deleteTenant(tenantId);
+      alert('Entreprise supprimée avec succès.');
       router.push('/admin/tenants');
+    } catch (err: any) {
+      alert('Erreur suppression : ' + (err?.message || err));
     }
   }
 
@@ -611,11 +620,32 @@ export default function TenantDetailPage() {
                   </option>
                 ))}
               </select>
+
+              {/* RGPD Warning Banner for non-EU/US model override */}
+              {(() => {
+                const selectedTier = LLM_MODEL_TIERS.find((t) => t.id === modelTier);
+                if (selectedTier?.is_non_eu) {
+                  return (
+                    <div className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs flex items-start gap-2.5 animate-in fade-in">
+                      <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                      <div>
+                        <p className="font-bold">Avertissement Souveraineté & RGPD :</p>
+                        <p className="text-[11px] text-amber-200/90 mt-0.5">
+                          Hébergement hors UE — conformité RGPD non confirmée, voir avec un juriste avant usage sur des données clients réelles.
+                        </p>
+                      </div>
+                    </div>
+                  );
+                }
+                return null;
+              })()}
+
               <p className="text-[11px] text-slate-500">
                 Si "Hériter du réglage général" est sélectionné, le client utilise instantanément le modèle global défini par le super-admin.
               </p>
             </div>
           </div>
+
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <div className="p-4 rounded-2xl bg-slate-950/80 border border-slate-800 space-y-2">

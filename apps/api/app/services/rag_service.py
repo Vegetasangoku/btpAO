@@ -11,7 +11,17 @@ from app.services.embedding_service import embedding_service
 class RAGService:
     def __init__(self):
         self.supabase_url = settings.SUPABASE_URL
-        self.supabase_key = settings.SUPABASE_ANON_KEY
+        # match_company_knowledge / match_dce_chunks are SECURITY DEFINER RPCs that
+        # bypass RLS and trust the caller-supplied p_tenant_id. As of migration 00024
+        # they are no longer callable by anon/authenticated -- only service_role and
+        # btp_app_user. The backend has already verified the caller's JWT and real
+        # tenant_id by the time it reaches this service, so it is the trusted party
+        # here; it must call these RPCs with the service role key, not the public
+        # anon key. Falls back to the anon key only if the service role key isn't
+        # configured yet, in which case Supabase will now correctly reject the call
+        # (403) and search_dce_context/search_company_knowledge fall through to their
+        # existing demo-content fallback below rather than ever mixing tenants' data.
+        self.supabase_key = settings.SUPABASE_SERVICE_ROLE_KEY or settings.SUPABASE_ANON_KEY
 
     async def search_dce_context(
         self,

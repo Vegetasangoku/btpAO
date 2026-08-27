@@ -131,7 +131,39 @@ class StorageService:
                 )
             except Exception:
                 pass
-        return f"/api/storage/files/{clean_key}"
+    def delete_file(self, tenant_id: str, s3_key: str) -> bool:
+        """
+        Deletes a file from S3 / MinIO and local fallback storage.
+        Validates tenant isolation prefix.
+        Returns True if deleted or attempted, False otherwise.
+        """
+        if not s3_key:
+            return False
+
+        clean_key = s3_key.lstrip("/")
+        expected_prefix = f"tenants/{tenant_id}/"
+        if not clean_key.startswith(expected_prefix):
+            clean_key = self.build_tenant_path(tenant_id, clean_key)
+
+        deleted = False
+        # 1. Try S3 delete
+        if self.s3_client:
+            try:
+                self.s3_client.delete_object(Bucket=self.bucket_name, Key=clean_key)
+                deleted = True
+            except Exception as e:
+                print(f"[StorageService] S3 delete error for {clean_key}: {e}")
+
+        # 2. Local File System Delete
+        local_path = self.local_storage_dir / clean_key
+        if local_path.exists():
+            try:
+                local_path.unlink()
+                deleted = True
+            except Exception as e:
+                print(f"[StorageService] Local file delete error for {local_path}: {e}")
+
+        return deleted
 
 
 storage_service = StorageService()

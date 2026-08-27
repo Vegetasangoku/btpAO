@@ -1,8 +1,8 @@
 'use client';
 
-import React, { useState } from 'react';
-import { Users, RefreshCw, CheckCircle2 } from 'lucide-react';
-import { api } from '@/lib/api';
+import React, { useEffect, useRef, useState } from 'react';
+import { Users, RefreshCw, AlertTriangle } from 'lucide-react';
+import { api, fetchAuthenticatedBlobUrl } from '@/lib/api';
 
 interface OrganigrammePreviewProps {
   projectId: string;
@@ -11,18 +11,49 @@ interface OrganigrammePreviewProps {
 }
 
 export function OrganigrammePreview({ projectId, projectTitle = 'Projet BTP', initialImageUrl }: OrganigrammePreviewProps) {
-  const [imageUrl, setImageUrl] = useState<string>(
-    initialImageUrl || `http://localhost:8000/api/visuals/file/tenants/11111111-1111-1111-1111-111111111111/visuals/${projectId}/organigramme_chantier.png`
+  const apiBase = (process.env.NEXT_PUBLIC_API_URL || '').replace(/\/$/, '');
+  const [rawPath, setRawPath] = useState<string>(
+    initialImageUrl || `${apiBase}/api/visuals/file/tenants/11111111-1111-1111-1111-111111111111/visuals/${projectId}/organigramme_chantier.png`
   );
+  const [blobUrl, setBlobUrl] = useState<string | null>(null);
+  const [loadState, setLoadState] = useState<'loading' | 'ready' | 'missing' | 'error'>('loading');
   const [isGenerating, setIsGenerating] = useState(false);
+  const objectUrlRef = useRef<string | null>(null);
+
+  async function loadImage(path: string) {
+    setLoadState('loading');
+    try {
+      const url = await fetchAuthenticatedBlobUrl(path);
+      if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
+      objectUrlRef.current = url;
+      setBlobUrl(url);
+      setLoadState('ready');
+    } catch (err: any) {
+      if (String(err?.message || '').includes('404')) {
+        setLoadState('missing');
+      } else {
+        console.error('Failed to load organigramme image', err);
+        setLoadState('error');
+      }
+    }
+  }
+
+  useEffect(() => {
+    loadImage(rawPath);
+    return () => {
+      if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rawPath]);
 
   const handleRegenerate = async () => {
     setIsGenerating(true);
     try {
       const res = await api.generateOrganigramme(projectId, projectTitle, []);
-      setImageUrl(`http://localhost:8000/api/visuals/file/${res.s3_key}?t=${Date.now()}`);
+      setRawPath(`${apiBase}/api/visuals/file/${res.s3_key}?t=${Date.now()}`);
     } catch (err) {
       console.error('Failed to generate organigramme', err);
+      setLoadState('error');
     } finally {
       setIsGenerating(false);
     }
@@ -53,14 +84,30 @@ export function OrganigrammePreview({ projectId, projectTitle = 'Projet BTP', in
 
       {/* Image Preview */}
       <div className="relative rounded-xl border border-slate-800 overflow-hidden bg-slate-950 flex items-center justify-center p-2 min-h-[320px]">
-        <img
-          src={imageUrl}
-          alt="Organigramme BTP"
-          className="w-full h-auto rounded-lg shadow-md object-contain max-h-[500px]"
-          onError={() => {
-            handleRegenerate();
-          }}
-        />
+        {loadState === 'ready' && blobUrl ? (
+          <img
+            src={blobUrl}
+            alt="Organigramme BTP"
+            className="w-full h-auto rounded-lg shadow-md object-contain max-h-[500px]"
+          />
+        ) : loadState === 'loading' || isGenerating ? (
+          <div className="flex flex-col items-center gap-2 text-slate-500 text-xs">
+            <RefreshCw className="w-6 h-6 animate-spin" />
+            Chargement de l'organigramme...
+          </div>
+        ) : loadState === 'missing' ? (
+          <div className="flex flex-col items-center gap-2 text-slate-500 text-xs text-center px-6">
+            <Users className="w-8 h-8 text-slate-600" />
+            Aucun organigramme généré pour ce projet pour l'instant.
+            <span>Cliquez sur « Régénérer Organigramme » pour le créer à partir des données du chantier.</span>
+          </div>
+        ) : (
+          <div className="flex flex-col items-center gap-2 text-rose-400 text-xs text-center px-6">
+            <AlertTriangle className="w-8 h-8" />
+            Impossible de charger l'organigramme (session expirée ou service indisponible).
+            <span>Réessayez « Régénérer Organigramme », ou reconnectez-vous si le problème persiste.</span>
+          </div>
+        )}
       </div>
 
       <div className="flex items-center justify-between text-xs text-slate-400 pt-2 border-t border-slate-900">

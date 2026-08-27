@@ -20,13 +20,19 @@ from app.models.entities import (
     GeneratedSectionVersion,
     Project,
     ProjectDecision,
+    TenantLearning,
 )
 from app.models.schemas import (
+    CreateTenantLearningRequest,
     GenerateSectionRequest,
     GeneratedSectionOut,
     GeneratedSectionVersionOut,
+    LearningProposal,
+    TenantLearningOut,
     UpdateSectionContent,
+    UpdateSectionResponse,
 )
+from app.services.learning_service import learning_service
 
 from app.services.billing_service import billing_service
 from app.services.llm_generator import llm_generator_service
@@ -34,11 +40,21 @@ from app.services.llm_generator import llm_generator_service
 router = APIRouter(prefix="/generate", tags=["AI Generation & Sections"])
 
 SECTION_DEFINITIONS = {
-    "moyens_humains": {"title": "1. Moyens Humains & Organisation du Chantier", "order": 1},
-    "moyens_materiels": {"title": "2. Moyens Matériels & Plan d'Installation de Chantier (PIC)", "order": 2},
-    "methodologie_phasage": {"title": "3. Méthodologie d'Exécution & Phasage des Travaux", "order": 3},
-    "qse_environnement": {"title": "4. Démarche RSE, Environnement & Gestion des Déchets", "order": 4},
-    "securite_ppsps": {"title": "5. Sécurité, Santé (PPSPS) & Plan d'Assurance Qualité (PAQ)", "order": 5},
+    # Aligné sur les clés réelles envoyées par l'éditeur (apps/web .../projects/[id]/editor/page.tsx).
+    # "qse_environnement" est conservé en alias pour compatibilité ascendante (tests, anciennes
+    # données) — voir llm_generator.py qui accepte les deux clés pour la génération.
+    "presentation_entreprise": {"title": "1. Présentation de l'Entreprise", "order": 1},
+    "references_similaires": {"title": "2. Références de Travaux Similaires", "order": 2},
+    "moyens_humains": {"title": "3. Moyens Humains & Encadrement", "order": 3},
+    "moyens_materiels": {"title": "4. Moyens Matériels & Engins", "order": 4},
+    "methodologie_phasage": {"title": "5. Méthodologie & Planning Prévisionnel", "order": 5},
+    "qualite_controle": {"title": "6. Démarche Qualité & Autocontrôle", "order": 6},
+    "securite_ppsps": {"title": "7. Sécurité, Prévention & PPSPS", "order": 7},
+    "rse_environnement": {"title": "8. RSE, Déchets BTP & Bilan Carbone", "order": 8},
+    "qse_environnement": {"title": "8. RSE, Déchets BTP & Bilan Carbone", "order": 8},  # alias
+    "sous_traitance": {"title": "9. Politique de Sous-Traitance", "order": 9},
+    # "planning_gantt" (10) n'est PAS une section texte : c'est un visuel Matplotlib généré
+    # par /api/visuals/gantt, jamais par cet endpoint.
 }
 
 
@@ -162,7 +178,54 @@ async def generate_single_section(
 
     await db.flush()
 
-    # 4. Asynchronously dispatch Celery background generator task
+    # 4. Mode Prefill Draft vs Standard AI Generation
+    if payload.mode == "prefill_draft":
+        sources_used, prefill_text, is_sufficient, missing_label = await learning_service.aggregate_prefill_knowledge(
+            db=db,
+            tenant_id=t_uuid,
+            section_key=payload.section_key,
+            section_title=sec_meta["title"],
+            project_id=p_uuid,
+        )
+
+        saved_sec.prefill_source = sources_used
+        if is_sufficient:
+            saved_sec.status = "prefilled_draft"
+            saved_sec.is_prefilled = True
+            saved_sec.content_html = f"<div class='prefilled-draft'>{prefill_text}</div>"
+        else:
+            saved_sec.status = "missing_data"
+            saved_sec.is_prefilled = False
+            saved_sec.content_html = (
+                f"<div class='p-4 bg-amber-50 border-l-4 border-amber-500 text-amber-900 rounded my-2'>"
+                f"<strong>[Donnée non trouvée / Manquante :</strong> Il manque des informations sur <em>{missing_label}</em> "
+                f"pour compléter cette section à partir de votre profil d'entreprise.]"
+                f"</div>"
+            )
+
+        saved_sec.updated_at = now
+        await db.flush()
+
+        return GeneratedSectionOut(
+            id=str(saved_sec.id),
+            tenant_id=str(saved_sec.tenant_id),
+            project_id=str(saved_sec.project_id),
+            section_key=saved_sec.section_key,
+            title=saved_sec.title,
+            order_index=int(saved_sec.order_index),
+            content_html=saved_sec.content_html,
+            content_json=saved_sec.content_json or {},
+            visual_placeholders=saved_sec.visual_placeholders or [],
+            compliance_score=float(saved_sec.compliance_score) if saved_sec.compliance_score is not None else 100.0,
+            compliance_notes=saved_sec.compliance_notes or "Pré-remplissage",
+            status=saved_sec.status,
+            prefill_source=saved_sec.prefill_source or [],
+            is_prefilled=bool(saved_sec.is_prefilled),
+            locked_for_export=bool(saved_sec.locked_for_export),
+            updated_at=saved_sec.updated_at,
+        )
+
+    # Standard AI Generation Task
     from app.workers.tasks import generate_section_task
     generate_section_task.delay(
         tenant_id=current_user.tenant_id,
@@ -177,20 +240,21 @@ async def generate_single_section(
         project_id=str(saved_sec.project_id),
         section_key=saved_sec.section_key,
         title=saved_sec.title,
-        order_index=saved_sec.order_index,
+        order_index=int(saved_sec.order_index),
         content_html=saved_sec.content_html,
         content_json=saved_sec.content_json or {},
         visual_placeholders=saved_sec.visual_placeholders or [],
         compliance_score=float(saved_sec.compliance_score) if saved_sec.compliance_score is not None else 0.0,
         compliance_notes=saved_sec.compliance_notes or "Génération lancée",
         status="processing",
-        locked_for_export=saved_sec.locked_for_export,
+        prefill_source=saved_sec.prefill_source or [],
+        is_prefilled=bool(saved_sec.is_prefilled),
+        locked_for_export=bool(saved_sec.locked_for_export),
         updated_at=saved_sec.updated_at,
     )
 
 
-
-@router.put("/section/{section_id}", response_model=GeneratedSectionOut)
+@router.put("/section/{section_id}", response_model=UpdateSectionResponse)
 async def update_section_content(
     section_id: str,
     payload: UpdateSectionContent,
@@ -249,8 +313,18 @@ async def update_section_content(
     )
     db.add(archived_version)
 
+    old_content = section.content_html or ""
+    new_content = payload.content_html
+
+    # Calculate diff significance for Phase C continuous learning
+    is_significant, diff_pct, diff_summary = learning_service.calculate_diff_significance(
+        old_text=old_content,
+        new_text=new_content,
+        threshold_pct=15.0,
+    )
+
     # 3. Apply new updates to current section
-    section.content_html = payload.content_html
+    section.content_html = new_content
     if payload.content_json is not None:
         section.content_json = payload.content_json
     if payload.status:
@@ -261,7 +335,7 @@ async def update_section_content(
 
     await db.flush()
 
-    return GeneratedSectionOut(
+    sec_out = GeneratedSectionOut(
         id=str(section.id),
         tenant_id=str(section.tenant_id),
         project_id=str(section.project_id),
@@ -274,8 +348,26 @@ async def update_section_content(
         compliance_score=float(section.compliance_score) if section.compliance_score is not None else 100.0,
         compliance_notes=section.compliance_notes or "Conforme",
         status=section.status,
+        prefill_source=section.prefill_source or [],
+        is_prefilled=bool(section.is_prefilled),
         locked_for_export=bool(section.locked_for_export),
         updated_at=section.updated_at,
+    )
+
+    proposal = None
+    if is_significant:
+        proposal = LearningProposal(
+            section_type=section.section_key,
+            summary=diff_summary,
+            suggested_content=new_content,
+            diff_percentage=diff_pct,
+        )
+
+    return UpdateSectionResponse(
+        success=True,
+        section=sec_out,
+        learning_opportunity=is_significant,
+        learning_proposal=proposal,
     )
 
 
@@ -441,3 +533,139 @@ async def restore_section_version(
     )
 
 
+
+
+
+# -----------------------------------------------------------------------------
+# Phase C: Tenant Learnings Management Endpoints
+# -----------------------------------------------------------------------------
+@router.post("/learnings", response_model=TenantLearningOut)
+async def create_tenant_learning_endpoint(
+    payload: CreateTenantLearningRequest,
+    current_user: CurrentTenantUser = Depends(get_current_tenant_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Phase C: Persists an accepted learning adjustment consented by the user.
+    Scope ("boucle d'apprentissage 3 portees" du cahier des charges) is encoded
+    via project_id / section_type: both set = "cette reponse AO uniquement",
+    section_type only = "AOs similaires (meme type de section)", neither =
+    "tous les futurs dossiers". See learning_service.get_active_tenant_learnings
+    for the matching retrieval-side filter (NULL on either field = applies
+    broadly, i.e. a narrower learning never fails to be found, it just also
+    doesn't leak outside the scope the user actually picked).
+    """
+    t_uuid = uuid.UUID(current_user.tenant_id)
+
+    p_uuid = None
+    if payload.project_id:
+        try:
+            p_uuid = uuid.UUID(payload.project_id)
+        except ValueError:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid project_id")
+        proj_check = await db.execute(
+            select(Project.id).where(Project.id == p_uuid, Project.tenant_id == t_uuid)
+        )
+        if proj_check.scalar_one_or_none() is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Projet introuvable ou acces non autorise pour la portee 'cette reponse AO uniquement'.",
+            )
+
+    now = datetime.utcnow()
+    learning = TenantLearning(
+        id=uuid.uuid4(),
+        tenant_id=t_uuid,
+        project_id=p_uuid,
+        title=payload.title,
+        category=payload.category or "methodology",
+        section_type=payload.section_type,
+        learned_content=payload.learned_content,
+        learning_insight=payload.learning_insight or payload.title,
+        actionable_directive=payload.actionable_directive or f"Directive : Appliquer l'ajustement '{payload.title}'.",
+        source_diff=payload.source_diff or {},
+        source_outcome=payload.source_outcome or "manual",
+        is_active=True,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(learning)
+    await db.flush()
+
+    return TenantLearningOut(
+        id=str(learning.id),
+        tenant_id=str(learning.tenant_id),
+        project_id=str(learning.project_id) if learning.project_id else None,
+        category=learning.category,
+        title=learning.title,
+        learning_insight=learning.learning_insight or "",
+        actionable_directive=learning.actionable_directive or "",
+        section_type=learning.section_type,
+        learned_content=learning.learned_content,
+        source_diff=learning.source_diff or {},
+        source_outcome=learning.source_outcome or "manual",
+        is_active=learning.is_active,
+        created_at=learning.created_at,
+        updated_at=learning.updated_at,
+    )
+
+
+@router.get("/learnings", response_model=List[TenantLearningOut])
+async def list_tenant_learnings_endpoint(
+    current_user: CurrentTenantUser = Depends(get_current_tenant_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Lists active continuous learnings for the authenticated tenant.
+    """
+    t_uuid = uuid.UUID(current_user.tenant_id)
+    stmt = select(TenantLearning).where(TenantLearning.tenant_id == t_uuid).order_by(TenantLearning.created_at.desc())
+    res = await db.execute(stmt)
+    learnings = res.scalars().all()
+
+    return [
+        TenantLearningOut(
+            id=str(l.id),
+            tenant_id=str(l.tenant_id),
+            project_id=str(l.project_id) if l.project_id else None,
+            category=l.category,
+            title=l.title,
+            learning_insight=l.learning_insight or "",
+            actionable_directive=l.actionable_directive or "",
+            section_type=l.section_type,
+            learned_content=l.learned_content,
+            source_diff=l.source_diff or {},
+            source_outcome=l.source_outcome or "manual",
+            is_active=l.is_active,
+            created_at=l.created_at,
+            updated_at=l.updated_at,
+        )
+        for l in learnings
+    ]
+
+
+@router.delete("/learnings/{learning_id}")
+async def delete_tenant_learning_endpoint(
+    learning_id: str,
+    current_user: CurrentTenantUser = Depends(get_current_tenant_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Deletes an individual continuous learning record for the tenant.
+    """
+    try:
+        t_uuid = uuid.UUID(current_user.tenant_id)
+        l_uuid = uuid.UUID(learning_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid UUID")
+
+    stmt = select(TenantLearning).where(TenantLearning.id == l_uuid, TenantLearning.tenant_id == t_uuid)
+    res = await db.execute(stmt)
+    learning = res.scalar_one_or_none()
+    if not learning:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Learning not found")
+
+    await db.delete(learning)
+    await db.flush()
+
+    return {"success": True, "message": f"Apprentissage {learning_id} supprimé avec succès."}

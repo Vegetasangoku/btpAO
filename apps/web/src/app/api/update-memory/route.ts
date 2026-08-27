@@ -31,19 +31,26 @@ export async function POST(request: Request) {
       }
     );
 
-    let targetTenantId = tenantId;
-    if (!targetTenantId) {
-      const { data: { user } } = await supabase.auth.getUser();
-      targetTenantId = user?.app_metadata?.tenant_id || user?.user_metadata?.tenant_id;
-      if (!targetTenantId) {
-        const { data: firstTenant } = await supabase.from('tenants').select('id').limit(1).single();
-        targetTenantId = firstTenant?.id;
-      }
+    // Resolve tenant strictly from authenticated user session
+    const { data: { user }, error: userErr } = await supabase.auth.getUser();
+    if (userErr || !user) {
+      return NextResponse.json({ success: false, error: 'Non authentifié. Session requise.' }, { status: 401 });
     }
 
-    if (!targetTenantId) {
-      return NextResponse.json({ success: false, error: 'Tenant introuvable' }, { status: 400 });
+    const sessionTenantId = user.app_metadata?.tenant_id || user.user_metadata?.tenant_id;
+    if (!sessionTenantId) {
+      return NextResponse.json({ success: false, error: 'Aucun tenant associé à la session utilisateur.' }, { status: 403 });
     }
+
+    // Anti-spoofing check: if body contains a tenantId, it MUST match the session tenant_id
+    if (tenantId && tenantId !== sessionTenantId) {
+      return NextResponse.json(
+        { success: false, error: 'Accès refusé : Le tenantId fourni ne correspond pas à votre organisation.' },
+        { status: 403 }
+      );
+    }
+
+    const targetTenantId = sessionTenantId;
 
     // Récupération de la mémoire actuelle
     const { data: currentSettings } = await supabase

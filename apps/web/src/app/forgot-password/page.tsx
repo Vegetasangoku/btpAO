@@ -21,7 +21,6 @@ export default function ForgotPasswordPage() {
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
-  const [devResetUrl, setDevResetUrl] = useState<string | null>(null);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -34,22 +33,23 @@ export default function ForgotPasswordPage() {
     setErrorMsg(null);
 
     try {
-      // 1. Try Supabase Auth password reset in parallel if configured
+      // 1. Dispatch real email via Supabase Auth mailer
       try {
-        await supabase.auth.resetPasswordForEmail(email, {
+        await supabase.auth.resetPasswordForEmail(email.trim(), {
           redirectTo: `${window.location.origin}/reset-password`,
         });
-      } catch (sbErr) {
-        // Fallback gracefully to backend password reset service
-        console.info('Supabase email dispatch skipped or rate-limited, relying on backend service.');
+      } catch (sbErr: any) {
+        console.warn('Supabase resetPasswordForEmail warning:', sbErr);
       }
 
-      // 2. Call backend transactional email reset service
-      const res = await api.requestPasswordReset(email);
-      setSuccess(true);
-      if (res.reset_url_dev) {
-        setDevResetUrl(res.reset_url_dev);
+      // 2. Also register in backend audit & token system
+      try {
+        await api.requestPasswordReset(email.trim());
+      } catch (apiErr: any) {
+        console.warn('Backend requestPasswordReset notice:', apiErr);
       }
+
+      setSuccess(true);
     } catch (err: any) {
       setErrorMsg(err?.message || "Une erreur est survenue lors de l'envoi de l'e-mail.");
     } finally {
@@ -111,18 +111,6 @@ export default function ForgotPasswordPage() {
                 <p className="font-semibold text-slate-200">⏱️ Durée de validité :</p>
                 <p>Le lien est utilisable pendant <strong>1 heure</strong>. Pensez à vérifier vos courriers indésirables (spams) si nécessaire.</p>
               </div>
-
-              {devResetUrl && (
-                <div className="p-3 rounded-xl bg-sky-950/40 border border-sky-800/60 text-left space-y-1.5">
-                  <span className="text-[10px] font-bold text-sky-400 uppercase tracking-wider">Lien direct de test :</span>
-                  <a
-                    href={devResetUrl}
-                    className="block text-xs font-mono text-sky-300 hover:text-sky-200 underline break-all"
-                  >
-                    {devResetUrl}
-                  </a>
-                </div>
-              )}
 
               <Link
                 href="/login"

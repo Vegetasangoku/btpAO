@@ -1,0 +1,104 @@
+/*
+ * Custom styling layered on top of the vendored frappe-gantt.css (kept unmodified so it
+ * stays trivially re-vendorable from a future frappe-gantt release). Handles:
+ *   - critical-path task bars (task.custom_class = "gantt-critical")
+ *   - milestone task bars (task.custom_class = "gantt-milestone")
+ *   - light/dark theming to match the app's amber-on-slate brand charter (see Batch 4
+ *     of claude/etat-technique-btpao.md for why this app is light-by-default,
+ *     dark-activable, amber-accented -- never sky-blue or dark-only).
+ */
+
+.gantt-target .gantt .bar-wrapper.gantt-critical .bar {
+  fill: #dc2626;
+  stroke: #7f1d1d;
+  stroke-width: 1.4;
+}
+
+.gantt-target .gantt .bar-wrapper.gantt-critical .bar-progress {
+  fill: #991b1b;
+}
+
+.gantt-target .gantt .bar-wrapper.gantt-critical .bar-label {
+  fill: #ffffff;
+  font-weight: 600;
+}
+
+.gantt-target .gantt .bar-wrapper.gantt-milestone .bar {
+  fill: #d97706;
+  stroke: #92400e;
+}
+
+.gantt-target .gantt .bar-wrapper.gantt-milestone .bar-progress {
+  fill: #b45309;
+}
+
+/* Default (non-critical, non-milestone) bars pick up the app's amber accent instead of
+   frappe-gantt's stock blue, so the chart reads as part of this product, not a generic
+   embed. */
+.gantt-target .gantt .bar-wrapper .bar {
+  fill: #0284c7;
+}
+
+.gantt-target .gantt .bar-wrapper .bar-progress {
+  fill: #0369a1;
+}
+
+.gantt-target .gantt .today-highlight {
+  fill: rgba(217, 119, 6, 0.08);
+}
+
+.gantt-target .gantt .arrow {
+  stroke: #94a3b8;
+}
+
+/* Dark mode: swap the grid/background/text colors frappe-gantt hardcodes for light
+   surfaces, matching the app's dark:bg-[#0C0F17] shell. */
+:root.dark .gantt-target .gantt-container,
+.dark .gantt-target .gantt-container {
+  background: transparent;
+}
+
+:root.dark .gantt-target .grid-background,
+.dark .gantt-target .grid-background {
+  fill: #0f172a;
+}
+
+:root.dark .gantt-target .grid-row,
+.dark .gantt-target .grid-row {
+  fill: #0b1220;
+}
+
+:root.dark .gantt-target .grid-row:nth-child(even),
+.dark .gantt-target .grid-row:nth-child(even) {
+  fill: #0f172a;
+}
+
+:root.dark .gantt-target .row-line,
+.dark .gantt-target .row-line {
+  stroke: #1e293b;
+}
+
+:root.dark .gantt-target .tick,
+.dark .gantt-target .tick {
+  stroke: #1e293b;
+}
+
+:root.dark .gantt-target .upper-text,
+:root.dark .gantt-target .lower-text,
+.dark .gantt-target .upper-text,
+.dark .gantt-target .lower-text {
+  fill: #cbd5e1;
+}
+
+:root.dark .gantt-target .side-header .today-button,
+.dark .gantt-target .side-header .today-button {
+  background: #1e293b;
+  color: #e2e8f0;
+}
+
+:root.dark .gantt-target .popup-wrapper,
+.dark .gantt-target .popup-wrapper {
+  background: #0f172a;
+  color: #e2e8f0;
+  border: 1px solid #1e293b;
+}

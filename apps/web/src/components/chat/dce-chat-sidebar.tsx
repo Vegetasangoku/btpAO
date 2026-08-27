@@ -44,23 +44,28 @@ interface ChatMessage {
 
 
 interface DCEChatSidebarProps {
-  projectId: string;
-  projectTitle: string;
+  projectId?: string;
+  projectTitle?: string;
   isOpen: boolean;
   onClose: () => void;
+  // 'project' (défaut) interroge le DCE + corpus du projet en cours (nécessite projectId).
+  // 'company' interroge le savoir-faire entreprise (Mon Entreprise), sans projet particulier.
+  mode?: 'project' | 'company';
 }
 
-export function DCEChatSidebar({ projectId, projectTitle, isOpen, onClose }: DCEChatSidebarProps) {
+export function DCEChatSidebar({ projectId, projectTitle, isOpen, onClose, mode = 'project' }: DCEChatSidebarProps) {
   const [sourceMode, setSourceMode] = useState<'corpus' | 'corpus_web' | 'web'>('corpus');
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       id: 'm-1',
       sender: 'assistant',
-      text: `Bonjour ! Je suis votre **Assistant Technique BTP** pour le projet **${projectTitle || 'en cours'}**.\n\nPosez une question technique et sélectionnez votre source :\n- **Corpus** : Pièces du DCE et base de savoir-faire entreprise\n- **Corpus + Web** : Synthèse enrichie avec veille normative externe\n- **Web** : Recherche externe temps réel (DTU, normes, données marché)`,
+      text: mode === 'company'
+        ? `Bonjour ! Je suis votre **Assistant Savoir-Faire Entreprise**.\n\nPosez une question sur vos fiches techniques, moyens, références ou certifications, et sélectionnez votre source :\n- **Corpus** : Documents et savoir-faire de votre entreprise (onglet Savoir-Faire)\n- **Corpus + Web** : Corpus enrichi de vos sites de référence configurés\n- **Web** : Recherche limitée strictement à vos sites de référence configurés (onglet Sites de Référence)`
+        : `Bonjour ! Je suis votre **Assistant Technique BTP** pour le projet **${projectTitle || 'en cours'}**.\n\nPosez une question technique et sélectionnez votre source :\n- **Corpus** : Pièces du DCE et base de savoir-faire entreprise\n- **Corpus + Web** : Synthèse enrichie avec veille normative externe\n- **Web** : Recherche externe temps réel (DTU, normes, données marché)`,
       source_mode: 'corpus',
-      sources: [
-        { title: 'Pièces de Marché DCE', page: 1, citation: '[Source : DCE]', snippet: 'CCTP, RC, DPGF et savoir-faire entreprise indexés sous Postgres RLS' },
-      ],
+      sources: mode === 'company'
+        ? [{ title: 'Savoir-Faire Entreprise', citation: '[Source : Mon Entreprise]', snippet: 'Fiches techniques, moyens matériels et références indexés pour votre entreprise' }]
+        : [{ title: 'Pièces de Marché DCE', page: 1, citation: '[Source : DCE]', snippet: 'CCTP, RC, DPGF et savoir-faire entreprise indexés pour votre projet' }],
       timestamp: new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }),
     },
   ]);
@@ -69,12 +74,19 @@ export function DCEChatSidebar({ projectId, projectTitle, isOpen, onClose }: DCE
   const [isLoading, setIsLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  const SUGGESTED_PROMPTS = [
-    'Quelles sont les pénalités de retard et le délai d\'exécution ?',
-    'Quelles sont les exigences béton bas-carbone (RE2020) ?',
-    'Quels sont les critères de notation et pondérations du RC ?',
-    'Quelles normes DTU s\'appliquent au gros œuvre ?',
-  ];
+  const SUGGESTED_PROMPTS = mode === 'company'
+    ? [
+        'Quelles sont nos certifications et qualifications professionnelles ?',
+        'Quels engins et matériels avons-nous dans notre parc ?',
+        'Quelles sont nos références de chantiers similaires ?',
+        'Quelle est notre politique QSE / RSE ?',
+      ]
+    : [
+        'Quelles sont les pénalités de retard et le délai d\'exécution ?',
+        'Quelles sont les exigences béton bas-carbone (RE2020) ?',
+        'Quels sont les critères de notation et pondérations du RC ?',
+        'Quelles normes DTU s\'appliquent au gros œuvre ?',
+      ];
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -97,7 +109,9 @@ export function DCEChatSidebar({ projectId, projectTitle, isOpen, onClose }: DCE
     setIsLoading(true);
 
     try {
-      const res = await api.askProject(projectId, q, sourceMode);
+      const res = mode === 'company'
+        ? await api.askCompany(q, sourceMode)
+        : await api.askProject(projectId as string, q, sourceMode);
 
       const assistantMsg: ChatMessage = {
         id: `a-${Date.now()}`,
@@ -146,11 +160,11 @@ export function DCEChatSidebar({ projectId, projectTitle, isOpen, onClose }: DCE
             </div>
             <div>
               <h3 className="text-xs font-bold text-white flex items-center gap-1.5">
-                <span>Assistant Q&A DCE & Normes</span>
+                <span>{mode === 'company' ? 'Assistant Q&A Savoir-Faire Entreprise' : 'Assistant Q&A DCE & Normes'}</span>
                 <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
               </h3>
               <p className="text-[10px] text-slate-400 truncate max-w-[260px]">
-                {projectTitle || 'Projet en cours'}
+                {mode === 'company' ? 'Mon Entreprise' : (projectTitle || 'Projet en cours')}
               </p>
             </div>
           </div>
@@ -168,9 +182,9 @@ export function DCEChatSidebar({ projectId, projectTitle, isOpen, onClose }: DCE
           <div className="flex items-center justify-between text-[10px] text-slate-400 font-medium">
             <span>Périmètre des sources :</span>
             <span className="text-sky-400 font-bold">
-              {sourceMode === 'corpus' && 'Documents Projet & Entreprise'}
+              {sourceMode === 'corpus' && (mode === 'company' ? 'Documents Entreprise' : 'Documents Projet & Entreprise')}
               {sourceMode === 'corpus_web' && 'Corpus + Recherche Web'}
-              {sourceMode === 'web' && 'Recherche Web Externe Seule'}
+              {sourceMode === 'web' && (mode === 'company' ? 'Sites de Référence Configurés Uniquement' : 'Recherche Web Externe Seule')}
             </span>
           </div>
 
@@ -353,7 +367,7 @@ export function DCEChatSidebar({ projectId, projectTitle, isOpen, onClose }: DCE
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder={`Poser une question sur le projet (${sourceMode})...`}
+            placeholder={mode === 'company' ? `Poser une question sur votre entreprise (${sourceMode})...` : `Poser une question sur le projet (${sourceMode})...`}
             disabled={isLoading}
             className="flex-1 px-3.5 py-2.5 rounded-xl bg-slate-900 border border-slate-800 focus:border-sky-500 text-white text-xs placeholder:text-slate-600 focus:outline-none transition-colors"
           />

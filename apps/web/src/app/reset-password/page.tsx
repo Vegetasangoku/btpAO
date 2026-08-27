@@ -27,37 +27,116 @@ function ResetPasswordForm() {
   const [confirmPassword, setConfirmPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [verifying, setVerifying] = useState(Boolean(token));
+  const [verifying, setVerifying] = useState(true);
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
 
   useEffect(() => {
-    async function verifyToken() {
-      if (!token) {
-        // If no token in query, check if Supabase has an active session from recovery link
-        const { data } = await supabase.auth.getSession();
-        if (data?.session?.user?.email) {
-          setUserEmail(data.session.user.email);
+    let mounted = true;
+
+    // 1. Subscribe to Supabase auth state changes (catches #access_token=...&type=recovery hash parsing)
+    const { data: authListener } = supabase.auth.onAuthStateChange(async (event, session) => {
+      if (event === 'PASSWORD_RECOVERY' || event === 'SIGNED_IN' || event === 'USER_UPDATED') {
+        if (mounted && session?.user?.email) {
+          setUserEmail(session.user.email);
+          setErrorMsg(null);
+          setVerifying(false);
         }
-        setVerifying(false);
+      }
+    });
+
+    async function checkAuth() {
+      // 2. Custom backend token in query (?token=...)
+      const customToken = searchParams.get('token');
+      if (customToken) {
+        try {
+          const res = await api.verifyResetToken(customToken);
+          if (mounted) {
+            if (res.valid) {
+              setUserEmail(res.email);
+              setErrorMsg(null);
+            } else {
+              setErrorMsg("Ce lien de réinitialisation est invalide ou a expiré.");
+            }
+            setVerifying(false);
+          }
+        } catch (err: any) {
+          if (mounted) {
+            setErrorMsg(err?.message || "Ce lien de réinitialisation est invalide ou a expiré. Veuillez refaire une demande.");
+            setVerifying(false);
+          }
+        }
         return;
       }
 
-      try {
-        const res = await api.verifyResetToken(token);
-        if (res.valid) {
-          setUserEmail(res.email);
+      // 3. Supabase PKCE code exchange (?code=...)
+      const code = searchParams.get('code');
+      if (code) {
+        try {
+          const { data, error } = await supabase.auth.exchangeCodeForSession(code);
+          if (!error && data?.session?.user?.email && mounted) {
+            setUserEmail(data.session.user.email);
+            setErrorMsg(null);
+            setVerifying(false);
+            return;
+          }
+        } catch (err) {
+          console.warn('PKCE code exchange notice:', err);
         }
-      } catch (err: any) {
-        setErrorMsg(err?.message || "Ce lien de réinitialisation est invalide ou a expiré.");
-      } finally {
-        setVerifying(false);
       }
+
+      // 4. Supabase token_hash (?token_hash=...&type=recovery)
+      const tokenHash = searchParams.get('token_hash');
+      const type = searchParams.get('type');
+      if (tokenHash && type === 'recovery') {
+        try {
+          const { data, error } = await supabase.auth.verifyOtp({
+            token_hash: tokenHash,
+            type: 'recovery',
+          });
+          if (!error && data?.session?.user?.email && mounted) {
+            setUserEmail(data.session.user.email);
+            setErrorMsg(null);
+            setVerifying(false);
+            return;
+          }
+        } catch (err) {
+          console.warn('verifyOtp notice:', err);
+        }
+      }
+
+      // 5. Active session check
+      try {
+        const { data } = await supabase.auth.getSession();
+        if (data?.session?.user?.email && mounted) {
+          setUserEmail(data.session.user.email);
+          setErrorMsg(null);
+          setVerifying(false);
+          return;
+        }
+      } catch {}
+
+      // 6. If no credentials found after a brief delay for hash parsing
+      setTimeout(() => {
+        if (mounted) {
+          const hash = typeof window !== 'undefined' ? window.location.hash : '';
+          const hasRecoveryHash = hash.includes('access_token') || hash.includes('type=recovery');
+          if (!hasRecoveryHash && !userEmail) {
+            setErrorMsg("Lien de réinitialisation manquant ou invalide. Veuillez cliquer sur le lien sécurisé reçu par e-mail.");
+            setVerifying(false);
+          }
+        }
+      }, 1000);
     }
 
-    verifyToken();
-  }, [token]);
+    checkAuth();
+
+    return () => {
+      mounted = false;
+      authListener?.subscription?.unsubscribe();
+    };
+  }, [searchParams, token, userEmail]);
 
   async function handleReset(e: React.FormEvent) {
     e.preventDefault();
@@ -81,7 +160,7 @@ function ResetPasswordForm() {
 
     try {
       if (token) {
-        // 1. Reset via Backend Secure Token API
+        // 1. Reset via Backend Secure Token API (atomic PostgreSQL apply_password_reset)
         await api.resetPassword(token, password);
       } else {
         // 2. Reset via Supabase Auth Recovery Session
@@ -90,6 +169,11 @@ function ResetPasswordForm() {
         });
         if (error) throw error;
       }
+
+      // Clear any cached session
+      try {
+        await supabase.auth.signOut();
+      } catch {}
 
       setSuccess(true);
       setTimeout(() => {
@@ -121,7 +205,7 @@ function ResetPasswordForm() {
   return (
     <div className="bg-slate-900/90 border border-slate-800 py-8 px-6 sm:px-10 rounded-3xl shadow-2xl space-y-6">
       {errorMsg && (
-        <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs flex items-start gap-2">
+        <div className="p-3.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs flex items-start gap-2.5">
           <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
           <span>{errorMsg}</span>
         </div>
@@ -136,7 +220,7 @@ function ResetPasswordForm() {
           <div className="space-y-1.5">
             <h2 className="text-lg font-bold text-white">Mot de passe mis à jour !</h2>
             <p className="text-xs text-slate-300">
-              Votre nouveau mot de passe a été enregistré avec succès. Vous allez être redirigé vers la page de connexion.
+              Votre nouveau mot de passe a été enregistré avec succès pour <strong className="text-sky-300">{userEmail}</strong>.
             </p>
           </div>
 
@@ -148,14 +232,35 @@ function ResetPasswordForm() {
             <ArrowRight className="w-4 h-4" />
           </Link>
         </div>
+      ) : !token || !userEmail ? (
+        <div className="space-y-4 text-center py-4">
+          <p className="text-xs text-slate-400">
+            Pour réinitialiser votre mot de passe, veuillez utiliser le lien envoyé à votre adresse e-mail.
+          </p>
+          <Link
+            href="/forgot-password"
+            className="inline-flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs shadow-glow transition-all"
+          >
+            <span>Demander un nouveau lien</span>
+            <ArrowRight className="w-4 h-4" />
+          </Link>
+        </div>
       ) : (
         <form onSubmit={handleReset} className="space-y-4">
-          {userEmail && (
-            <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 flex items-center justify-between text-xs">
-              <span className="text-slate-400">Compte :</span>
-              <span className="font-semibold text-sky-400">{userEmail}</span>
+          <div className="p-3.5 rounded-2xl bg-sky-500/10 border border-sky-500/30 flex items-center justify-between text-xs">
+            <div className="flex items-center gap-2.5">
+              <div className="w-7 h-7 rounded-lg bg-sky-500/20 text-sky-300 flex items-center justify-center font-bold">
+                @
+              </div>
+              <div>
+                <span className="text-[10px] font-semibold text-slate-400 block uppercase tracking-wider">Compte concerné</span>
+                <span className="font-bold text-white font-mono text-xs">{userEmail}</span>
+              </div>
             </div>
-          )}
+            <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+              Jeton vérifié
+            </span>
+          </div>
 
           <div>
             <label className="block text-xs font-bold text-slate-300 mb-1.5">

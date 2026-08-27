@@ -69,9 +69,10 @@ class Settings(BaseSettings):
     STRIPE_SECRET_KEY: Optional[str] = Field(default=None)
     STRIPE_WEBHOOK_SECRET: Optional[str] = Field(default=None)
 
-    # Web Search (Serper / Google Search API)
+    # Web Search (Serper / Brave Search API)
     SERPER_API_KEY: Optional[str] = Field(default=None)
-    WEB_SEARCH_PROVIDER: str = Field(default="serper")
+    BRAVE_SEARCH_API_KEY: Optional[str] = Field(default=None)
+    WEB_SEARCH_PROVIDER: str = Field(default="serper")  # 'serper', 'brave', 'auto' 
 
     # Demo & Mock Settings
     ALLOW_MOCK_FALLBACK: bool = Field(default=False)
