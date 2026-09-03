@@ -128,6 +128,7 @@ class Project(Base):
     submission_deadline = Column(DateTime(timezone=True), nullable=True)
     scoring_notes = Column(JSONB, default=lambda: {"technical_weight": 60, "price_weight": 40})
     strategic_directives = Column(Text, nullable=True)
+    output_language = Column(Text, nullable=False, default="fr")  # 'fr' | 'en' | 'ar' -- CHECK constraint en base (30/08)
     metadata_json = Column(JSONB, default=dict)
     outcome_status = Column(Text, default="pending", nullable=False)
     buyer_feedback = Column(JSONB, default=dict)
@@ -191,6 +192,7 @@ class DCEDocument(Base):
     doc_type = Column(Text, nullable=False, default="cctp")
     s3_key = Column(Text, nullable=False)
     file_size_bytes = Column(Numeric, default=0)
+    file_hash = Column(Text, nullable=True)  # 03/09 : dedup anti-doublon/anti-abus, miroir de company_assets
     ocr_status = Column(Text, default="uploaded")
     parsed_summary = Column(Text, nullable=True)
     raw_metadata = Column(JSONB, default=dict)
@@ -228,6 +230,22 @@ class DCECriterionEntity(Base):
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
 
 
+class ProjectPricingLine(Base):
+    """BT01 -- ligne de chiffrage (métré simplifié). Voir apps/api/app/api/pricing.py."""
+    __tablename__ = "project_pricing_lines"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    lot = Column(Text, nullable=True)
+    designation = Column(Text, nullable=False)
+    unite = Column(Text, nullable=False, default="u")
+    quantite = Column(Numeric(14, 3), nullable=False)
+    prix_unitaire_ht = Column(Numeric(14, 2), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
 class DCEEmbedding(Base):
     __tablename__ = "dce_embeddings"
 
@@ -247,11 +265,16 @@ class DCEEmbedding(Base):
 class ProjectDecision(Base):
     __tablename__ = "project_decisions"
 
+    # 29/08 (fin de journée) : ce modèle déclarait un `created_at` qui n'existe PAS dans la
+    # vraie table (et lui manquait `updated_by`, qui existe réellement) -- trouvé en testant
+    # une génération de section pour de vrai, qui échouait pour TOUS les projets avec
+    # "UndefinedColumnError: column project_decisions.created_at does not exist". Corrigé
+    # pour correspondre exactement au schéma réel (voir information_schema.columns).
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
     project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), unique=True, nullable=False)
     form_data = Column(JSONB, nullable=False, default=dict)
-    created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+    updated_by = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
 
@@ -339,6 +362,32 @@ class CompanyAsset(Base):
     updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
 
+class KnowledgeVector(Base):
+    """
+    Fragments (chunks) du texte COMPLET de chaque company_asset, un embedding par
+    fragment -- miroir de DCEEmbedding mais pour la base de connaissances
+    entreprise. Corrige le plafond `extracted_text[:4000]` de l'ancien pipeline
+    (app/api/knowledge.py), qui ne rendait recherchable que les ~2 premières pages
+    de tout document déposé, quelle que soit sa longueur réelle (mémoires
+    techniques, réponses à appels d'offres passées...). La table
+    `knowledge_vectors`, son index HNSW (idx_knowledge_vectors_hnsw) et sa policy
+    RLS (tenant_isolation_knowledge_vectors) existaient déjà depuis la migration
+    00001_init_multi_tenant_schema.sql -- jamais mappés côté ORM ni jamais utilisés
+    par le code applicatif. Réutilisés ici tels quels (aucune nouvelle migration de
+    schéma nécessaire) plutôt que de créer une table parallèle redondante. (30/08)
+    """
+    __tablename__ = "knowledge_vectors"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    asset_id = Column(UUID(as_uuid=True), ForeignKey("company_assets.id", ondelete="CASCADE"), nullable=True)
+    category = Column(Text, nullable=False)
+    content = Column(Text, nullable=False)
+    metadata_json = Column(JSONB, default=dict)
+    embedding = Column(Vector(1536), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+
+
 class CompanyBootstrapRun(Base):
     __tablename__ = "company_bootstrap_runs"
 
@@ -420,6 +469,53 @@ class PlatformSettings(Base):
     updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
 
+class LlmCatalogModel(Base):
+    """Catalogue de modèles LLM en lecture seule, synchronisé depuis OpenRouter (29/08).
+    Sert de référence (liste à jour, prix, dépréciation) pour l'admin -- ne remplace PAS
+    le chemin d'appel réel (LiteLLM + clés propres du tenant/plateforme, inchangé)."""
+    __tablename__ = "llm_catalog_models"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    external_id = Column(Text, nullable=False, unique=True)
+    canonical_slug = Column(Text, nullable=True)
+    display_name = Column(Text, nullable=True)
+    provider_slug = Column(Text, nullable=True)
+    context_length = Column(Integer, nullable=True)
+    pricing_prompt_per_million = Column(Numeric(14, 4), nullable=True)
+    pricing_completion_per_million = Column(Numeric(14, 4), nullable=True)
+    is_moderated = Column(Boolean, nullable=False, default=False)
+    expiration_date = Column(DateTime(timezone=True), nullable=True)
+    raw_metadata = Column(JSONB, nullable=False, default=dict)
+    is_active = Column(Boolean, nullable=False, default=True)
+    first_seen_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+    last_seen_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class LlmUsageLog(Base):
+    """Journal de consommation LLM (30/08) -- une ligne par appel LiteLLM reel (chemin
+    principal ou repli resilient), avec tokens et cout estime (via les prix de
+    LlmCatalogModel quand le modele y est reference). Reponse a une demande explicite de
+    l'utilisateur : aucun suivi de consommation ni limite parametrable n'existait avant
+    cette table, malgre l'usage reel de LiteLLM. Alimentee depuis app/workers/tasks.py ;
+    le plafond mensuel optionnel par fournisseur est verifie dans
+    model_routing_service.get_credentials_for_model() avant chaque appel."""
+    __tablename__ = "llm_usage_logs"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="SET NULL"), nullable=True)
+    provider_id = Column(Text, nullable=True)
+    model_string = Column(Text, nullable=False)
+    prompt_tokens = Column(Integer, nullable=True)
+    completion_tokens = Column(Integer, nullable=True)
+    total_tokens = Column(Integer, nullable=True)
+    estimated_cost_usd = Column(Numeric(12, 6), nullable=True)
+    was_fallback = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+
+
 class AuditLog(Base):
     __tablename__ = "audit_logs"
 
@@ -442,6 +538,18 @@ class SubscriptionPlan(Base):
     price_monthly_cents = Column(Integer, nullable=False, default=0)
     included_dossiers_month = Column(Integer, nullable=False, default=3)
     extra_dossier_price_cents = Column(Integer, nullable=False, default=9900)
+    monthly_llm_cost_cap_usd = Column(Numeric(10, 2), nullable=True)  # 02/09 : plafond de cout LLM reel par defaut pour ce forfait (USD), voir billing_service.get_effective_cost_cap_usd
+    # 03/09 : verrous de volume/cout complementaires (voir migration 00032) -- protegent
+    # la marge sur les axes qui ne sont PAS deja couverts par le plafond de cout LLM :
+    # pages ingerees (charge Postgres/pgvector), cout OCR Azure (jamais journalise avant),
+    # et frequence d'usage du chat / du connecteur SharePoint.
+    included_pages_month = Column(Integer, nullable=True)
+    extra_pages_price_cents_per_1000 = Column(Integer, nullable=False, default=500)
+    monthly_ocr_cost_cap_usd = Column(Numeric(10, 2), nullable=True)
+    included_questions_month = Column(Integer, nullable=True)
+    extra_questions_price_cents_per_100 = Column(Integer, nullable=False, default=300)
+    included_sharepoint_files_month = Column(Integer, nullable=True)
+    extra_sharepoint_files_price_cents_per_100 = Column(Integer, nullable=False, default=400)
     features = Column(JSONB, default=list)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
@@ -458,7 +566,16 @@ class TenantSubscription(Base):
     stripe_customer_id = Column(Text, nullable=True)
     stripe_subscription_id = Column(Text, nullable=True)
     custom_quota_dossiers = Column(Integer, nullable=True)
+    custom_llm_cost_cap_usd = Column(Numeric(10, 2), nullable=True)  # 02/09 : surcharge par-tenant du plafond de cout LLM (prioritaire sur SubscriptionPlan.monthly_llm_cost_cap_usd)
     allow_overage = Column(Boolean, default=True, nullable=False)
+    # 03/09 : surcharges par-tenant des verrous de volume (miroir de custom_llm_cost_cap_usd)
+    custom_pages_month = Column(Integer, nullable=True)
+    custom_ocr_cost_cap_usd = Column(Numeric(10, 2), nullable=True)
+    custom_questions_month = Column(Integer, nullable=True)
+    custom_sharepoint_files_month = Column(Integer, nullable=True)
+    allow_page_overage = Column(Boolean, nullable=False, default=True)
+    allow_question_overage = Column(Boolean, nullable=False, default=True)
+    allow_sharepoint_overage = Column(Boolean, nullable=False, default=True)
     current_period_start = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
     current_period_end = Column(DateTime(timezone=True), nullable=False)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
@@ -476,8 +593,77 @@ class TenantUsageCounter(Base):
     sections_generated = Column(Integer, default=0, nullable=False)
     exports_count = Column(Integer, default=0, nullable=False)
     web_searches_count = Column(Integer, default=0, nullable=False)
+    # 03/09 : compteurs de volume complementaires (voir migration 00032)
+    pages_ingested = Column(Integer, default=0, nullable=False)
+    questions_asked = Column(Integer, default=0, nullable=False)
+    ocr_pages_azure = Column(Integer, default=0, nullable=False)
+    ocr_pages_local = Column(Integer, default=0, nullable=False)
+    sharepoint_files_indexed = Column(Integer, default=0, nullable=False)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class OcrUsageLog(Base):
+    """Journal de consommation OCR reelle (03/09, miroir de LlmUsageLog) -- avant cette
+    table, aucun cout Azure Document Intelligence n'etait jamais journalise ni plafonne,
+    alors que c'est un cout variable reel independant du plafond LLM (voir
+    app/services/ocr_cost_service.py)."""
+    __tablename__ = "ocr_usage_logs"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    document_id = Column(UUID(as_uuid=True), nullable=True)
+    source = Column(Text, nullable=False, default="dce")  # 'dce' | 'knowledge' | 'sharepoint'
+    provider = Column(Text, nullable=False)  # 'azure_doc_intelligence' | 'local_pdf_parser'
+    pages_local = Column(Integer, nullable=False, default=0)
+    pages_azure = Column(Integer, nullable=False, default=0)
+    estimated_cost_usd = Column(Numeric(12, 6), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+
+
+class SharePointConnection(Base):
+    """Un connecteur SharePoint par tenant (03/09, Microsoft Graph, client-credentials
+    flow). delta_link porte le curseur de synchronisation incrementale -- voir
+    app/services/sharepoint_service.py. Les identifiants Azure AD (client_id/secret)
+    sont fournis par l'IT du CLIENT, jamais par btpAO."""
+    __tablename__ = "sharepoint_connections"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), unique=True, nullable=False)
+    ms_tenant_id = Column(Text, nullable=False)
+    client_id = Column(Text, nullable=False)
+    client_secret_encrypted = Column(Text, nullable=False)
+    site_url = Column(Text, nullable=False)
+    drive_id = Column(Text, nullable=True)
+    selected_folder_path = Column(Text, nullable=False, default="/")
+    allowed_extensions = Column(ARRAY(Text), nullable=False, default=lambda: ["pdf", "docx", "xlsx"])
+    max_file_size_bytes = Column(Numeric, nullable=False, default=52428800)
+    status = Column(Text, nullable=False, default="pending_verification")
+    last_error = Column(Text, nullable=True)
+    delta_link = Column(Text, nullable=True)
+    last_synced_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class SharePointSyncItem(Base):
+    """Un enregistrement par fichier SharePoint deja traite (03/09) -- permet de ne
+    reindexer QUE les fichiers nouveaux ou dont le contenu a change (comparaison
+    file_hash), meme si Microsoft Graph renvoie l'item dans un delta."""
+    __tablename__ = "sharepoint_sync_items"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    connection_id = Column(UUID(as_uuid=True), ForeignKey("sharepoint_connections.id", ondelete="CASCADE"), nullable=False)
+    graph_item_id = Column(Text, nullable=False)
+    filename = Column(Text, nullable=False)
+    file_hash = Column(Text, nullable=True)
+    size_bytes = Column(Numeric, nullable=True)
+    company_asset_id = Column(UUID(as_uuid=True), ForeignKey("company_assets.id", ondelete="SET NULL"), nullable=True)
+    status = Column(Text, nullable=False, default="indexed")
+    status_detail = Column(Text, nullable=True)
+    last_synced_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
 
 
 class PasswordResetToken(Base):

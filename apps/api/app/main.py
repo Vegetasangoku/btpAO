@@ -63,14 +63,13 @@ async def log_and_report_unhandled_exceptions(request: Request, exc: Exception):
 # CORS Middleware configuration
 # NOTE: allow_credentials=True is incompatible with allow_origins=["*"] in browsers.
 # We must explicitly list allowed origins when credentials are used.
+# Origins now come from settings.CORS_ORIGINS (app/core/config.py) so the production
+# frontend origin(s) can be set via the CORS_ORIGINS env var (JSON array, e.g.
+# '["https://app.btpao.fr"]') without touching this file. Localhost origins are kept
+# in the default list so local dev keeps working unchanged.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://localhost:3001",
-        "http://127.0.0.1:3000",
-        "https://localhost:3000",
-    ],
+    allow_origins=settings.CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
@@ -85,6 +84,8 @@ from app.api.mea_dossiers import router as mea_dossiers_router
 from app.api.mea_structure import router as mea_structure_router
 from app.api.country_sources import router as country_sources_router
 from app.api.client_templates import router as client_templates_router
+from app.api.pricing import router as pricing_router
+from app.api.sharepoint import router as sharepoint_router
 
 all_routers = [
     auth_router,
@@ -101,9 +102,11 @@ all_routers = [
     mea_structure_router,
     country_sources_router,
     client_templates_router,
+    pricing_router,
     admin_router,
     billing_router,
     team_router,
+    sharepoint_router,
 ]
 
 
@@ -271,3 +274,73 @@ async def celery_health_check():
     return JSONResponse(status_code=status_code, content=health)
 
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Fraîcheur du catalogue de modèles LLM
+#
+# La synchronisation nominale est nocturne (Celery Beat, 4h00 Europe/Paris — voir
+# core/celery_app.py). Ce filet de sécurité couvre les déploiements où Beat n'est pas
+# lancé : au démarrage de l'API, si le catalogue n'a jamais été synchronisé ou date de
+# plus de 24 h, la synchronisation est relancée en tâche de fond. Elle n'est jamais
+# bloquante et n'empêche jamais l'API de démarrer : le socle tarifaire de référence
+# (services/llm_reference_catalog.py) reste valide même si elle échoue.
+# ══════════════════════════════════════════════════════════════════════════════
+
+CATALOG_MAX_AGE_HOURS = 24
+
+
+@app.on_event("startup")
+async def refresh_llm_catalog_if_stale() -> None:
+    import asyncio
+    from datetime import datetime, timedelta, timezone
+
+    async def _refresh() -> None:
+        try:
+            from sqlalchemy import select
+            from sqlalchemy.orm.attributes import flag_modified
+            from app.core.db import AsyncSessionLocal
+            from app.models.entities import PlatformSettings
+            from app.services.llm_catalog_service import sync_catalog
+
+            async with AsyncSessionLocal() as db:
+                res = await db.execute(select(PlatformSettings).where(PlatformSettings.id == "global"))
+                ps = res.scalar_one_or_none()
+                raw_last = (ps.settings or {}).get("llm_catalog_last_synced_at") if ps else None
+
+                if raw_last:
+                    try:
+                        last = datetime.fromisoformat(str(raw_last).replace("Z", "+00:00"))
+                        if last.tzinfo is None:
+                            last = last.replace(tzinfo=timezone.utc)
+                        if datetime.now(timezone.utc) - last < timedelta(hours=CATALOG_MAX_AGE_HOURS):
+                            return
+                    except (TypeError, ValueError):
+                        pass  # Horodatage illisible : on resynchronise.
+
+                result = await sync_catalog(db)
+                if ps:
+                    updated = dict(ps.settings or {})
+                    updated["llm_catalog_last_synced_at"] = result["synced_at"]
+                    updated["llm_catalog_last_sync_trigger"] = "api_startup"
+                    ps.settings = updated
+                    flag_modified(ps, "settings")
+                else:
+                    db.add(PlatformSettings(
+                        id="global",
+                        settings={
+                            "llm_catalog_last_synced_at": result["synced_at"],
+                            "llm_catalog_last_sync_trigger": "api_startup",
+                        },
+                    ))
+                await db.commit()
+                logging.getLogger("uvicorn.error").info(
+                    "Catalogue LLM synchronisé au démarrage : %s modèles vus, %s créés, %s désactivés.",
+                    result.get("total_seen"), result.get("created"), result.get("deactivated"),
+                )
+        except Exception as e:
+            logging.getLogger("uvicorn.error").warning(
+                "Synchronisation du catalogue LLM au démarrage ignorée (%s) — le socle tarifaire de référence reste appliqué.",
+                e,
+            )
+
+    asyncio.create_task(_refresh())

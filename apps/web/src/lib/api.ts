@@ -14,6 +14,9 @@ import {
   UserProfile,
   PlatformLLMKeys,
   CustomLLMProvider,
+  LlmCatalogResponse,
+  LlmCatalogSyncResult,
+  CostLimitsOverview,
   TeamMember,
   TeamInvitation,
   SuggestedTemplate,
@@ -24,6 +27,23 @@ import {
 
 
 import { supabase } from './supabase/client';
+
+/** Error thrown by fetcher()/fetchAuthenticatedBlobUrl() that preserves the real HTTP
+ *  status code alongside the human-readable message. Before this, fetcher() discarded
+ *  the numeric status whenever the backend response body had a `detail` field (the
+ *  normal FastAPI error shape), so callers could never reliably tell "not authenticated"
+ *  (401) apart from "server/permission error" (403/500/...) -- every failure collapsed
+ *  into the same generic Error(message). That is how a real backend 500 (e.g. a missing
+ *  Postgres GRANT) could only ever be displayed as a hedged "session expired or service
+ *  unavailable" message instead of the precise one each case deserves. */
+export class ApiError extends Error {
+  status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+  }
+}
 
 const rawApiUrl = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000').replace(/\/$/, '');
 const API_BASE_URL = rawApiUrl.endsWith('/api') ? rawApiUrl : `${rawApiUrl}/api`;
@@ -90,7 +110,7 @@ async function fetcher<T>(endpoint: string, options: RequestInit = {}): Promise<
       } catch {
         // Response body wasn't JSON — keep the generic message.
       }
-      throw new Error(detail);
+      throw new ApiError(detail, res.status);
     }
     return await res.json();
   } catch (err) {
@@ -135,7 +155,7 @@ export async function fetchAuthenticatedBlobUrl(absoluteUrl: string): Promise<st
   }
   const res = await fetch(absoluteUrl, { headers });
   if (!res.ok) {
-    throw new Error(`HTTP ${res.status}`);
+    throw new ApiError(`HTTP ${res.status}`, res.status);
   }
   const blob = await res.blob();
   return URL.createObjectURL(blob);
@@ -324,18 +344,27 @@ export const api = {
       body: JSON.stringify({ project_id: projectId, title, nodes }),
     }),
 
-  // Export Word / PDF (unified helper used by export page)
-  exportProject: (projectId: string, opts: { format: 'docx' | 'pdf'; include_visuals?: boolean; template?: string }) =>
-    fetcher<{ docx_url?: string; pdf_url?: string; filename?: string; file_size_kb?: number; sections_count?: number }>('/export/compile', {
+  // Export Word / PDF (unified helper used by export page). Correctif tâche #66
+  // (02/09) : renvoyait auparavant un type inventé (docx_url/pdf_url/filename/
+  // file_size_kb/sections_count) qui ne correspondait à AUCUN champ réellement
+  // renvoyé par /export/compile (voir ExportJobOut côté backend) -- la carte de
+  // résultat ne pouvait donc jamais s'afficher correctement. Réutilise
+  // désormais le même type ExportJob que compileExport ci-dessous.
+  exportProject: (projectId: string, opts: { format: 'docx' | 'pdf'; include_visuals?: boolean; include_cover_page?: boolean }) =>
+    fetcher<ExportJob>('/export/compile', {
       method: 'POST',
       body: JSON.stringify({
         project_id: projectId,
         format: opts.format,
         include_gantt: opts.include_visuals ?? true,
         include_organigramme: opts.include_visuals ?? true,
-        template: opts.template || 'standard_btp',
+        include_cover_page: opts.include_cover_page ?? true,
       }),
     }),
+  // /export/compile ne fait que déclencher la génération en tâche de fond et répond
+  // immédiatement avec status "processing" -- ceci permet d'interroger l'état réel
+  // jusqu'à ce que le worker Celery ait fini (ou échoué).
+  getExportJob: (jobId: string) => fetcher<ExportJob>(`/export/job/${jobId}`),
 
   // Legacy export helper (kept for backward compat)
   compileExport: (projectId: string, format: 'docx' | 'pdf' | 'both', includeVisuals = true) =>
@@ -385,6 +414,35 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(data),
     }),
+
+  // Knowledge & Document Downloads / Previews
+  getKnowledgeAssetBlobUrl: async (assetId: string, inline: boolean = false) => {
+    return fetchAuthenticatedBlobUrl(`${API_BASE_URL}/knowledge/assets/${assetId}/download?inline=${inline}`);
+  },
+
+  getWordTemplateBlobUrl: async () => {
+    return fetchAuthenticatedBlobUrl(`${API_BASE_URL}/knowledge/template/word/download`);
+  },
+
+  // Admin Tenant Document Management
+  getAdminTenantDocuments: (tenantId: string) =>
+    fetcher<Array<{
+      id: string;
+      file_name: string;
+      title: string;
+      category: string;
+      file_path: string;
+      file_type: string;
+      file_size: number;
+      status: string;
+      source: string;
+      created_at?: string;
+      can_download: boolean;
+    }>>(`/admin/tenants/${tenantId}/documents`),
+
+  getAdminTenantDocumentBlobUrl: async (tenantId: string, docId: string, inline: boolean = false) => {
+    return fetchAuthenticatedBlobUrl(`${API_BASE_URL}/admin/tenants/${tenantId}/documents/${docId}/download?inline=${inline}`);
+  },
 
 
   // Project Q&A Assistant with configurable source mode ('corpus' | 'corpus_web' | 'web')
@@ -496,12 +554,16 @@ export const api = {
       method: 'DELETE',
     }),
   getPlatformLLMKeys: () => fetcher<PlatformLLMKeys>('/admin/llm-keys'),
+  getLlmUsageSummary: () => fetcher<any>('/admin/llm-usage-summary'),
+  getRevenueSummary: () => fetcher<any>('/admin/revenue-summary'),
   updatePlatformLLMKeys: (data: {
     anthropic_api_key?: string;
     openai_api_key?: string;
     mistral_api_key?: string;
     default_llm_tier?: string;
+    default_fallback_tier?: string;
     custom_providers?: any[];
+    model_tier_overrides?: Record<string, string>;
   }) =>
     fetcher<any>('/admin/llm-keys', {
       method: 'POST',
@@ -524,6 +586,44 @@ export const api = {
     }>('/admin/llm-keys/test-provider', {
       method: 'POST',
       body: JSON.stringify(data),
+    }),
+  // ── Plafonds de dépense IA (fournisseur / forfait / client) ──────────────
+  getCostLimits: () => fetcher<CostLimitsOverview>('/admin/cost-limits'),
+  updateCostLimitSettings: (data: {
+    display_currency?: 'EUR' | 'USD';
+    eur_usd_rate?: number;
+    target_llm_share?: number;
+    alert_threshold_pct?: number;
+  }) =>
+    fetcher<{ success: boolean; settings: CostLimitsOverview['settings'] }>('/admin/cost-limits/settings', {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+  setProviderCostCap: (providerId: string, amount: number | null, currency: 'EUR' | 'USD') =>
+    fetcher<{ success: boolean; cap_usd: number | null }>(`/admin/cost-limits/providers/${providerId}`, {
+      method: 'PUT',
+      body: JSON.stringify({ amount, currency }),
+    }),
+  setPlanCostCap: (planId: string, amount: number | null, currency: 'EUR' | 'USD') =>
+    fetcher<{ success: boolean; cap_usd: number | null }>(`/admin/cost-limits/plans/${planId}`, {
+      method: 'PUT',
+      body: JSON.stringify({ amount, currency }),
+    }),
+  setTenantCostCap: (tenantId: string, amount: number | null, currency: 'EUR' | 'USD') =>
+    fetcher<{ success: boolean; cap_usd: number | null }>(`/admin/cost-limits/tenants/${tenantId}`, {
+      method: 'PUT',
+      body: JSON.stringify({ amount, currency }),
+    }),
+  applyRecommendedPlanCaps: () =>
+    fetcher<{ success: boolean; applied: { plan_id: string; cap_usd: number }[] }>(
+      '/admin/cost-limits/plans/apply-recommended',
+      { method: 'POST' },
+    ),
+
+  getLlmCatalog: () => fetcher<LlmCatalogResponse>('/admin/llm-catalog'),
+  syncLlmCatalog: () =>
+    fetcher<LlmCatalogSyncResult>('/admin/llm-catalog/sync', {
+      method: 'POST',
     }),
 
 
@@ -601,6 +701,8 @@ export const api = {
     total_dce_chunks: number;
     total_knowledge_chunks: number;
     index_type: string;
+    embedding_mode?: 'real' | 'degraded_fallback';
+    embedding_provider?: 'openai' | 'mistral' | null;
   }>('/admin/rag-supervision'),
   getTenantSystemPrompt: (tenantId: string) => fetcher<{ tenant_id: string; system_prompt: string }>(`/admin/system-prompt/${tenantId}`),
   updateTenantSystemPrompt: (tenantId: string, systemPrompt: string) =>
@@ -613,6 +715,19 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+
+  // BT01 -- Chiffrage & Ajustement Inflation
+  getPricingLines: (projectId: string) => fetcher<any[]>(`/projects/${projectId}/pricing-lines`),
+  createPricingLine: (projectId: string, payload: { lot?: string; designation: string; unite: string; quantite: number; prix_unitaire_ht: number }) =>
+    fetcher<any>(`/projects/${projectId}/pricing-lines`, { method: 'POST', body: JSON.stringify(payload) }),
+  updatePricingLine: (lineId: string, payload: { lot?: string; designation: string; unite: string; quantite: number; prix_unitaire_ht: number }) =>
+    fetcher<any>(`/pricing-lines/${lineId}`, { method: 'PUT', body: JSON.stringify(payload) }),
+  deletePricingLine: (lineId: string) => fetcher<any>(`/pricing-lines/${lineId}`, { method: 'DELETE' }),
+  getPricingSummary: (projectId: string) => fetcher<any>(`/projects/${projectId}/pricing-summary`),
+  analyzePricing: (projectId: string) => fetcher<any>(`/projects/${projectId}/pricing-analysis`, { method: 'POST' }),
+  getEconomicSettings: () => fetcher<any>('/company/economic-settings'),
+  updateEconomicSettings: (payload: { taux_inflation_pct?: number; marge_cible_pct?: number; risk_contingency_pct?: number; taux_horaires?: Record<string, number> }) =>
+    fetcher<any>('/company/economic-settings', { method: 'PUT', body: JSON.stringify(payload) }),
 
   // Knowledge & Word Template
   uploadWordTemplate: (formData: FormData) =>

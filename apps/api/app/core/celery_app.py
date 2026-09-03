@@ -54,6 +54,19 @@ celery_app.conf.beat_schedule = {
         "task": "tasks.purge_expired_accounts_task",
         "schedule": crontab(hour=3, minute=0),  # Everyday at 3:00 AM Paris time
     },
+    "daily-llm-catalog-sync": {
+        "task": "tasks.sync_llm_catalog_daily_task",
+        "schedule": crontab(hour=4, minute=0),  # Everyday at 4:00 AM Paris time
+    },
+    "sharepoint-delta-sync": {
+        # 03/09 : toutes les 6h -- assez frequent pour que "les nouveaux fichiers"
+        # deposes par le client apparaissent vite dans son RAG, assez espace pour que
+        # le cout ne soit jamais celui d'un balayage complet (chaque cycle ne traite
+        # QUE le delta Microsoft Graph depuis le cycle precedent, voir
+        # app/workers/tasks.py:sharepoint_sync_task).
+        "task": "tasks.sharepoint_sync_all_tenants_task",
+        "schedule": crontab(minute=0, hour="*/6"),
+    },
 }
 
 

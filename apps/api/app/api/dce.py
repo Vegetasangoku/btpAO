@@ -3,6 +3,7 @@ DCE (Dossier de Consultation des Entreprises) Ingestion & Criteria Extraction En
 Strictly scoped by tenant_id via SQLAlchemy 2 Async and Postgres RLS.
 Zero mock fallbacks, zero local memory cache.
 """
+import hashlib
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -15,6 +16,7 @@ from app.core.security import CurrentTenantUser, get_current_tenant_user
 from app.core.storage import storage_service
 from app.models.entities import DCECriterionEntity, DCEDocument, DCEEmbedding, ProjectGoNoGoAnalysis
 from app.models.schemas import DCECriterion, DCEUploadResponse, GoNoGoAnalysisOut
+from app.services.billing_service import billing_service, infer_provider_id_from_model_string
 from app.services.chunking_service import chunking_service
 from app.services.go_no_go_service import go_no_go_service
 from app.services.ocr_service import ocr_service
@@ -44,6 +46,27 @@ async def upload_dce_document(
     filename = file.filename or "dce_document.pdf"
     doc_id = uuid.uuid4()
 
+    # 03/09 : rejette un doublon exact deja indexe sur CE projet -- protection anti-abus
+    # (un client, volontairement ou par erreur, qui redepose 50 fois le meme CCTP ne doit
+    # pas faire consommer 50 fois le quota de pages / le cout OCR-embeddings), miroir du
+    # dedup deja en place sur la base de connaissances (app/api/knowledge.py).
+    file_hash = hashlib.sha256(file_bytes).hexdigest()
+    dedup_stmt = select(DCEDocument).where(
+        DCEDocument.tenant_id == t_uuid,
+        DCEDocument.project_id == p_uuid,
+        DCEDocument.file_hash == file_hash,
+    )
+    dedup_result = await db.execute(dedup_stmt)
+    existing_duplicate = dedup_result.scalar_one_or_none()
+    if existing_duplicate:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Ce fichier est identique à un document déjà déposé sur ce dossier : "
+                f"« {existing_duplicate.filename} ». Supprimez-le d'abord si vous voulez le remplacer."
+            ),
+        )
+
     subpath = f"dce/{project_id}/{doc_id}_{filename}"
     s3_key = storage_service.upload_file(
         tenant_id=current_user.tenant_id,
@@ -61,34 +84,18 @@ async def upload_dce_document(
         doc_type=doc_type,
         s3_key=s3_key,
         file_size_bytes=len(file_bytes),
+        file_hash=file_hash,
         ocr_status="processing",
         raw_metadata={"task": "parse_dce_task"},
         created_at=datetime.utcnow(),
     )
     db.add(dce_doc)
 
-    # 2. Save extracted default criteria if RC document
-    if doc_type == "rc" or "rc" in filename.lower() or "reglement" in filename.lower():
-        default_criteria = [
-            ("1. Moyens humains & Organisation du chantier", 25.0, "Pertinence de l'organigramme dédié et qualifications des cadres.", ["Organigramme nominatif", "CVs signés"], ["Attestations de formation SST"]),
-            ("2. Méthodologie d'exécution, Matériels & Phasage", 35.0, "Procédés du gros œuvre, implantation grue et délai de 6 mois.", ["Planning Gantt", "Fiches techniques Potain MDT"], ["Plan de calepinage banches"]),
-            ("3. Démarche Environnementale (RSE) & Déchets", 25.0, "Bétons bas carbone, tri 5 flux in situ et valorisation >= 85%.", ["BSD informatisés", "Béton CEM III"], ["Fiches FDES"]),
-            ("4. Qualité (PAQ) & Sécurité (PPSPS)", 15.0, "Contrôles préalables au coulage et accueil sécurité.", ["Fiches d'autocontrôle", "PPSPS"], ["Fiche PAQ type"]),
-        ]
-        for title, weight, desc, exp, ev in default_criteria:
-            crit = DCECriterionEntity(
-                id=uuid.uuid4(),
-                tenant_id=t_uuid,
-                project_id=p_uuid,
-                criterion_title=title,
-                weight_percentage=weight,
-                description=desc,
-                key_expectations=exp,
-                required_evidence=ev,
-                mandatory="true",
-                created_at=datetime.utcnow(),
-            )
-            db.add(crit)
+    # 2. L'extraction des critères réels se fait maintenant de façon asynchrone dans
+    # parse_dce_task (01/09), une fois le texte OCR du document disponible -- un
+    # vrai appel LLM (criteria_extraction_service, task_type="extraction_gonogo")
+    # remplace l'ancienne insertion synchrone des 4 mêmes critères codés en dur,
+    # qui ne lisait jamais le contenu réel du document déposé.
 
     await db.flush()
 
@@ -221,6 +228,10 @@ async def chat_with_dce(
     except ValueError:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid project UUID")
 
+    # 02/09 : plafond de cout LLM mensuel reel (protection de marge, parametrable par
+    # forfait/tenant) -- verifie avant tout appel LLM.
+    await billing_service.check_and_enforce_cost_cap(current_user.tenant_id, db=db)
+
     query = payload.query.strip()
 
     # 1. Fetch relevant DCE extracts from PostgreSQL
@@ -235,21 +246,38 @@ async def chat_with_dce(
     result = await db.execute(stmt)
     db_chunks = result.scalars().all()
 
-    if db_chunks:
-        sources = [
-            {
-                "source": f"DCE {c.section_title or 'Section'}",
-                "page": int(c.page_number),
-                "snippet": c.content[:150] + "..." if len(c.content) > 150 else c.content,
-            }
-            for c in db_chunks
-        ]
-    else:
-        sources = [
-            {"source": "CCTP Lot 01 — Gros Œuvre & Structure", "page": 18, "snippet": "Article 4.2 : Pénalités de retard fixées à 1/1000ème du montant HT par jour calendaire. Béton bas-carbone CEM III/A obligatoire."},
-            {"source": "Règlement de Consultation (RC)", "page": 7, "snippet": "Article 6 : Critères d'attribution : Valeur Technique (60 points), Prix des prestations (40 points). Délai contractuel : 6 mois fermes."},
-            {"source": "Norme Technique BTP / DTU 21", "page": 1, "snippet": "DTU 21 : Exécution des ouvrages en béton armé. Résistance minimale C25/30, enrobage des armatures 30 mm."},
-        ]
+    # Correctif (29/08) : ce endpoint servait avant un contenu générique câblé en
+    # dur ("CCTP Lot 01"... "Article 4.2"...) avec des pages inventées dès qu'aucun
+    # extrait réel n'existait pour CE dossier précis -- indiscernable pour
+    # l'utilisateur d'une vraie réponse sourcée sur SES documents. Corrigé pour
+    # respecter la même règle "zéro hallucination" appliquée ailleurs dans
+    # l'application (cf. tag "Donnée non trouvée / Manquante") : si rien n'est
+    # indexé pour ce dossier, on le dit clairement plutôt que d'inventer un
+    # contenu plausible mais faux.
+    if not db_chunks:
+        return {
+            "success": True,
+            "query": query,
+            "answer": (
+                "Aucun extrait indexé pour ce dossier pour le moment — je ne peux pas répondre en "
+                "me basant sur votre document réel tant que l'indexation n'est pas terminée. "
+                "Le DCE/CCTP n'a peut-être pas encore été uploadé, ou son analyse est encore en "
+                "cours (OCR + indexation en tâche de fond). Vérifiez le statut du document dans "
+                "l'onglet Documents, puis réessayez dans quelques instants."
+            ),
+            "sources": [],
+            "grounded": False,
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+
+    sources = [
+        {
+            "source": f"DCE {c.section_title or 'Section'}",
+            "page": int(c.page_number),
+            "snippet": c.content[:150] + "..." if len(c.content) > 150 else c.content,
+        }
+        for c in db_chunks
+    ]
 
     sources_text = "\n".join([f"- [{s['source']}, Page {s['page']}]: {s['snippet']}" for s in sources])
     prompt = f"""Tu es un Ingénieur d'Études BTP expert en marchés publics français.
@@ -268,40 +296,63 @@ DIRECTIVES :
 """
 
     answer_text = ""
-    api_key_to_use = payload.custom_api_key or settings.ANTHROPIC_API_KEY
 
+    # Même correctif que sur l'assistant de projet (03/09) : ce point d'appel
+    # lisait uniquement ANTHROPIC_API_KEY et forçait Claude, en ignorant le
+    # fournisseur choisi dans l'administration. Il passe désormais par le routage
+    # commun, donc par le palier du client et ses éventuelles surcharges.
+    from app.services.model_routing_service import model_routing_service
+
+    resolved = await model_routing_service.resolve_model_for_tenant(db, t_uuid)
+    model_to_use = resolved["model_string"]
+    creds = await model_routing_service.get_credentials_for_model(db, model_to_use)
+    api_key_to_use = payload.custom_api_key or creds.get("api_key")
 
     if api_key_to_use:
         try:
-            response = litellm.completion(
-                model="anthropic/claude-3-5-sonnet-20241022",
-                messages=[{"role": "user", "content": prompt}],
-                api_key=api_key_to_use,
-                temperature=0.2,
-                max_tokens=600,
-            )
+            call_kwargs = {
+                "model": model_to_use,
+                "messages": [{"role": "user", "content": prompt}],
+                "api_key": api_key_to_use,
+                "temperature": 0.2,
+                "max_tokens": 600,
+            }
+            if creds.get("api_base"):
+                call_kwargs["api_base"] = creds["api_base"]
+            response = litellm.completion(**call_kwargs)
             answer_text = response.choices[0].message.content
+
+            _usage = getattr(response, "usage", None)
+            await billing_service.log_llm_usage(
+                db=db,
+                tenant_id=t_uuid,
+                project_id=p_uuid,
+                provider_id=creds.get("provider_id") or infer_provider_id_from_model_string(model_to_use),
+                model_string=model_to_use,
+                prompt_tokens=getattr(_usage, "prompt_tokens", None) if _usage else None,
+                completion_tokens=getattr(_usage, "completion_tokens", None) if _usage else None,
+                total_tokens=getattr(_usage, "total_tokens", None) if _usage else None,
+            )
         except Exception as e:
-            print(f"[DCEChat] LLM notice: {e}")
+            print(f"[DCEChat] LLM notice ({model_to_use}): {e}")
 
     if not answer_text:
-        q_lower = query.lower()
-        if "pénalité" in q_lower or "retard" in q_lower:
-            answer_text = "Conformément à l'Article 4.2 du CCTP Lot 01 (Page 18), les pénalités de retard sont fixées à **1/1000ème du montant global HT du marché par jour calendaire de retard**. Elles sont plafonnées à 10% du montant total conformément au CCAG Travaux."
-        elif "délai" in q_lower or "durée" in q_lower or "planning" in q_lower:
-            answer_text = "Le délai d'exécution contractuel est de **6 mois fermes** à compter de la date fixée par l'Ordre de Service (OS) de démarrage (Source : RC Article 6, Page 7). Une phase de préparation de 4 semaines est incluse."
-        elif "béton" in q_lower or "ciment" in q_lower or "carbone" in q_lower:
-            answer_text = "Le CCTP impose la mise en œuvre exclusive de **béton bas-carbone formulé au ciment CEM III/A** disposant d'une FDES vérifiée (Source : CCTP Lot 01, Page 18). Les ouvrages respecteront les prescriptions du DTU 21 (enrobage minimal 30 mm)."
-        elif "critère" in q_lower or "note" in q_lower or "jugement" in q_lower:
-            answer_text = "Le jugement des offres repose sur deux critères principaux (Source : RC Page 7) :\n1. **Valeur Technique (60 points)** : Méthodologie gros œuvre, cadencement 48h, moyens humains dédiés et démarche RSE.\n2. **Prix des prestations (40 points)** : Décomposition du prix global et forfaitaire (DPGF)."
-        else:
-            answer_text = f"D'après l'analyse du DCE (CCTP Lot 01 & Règlement de Consultation), les exigences du marché prévoient le respect strict des normes françaises DTU en vigueur, un délai impératif de 6 mois et l'affectation d'un encadrement qualifié Qualibat 2152.\n\n*Sources vérifiées : CCTP Lot 01 (Page 18) • Règlement de Consultation (Page 7).*"
+        # Correctif (29/08) : repli honnête si l'appel LLM échoue -- ne fabrique
+        # plus de réponse générique câblée en dur déconnectée du dossier réel.
+        # Les VRAIS extraits trouvés (sources ci-dessous) restent affichés même
+        # si le résumé automatique par l'IA a échoué.
+        answer_text = (
+            f"Le moteur IA n'a pas pu générer de résumé pour le moment (voir les journaux serveur). "
+            f"{len(sources)} extrait(s) réel(s) de votre dossier ont bien été trouvés et sont listés "
+            "ci-dessous en sources -- consultez-les directement, ou réessayez la question dans un instant."
+        )
 
     return {
         "success": True,
         "query": query,
         "answer": answer_text,
         "sources": sources,
+        "grounded": True,
         "timestamp": datetime.utcnow().isoformat(),
     }
 

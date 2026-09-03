@@ -30,7 +30,7 @@ from app.models.schemas import (
     TenantLearningOut,
     TenantLearningUpdate,
 )
-from app.services.billing_service import billing_service
+from app.services.billing_service import billing_service, infer_provider_id_from_model_string
 from app.services.go_no_go_service import go_no_go_service
 from app.services.learning_service import learning_service
 
@@ -132,6 +132,7 @@ async def list_projects(
                 submission_deadline=p.submission_deadline,
                 scoring_notes=p.scoring_notes or {"technical_weight": 60, "price_weight": 40},
                 strategic_directives=p.strategic_directives,
+                output_language=p.output_language or "fr",
                 outcome_status=p.outcome_status or "pending",
                 buyer_feedback=p.buyer_feedback or {},
                 outcome_recorded_at=p.outcome_recorded_at,
@@ -170,6 +171,7 @@ async def create_project(
         submission_deadline=payload.submission_deadline,
         scoring_notes=payload.scoring_notes,
         strategic_directives=payload.strategic_directives,
+        output_language=payload.output_language,
         created_at=now,
         updated_at=now,
     )
@@ -256,6 +258,7 @@ async def create_project(
         submission_deadline=new_project.submission_deadline,
         scoring_notes=new_project.scoring_notes or {"technical_weight": 60, "price_weight": 40},
         strategic_directives=new_project.strategic_directives,
+        output_language=new_project.output_language or "fr",
         outcome_status=new_project.outcome_status or "pending",
         buyer_feedback=new_project.buyer_feedback or {},
         outcome_recorded_at=new_project.outcome_recorded_at,
@@ -508,6 +511,7 @@ async def get_project(
         submission_deadline=project.submission_deadline,
         scoring_notes=project.scoring_notes or {"technical_weight": 60, "price_weight": 40},
         strategic_directives=project.strategic_directives,
+        output_language=project.output_language or "fr",
         outcome_status=project.outcome_status or "pending",
         buyer_feedback=project.buyer_feedback or {},
         outcome_recorded_at=project.outcome_recorded_at,
@@ -580,6 +584,7 @@ async def update_project(
         submission_deadline=project.submission_deadline,
         scoring_notes=project.scoring_notes or {"technical_weight": 60, "price_weight": 40},
         strategic_directives=project.strategic_directives,
+        output_language=project.output_language or "fr",
         outcome_status=project.outcome_status or "pending",
         buyer_feedback=project.buyer_feedback or {},
         outcome_recorded_at=project.outcome_recorded_at,
@@ -658,6 +663,7 @@ async def record_project_outcome(
         submission_deadline=project.submission_deadline,
         scoring_notes=project.scoring_notes or {"technical_weight": 60, "price_weight": 40},
         strategic_directives=project.strategic_directives,
+        output_language=project.output_language or "fr",
         outcome_status=project.outcome_status or "pending",
         buyer_feedback=project.buyer_feedback or {},
         outcome_recorded_at=project.outcome_recorded_at,
@@ -697,6 +703,15 @@ async def ask_project_assistant(
     if not clean_question:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="La question ne peut pas être vide.")
 
+    # 02/09 : plafond de cout LLM mensuel reel (protection de marge, parametrable par
+    # forfait/tenant) -- verifie avant toute recherche (corpus/web) et tout appel LLM.
+    await billing_service.check_and_enforce_cost_cap(current_user.tenant_id, db=db)
+    # 03/09 : plafond mensuel de NOMBRE de questions (signal d'abus complementaire au $
+    # deja plafonne ci-dessus, avec depassement payant comme pour les dossiers) -- verifie
+    # AVANT la recherche RAG + l'appel LLM pour ne pas facturer une question qui sera
+    # de toute facon refusee.
+    await billing_service.check_and_enforce_question_quota(t_uuid, db=db)
+
     source_mode = payload.source_mode.strip().lower()
     # Normalize mode names: 'ce_projet'/'corpus' vs 'tout_historique'/'all_history' vs 'web' vs 'corpus_web'
     is_all_history_mode = source_mode in ("tout_historique", "all_history", "history", "all_projects")
@@ -709,6 +724,7 @@ async def ask_project_assistant(
     web_text_parts: List[str] = []
 
     from app.services.embedding_service import embedding_service
+    await embedding_service.sync_platform_key(db)
     query_vector = embedding_service.generate_embedding(clean_question[:2000]) if embedding_service else None
 
     # 2. Mode "tout l'historique" : Interroge l'ensemble du corpus du tenant (tous projets + sections + URLs de référence)
@@ -1028,27 +1044,68 @@ DIRECTIVES DE RÉPONSE NON NÉGOCIABLES :
     answer_markdown = ""
     is_degraded = False
     degraded_reason: Optional[str] = None
-    api_key_to_use = payload.custom_api_key or settings.ANTHROPIC_API_KEY or settings.OPENAI_API_KEY or settings.MISTRAL_API_KEY
+
+    # CORRECTIF (03/09) : cet appel ne regardait que les variables d'environnement
+    # (ANTHROPIC_API_KEY, OPENAI_API_KEY, MISTRAL_API_KEY) et forçait le modèle à
+    # Claude. Il ignorait donc complètement les fournisseurs et les clés
+    # configurés dans l'administration : un client dont le palier était réglé sur
+    # Gemini n'obtenait jamais de réponse rédigée, et le message parlait d'un
+    # « service temporairement indisponible » alors que le service n'avait
+    # simplement jamais été appelé. On passe désormais par le même routage que le
+    # reste de l'application, palier et surcharges par client compris.
+    from app.services.model_routing_service import model_routing_service
+
+    resolved = await model_routing_service.resolve_model_for_tenant(db, t_uuid)
+    model_to_use = resolved["model_string"]
+    creds = await model_routing_service.get_credentials_for_model(db, model_to_use)
+    api_key_to_use = payload.custom_api_key or creds.get("api_key")
+    provider_label = resolved.get("provider") or infer_provider_id_from_model_string(model_to_use)
 
     if api_key_to_use:
         try:
             import litellm
-            model_to_use = "anthropic/claude-3-5-sonnet-20241022" if settings.ANTHROPIC_API_KEY else settings.DEFAULT_LLM_MODEL
-            response = litellm.completion(
-                model=model_to_use,
-                messages=[{"role": "user", "content": prompt}],
-                api_key=api_key_to_use,
-                temperature=0.2,
-                max_tokens=1000,
-            )
+            call_kwargs = {
+                "model": model_to_use,
+                "messages": [{"role": "user", "content": prompt}],
+                "api_key": api_key_to_use,
+                "temperature": 0.2,
+                "max_tokens": 1000,
+            }
+            if creds.get("api_base"):
+                call_kwargs["api_base"] = creds["api_base"]
+            response = litellm.completion(**call_kwargs)
             answer_markdown = response.choices[0].message.content
+
+            _usage = getattr(response, "usage", None)
+            await billing_service.log_llm_usage(
+                db=db,
+                tenant_id=t_uuid,
+                project_id=p_uuid,
+                provider_id=creds.get("provider_id") or infer_provider_id_from_model_string(model_to_use),
+                model_string=model_to_use,
+                prompt_tokens=getattr(_usage, "prompt_tokens", None) if _usage else None,
+                completion_tokens=getattr(_usage, "completion_tokens", None) if _usage else None,
+                total_tokens=getattr(_usage, "total_tokens", None) if _usage else None,
+            )
         except Exception as e:
             is_degraded = True
-            degraded_reason = f"Service IA temporairement indisponible ({type(e).__name__})"
-            print(f"[ProjectAsk] LLM generation notice: {e}")
+            # Dire ce qui a réellement échoué : « indisponible » envoyait chercher
+            # une panne là où il n'y avait qu'une clé refusée ou un modèle inconnu.
+            degraded_reason = f"Le fournisseur {provider_label} a refusé l'appel ({type(e).__name__})."
+            print(f"[ProjectAsk] LLM generation notice ({model_to_use}): {e}")
+    elif creds.get("budget_exceeded"):
+        is_degraded = True
+        degraded_reason = (
+            f"Le plafond mensuel du fournisseur {provider_label} est atteint : "
+            "les appels sont suspendus jusqu'au relèvement du plafond."
+        )
     else:
         is_degraded = True
-        degraded_reason = "Mode secours : service IA temporairement indisponible"
+        degraded_reason = (
+            f"Aucune clé d'API n'est enregistrée pour {provider_label}, "
+            "le modèle retenu pour ce client. Renseignez-la dans l'administration, "
+            "onglet « Clés d'API »."
+        )
 
     if not answer_markdown:
         is_degraded = True
@@ -1078,6 +1135,7 @@ DIRECTIVES DE RÉPONSE NON NÉGOCIABLES :
     history.append(msg_entry)
     project_meta["assistant_history"] = history
     project.metadata_json = project_meta
+    await billing_service.increment_usage(current_user.tenant_id, "question", db)
     await db.commit()
 
     return AskProjectResponse(

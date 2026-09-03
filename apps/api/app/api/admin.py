@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,14 +18,18 @@ from app.core.config import settings
 
 from app.core.db import get_db, get_system_db_unrestricted_INTERNAL_ONLY
 from app.core.security import CurrentTenantUser, require_platform_admin
+from app.core.storage import storage_service
 from app.models.entities import (
     AuditLog,
     CompanyAsset,
     CountryOfficialSource,
     DCEDocument,
     DCEEmbedding,
+    ExportTemplate,
+    LlmUsageLog,
     PlatformSettings,
     Project,
+    SubscriptionPlan,
     Tenant,
     TenantSubscription,
     User,
@@ -38,6 +42,8 @@ from app.services.model_routing_service import (
     is_zone_non_eu_us,
     RGPD_NON_EU_WARNING,
 )
+from app.services import llm_catalog_service
+from app.services import cost_limits_service
 
 
 router = APIRouter(
@@ -55,8 +61,9 @@ class CreateTenantPayload(BaseModel):
     plan: Optional[str] = "pro"
     country_code: Optional[str] = "FR"
     llm_provider: Optional[str] = "anthropic"
-    llm_model: Optional[str] = "claude-3-5-sonnet-20241022"
+    llm_model: Optional[str] = "claude-sonnet-5"
     llm_model_tier: Optional[str] = "inherit"
+    llm_fallback_tier: Optional[str] = "inherit"
     model_routing_config: Optional[Dict[str, Any]] = None
     branding_config: Optional[Dict[str, Any]] = None
 
@@ -68,6 +75,7 @@ class UpdateTenantPayload(BaseModel):
     plan: Optional[str] = None
     country_code: Optional[str] = None
     llm_model_tier: Optional[str] = None
+    llm_fallback_tier: Optional[str] = None
     llm_provider: Optional[str] = None
     llm_model: Optional[str] = None
     branding_config: Optional[Dict[str, Any]] = None
@@ -81,6 +89,9 @@ class CustomProviderInput(BaseModel):
     api_base: Optional[str] = None
     zone: str = "US"  # "UE" | "US" | "Chine" | "autre" | "non-verifie"
     enabled: bool = True
+    # 30/08 : plafond mensuel optionnel (USD) -- voir model_routing_service.get_credentials_for_model()
+    # pour la verification avant chaque appel, et llm_usage_logs pour le suivi de consommation reel.
+    monthly_budget_usd: Optional[float] = None
 
 
 class LLMKeysPayload(BaseModel):
@@ -88,7 +99,14 @@ class LLMKeysPayload(BaseModel):
     openai_api_key: Optional[str] = None
     mistral_api_key: Optional[str] = None
     default_llm_tier: Optional[str] = None
+    # 03/09 : palier de repli par defaut plateforme, distinct du palier principal
+    # ci-dessus -- voir model_routing_service.get_fallback_candidate(). Chaine vide
+    # explicite = retour au mode automatique (voir la route POST /admin/llm-keys).
+    default_fallback_tier: Optional[str] = None
     custom_providers: Optional[List[CustomProviderInput]] = None
+    # 29/08 : permet de repointer le model_string d'un tier (ex: "equilibre") vers un
+    # nouveau modèle sans déploiement de code -- voir model_routing_service.get_effective_tiers().
+    model_tier_overrides: Optional[Dict[str, str]] = None
 
 
 class TestProviderPayload(BaseModel):
@@ -224,8 +242,16 @@ async def list_tenants(
             "siret": tenant.siret or "",
             "contact_email": branding.get("contact_email") or "",
             "llm_provider": branding.get("llm_provider") or "anthropic",
-            "llm_model": branding.get("llm_model") or "claude-3-5-sonnet-20241022",
+            "llm_model": branding.get("llm_model") or "claude-sonnet-5",
             "llm_model_tier": branding.get("llm_model_tier") or "inherit",
+            "llm_fallback_tier": branding.get("llm_fallback_tier") or "inherit",
+            # Bug fixed (30/08) : cette clé n'etait jamais renvoyee ici, alors que la
+            # racine 'model_routing' est bien mise a jour par POST /admin/model-routing
+            # (l'onglet "Routage IA par Tache & Client") -- resultat, la liste de tenants
+            # revenait toujours vide pour ce champ et l'onglet semblait "oublier" ce qui
+            # venait d'etre enregistre avec succes. On lit aussi l'ancienne cle
+            # 'model_routing_config' (utilisee par la page de detail tenant) en repli.
+            "model_routing_config": branding.get("model_routing") or branding.get("model_routing_config") or {},
             "branding_config": branding,
             "users_count": int(users_count),
             "projects_count": int(projects_count),
@@ -257,14 +283,40 @@ async def create_tenant(
     """
     Creates a new client tenant with country regulatory profile, model tier and initial subscription.
     """
-    import random
-    import re
+    name_clean = payload.name.strip()
+    if not name_clean:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Le nom de l'entreprise est obligatoire.",
+        )
 
-    # 1. Generate clean slug if not specified
+    # 1. Check if a tenant with the exact same name (case-insensitive) already exists
+    existing_name = await db.execute(
+        select(Tenant).where(func.lower(func.trim(Tenant.name)) == func.lower(name_clean))
+    )
+    if existing_name.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Une entreprise avec le nom « {name_clean} » existe déjà. Les doublons ne sont pas autorisés.",
+        )
+
+    # 2. Check if SIRET is provided and already assigned to another tenant
+    siret_clean = payload.siret.strip() if payload.siret and payload.siret.strip() else None
+    if siret_clean:
+        existing_siret = await db.execute(
+            select(Tenant).where(Tenant.siret == siret_clean)
+        )
+        if existing_siret.scalar_one_or_none():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Une entreprise avec le SIRET « {siret_clean} » existe déjà.",
+            )
+
+    # 3. Generate clean slug if not specified
     if payload.slug:
         slug = payload.slug.strip().lower()
     else:
-        base_slug = re.sub(r"[^a-z0-9]+", "-", payload.name.lower()).strip("-")
+        base_slug = re.sub(r"[^a-z0-9]+", "-", name_clean.lower()).strip("-")
         slug = f"{base_slug}-{random.randint(100, 999)}"
 
     # Check slug uniqueness
@@ -283,6 +335,7 @@ async def create_tenant(
     if payload.llm_model:
         branding["llm_model"] = payload.llm_model
     branding["llm_model_tier"] = payload.llm_model_tier or "inherit"
+    branding["llm_fallback_tier"] = payload.llm_fallback_tier or "inherit"
     if payload.model_routing_config:
         branding["model_routing_config"] = payload.model_routing_config
 
@@ -358,8 +411,9 @@ async def create_tenant(
         "siret": new_tenant.siret or "",
         "contact_email": branding.get("contact_email") or "",
         "llm_provider": branding.get("llm_provider") or "anthropic",
-        "llm_model": branding.get("llm_model") or "claude-3-5-sonnet-20241022",
+        "llm_model": branding.get("llm_model") or "claude-sonnet-5",
         "llm_model_tier": branding.get("llm_model_tier") or "inherit",
+        "llm_fallback_tier": branding.get("llm_fallback_tier") or "inherit",
         "branding_config": branding,
         "users_count": 0,
         "projects_count": 0,
@@ -392,6 +446,9 @@ async def get_tenant_detail(
 
     branding = tenant.branding_config or {}
     resolved_model_info = await model_routing_service.resolve_model_for_tenant(db=db, tenant_id=t_uuid)
+    resolved_fallback_info = await model_routing_service.get_fallback_candidate(
+        db=db, exclude_provider=resolved_model_info.get("provider"), tenant_id=t_uuid,
+    )
 
     return {
         "id": str(tenant.id),
@@ -402,13 +459,170 @@ async def get_tenant_detail(
         "siret": tenant.siret or "",
         "contact_email": branding.get("contact_email") or "",
         "llm_provider": branding.get("llm_provider") or "anthropic",
-        "llm_model": branding.get("llm_model") or "claude-3-5-sonnet-20241022",
+        "llm_model": branding.get("llm_model") or "claude-sonnet-5",
         "llm_model_tier": branding.get("llm_model_tier") or "inherit",
+        "llm_fallback_tier": branding.get("llm_fallback_tier") or "inherit",
         "resolved_model_info": resolved_model_info,
+        "resolved_fallback_info": resolved_fallback_info,
         "branding_config": branding,
         "created_at": tenant.created_at.isoformat() if tenant.created_at else None,
         "updated_at": tenant.updated_at.isoformat() if tenant.updated_at else None,
     }
+
+
+@router.get("/tenants/{tenant_id}/documents")
+async def list_tenant_all_documents(
+    tenant_id: str,
+    admin_user: CurrentTenantUser = Depends(require_platform_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Retourne la liste unifiée de tous les documents de l'entreprise :
+    1. Documents issus de company_assets (savoir-faire, fiches techniques, certificats Qualibat)
+    2. Modèle Word officiel (.docx) de l'entreprise
+    """
+    try:
+        t_uuid = uuid.UUID(tenant_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid tenant UUID")
+
+    # 1. Company assets
+    stmt_assets = (
+        select(CompanyAsset)
+        .where(CompanyAsset.tenant_id == t_uuid)
+        .order_by(CompanyAsset.created_at.desc())
+    )
+    res_assets = await db.execute(stmt_assets)
+    assets = res_assets.scalars().all()
+
+    # 2. Export Templates
+    stmt_templates = (
+        select(ExportTemplate)
+        .where(ExportTemplate.tenant_id == t_uuid)
+        .order_by(ExportTemplate.created_at.desc())
+    )
+    res_templates = await db.execute(stmt_templates)
+    templates = res_templates.scalars().all()
+
+    output = []
+    # Add company assets
+    for a in assets:
+        meta = a.metadata_json or {}
+        output.append({
+            "id": str(a.id),
+            "file_name": meta.get("file_name") or a.title,
+            "title": a.title,
+            "category": a.category,
+            "file_path": a.s3_url or "",
+            "file_type": meta.get("content_type") or "document",
+            "file_size": meta.get("file_size") or 0,
+            "status": a.status,
+            "source": "company_knowledge",
+            "created_at": a.created_at.isoformat() if a.created_at else None,
+            "can_download": bool(a.s3_url or a.description),
+        })
+
+    # Add templates
+    for tmpl in templates:
+        output.append({
+            "id": str(tmpl.id),
+            "file_name": tmpl.name or "template_officiel.docx",
+            "title": tmpl.name or "Modèle Word officiel",
+            "category": "template_word",
+            "file_path": tmpl.s3_docx_key or "",
+            "file_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "file_size": 0,
+            "status": "Actif" if tmpl.is_default else "Secondaire",
+            "source": "export_template",
+            "created_at": tmpl.created_at.isoformat() if tmpl.created_at else None,
+            "can_download": bool(tmpl.s3_docx_key),
+        })
+
+    return output
+
+
+@router.get("/tenants/{tenant_id}/documents/{doc_id}/download")
+async def download_tenant_document_admin(
+    tenant_id: str,
+    doc_id: str,
+    inline: bool = False,
+    admin_user: CurrentTenantUser = Depends(require_platform_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Permet à l'administrateur de visualiser ou télécharger n'importe quel document d'un client.
+    Recherche dans company_assets puis dans export_templates.
+    """
+    try:
+        t_uuid = uuid.UUID(tenant_id)
+        d_uuid = uuid.UUID(doc_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Identifiant invalide")
+
+    # 1. Search in company_assets
+    stmt_asset = select(CompanyAsset).where(CompanyAsset.id == d_uuid, CompanyAsset.tenant_id == t_uuid)
+    res_asset = await db.execute(stmt_asset)
+    asset = res_asset.scalar_one_or_none()
+
+    if asset:
+        meta = asset.metadata_json or {}
+        filename = meta.get("file_name") or f"{asset.title}.pdf"
+        if asset.s3_url:
+            try:
+                file_bytes = storage_service.download_file(tenant_id=tenant_id, s3_key=asset.s3_url)
+                content_type = meta.get("content_type")
+                if not content_type:
+                    fn_lower = filename.lower()
+                    if fn_lower.endswith(".pdf"):
+                        content_type = "application/pdf"
+                    elif fn_lower.endswith(".docx"):
+                        content_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                    elif fn_lower.endswith(".xlsx"):
+                        content_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    elif fn_lower.endswith(".png"):
+                        content_type = "image/png"
+                    elif fn_lower.endswith((".jpg", ".jpeg")):
+                        content_type = "image/jpeg"
+                    else:
+                        content_type = "application/octet-stream"
+
+                disposition = "inline" if inline else "attachment"
+                return Response(
+                    content=file_bytes,
+                    media_type=content_type,
+                    headers={"Content-Disposition": f'{disposition}; filename="{filename}"'},
+                )
+            except Exception as e:
+                logger.warning(f"[Admin] Erreur lecture storage_service s3_url {asset.s3_url}: {e}")
+
+        if asset.description:
+            disposition = "inline" if inline else "attachment"
+            return Response(
+                content=asset.description.encode("utf-8"),
+                media_type="text/plain; charset=utf-8",
+                headers={"Content-Disposition": f'{disposition}; filename="{asset.title}.txt"'},
+            )
+
+    # 2. Search in export_templates
+    stmt_tmpl = select(ExportTemplate).where(ExportTemplate.id == d_uuid, ExportTemplate.tenant_id == t_uuid)
+    res_tmpl = await db.execute(stmt_tmpl)
+    template = res_tmpl.scalar_one_or_none()
+
+    if template and template.s3_docx_key:
+        try:
+            file_bytes = storage_service.download_file(tenant_id=tenant_id, s3_key=template.s3_docx_key)
+            filename = template.name or "template_officiel.docx"
+            disposition = "inline" if inline else "attachment"
+            return Response(
+                content=file_bytes,
+                media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                headers={"Content-Disposition": f'{disposition}; filename="{filename}"'},
+            )
+        except Exception as e:
+            logger.warning(f"[Admin] Erreur lecture template {template.s3_docx_key}: {e}")
+
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Fichier introuvable sur le stockage")
+
 
 
 @router.put("/tenants/{tenant_id}")
@@ -436,9 +650,40 @@ async def update_tenant_admin(
         branding.update(payload.branding_config)
 
     if payload.name is not None:
-        tenant.name = payload.name.strip()
+        name_clean = payload.name.strip()
+        if not name_clean:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Le nom de l'entreprise ne peut pas être vide.",
+            )
+        existing_name = await db.execute(
+            select(Tenant).where(
+                func.lower(func.trim(Tenant.name)) == func.lower(name_clean),
+                Tenant.id != t_uuid,
+            )
+        )
+        if existing_name.scalar_one_or_none():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Une autre entreprise porte déjà le nom « {name_clean} ».",
+            )
+        tenant.name = name_clean
+
     if payload.siret is not None:
-        tenant.siret = payload.siret.strip() if payload.siret else None
+        siret_clean = payload.siret.strip() if payload.siret and payload.siret.strip() else None
+        if siret_clean:
+            existing_siret = await db.execute(
+                select(Tenant).where(
+                    Tenant.siret == siret_clean,
+                    Tenant.id != t_uuid,
+                )
+            )
+            if existing_siret.scalar_one_or_none():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Une autre entreprise possède déjà le SIRET « {siret_clean} ».",
+                )
+        tenant.siret = siret_clean
     if payload.plan is not None:
         tenant.plan = payload.plan
     if payload.country_code is not None:
@@ -447,6 +692,8 @@ async def update_tenant_admin(
         branding["contact_email"] = payload.contact_email
     if payload.llm_model_tier is not None:
         branding["llm_model_tier"] = payload.llm_model_tier
+    if payload.llm_fallback_tier is not None:
+        branding["llm_fallback_tier"] = payload.llm_fallback_tier
     if payload.llm_model is not None:
         branding["llm_model"] = payload.llm_model
     if payload.llm_provider is not None:
@@ -467,6 +714,9 @@ async def update_tenant_admin(
     await db.flush()
 
     resolved_model_info = await model_routing_service.resolve_model_for_tenant(db=db, tenant_id=t_uuid)
+    resolved_fallback_info = await model_routing_service.get_fallback_candidate(
+        db=db, exclude_provider=resolved_model_info.get("provider"), tenant_id=t_uuid,
+    )
 
     return {
         "success": True,
@@ -478,7 +728,9 @@ async def update_tenant_admin(
             "siret": tenant.siret or "",
             "country_code": tenant.country_code,
             "llm_model_tier": branding.get("llm_model_tier") or "inherit",
+            "llm_fallback_tier": branding.get("llm_fallback_tier") or "inherit",
             "resolved_model_info": resolved_model_info,
+            "resolved_fallback_info": resolved_fallback_info,
         }
     }
 
@@ -521,7 +773,9 @@ async def get_llm_keys(
         "encryption_status": "AES-256-GCM Chiffré au repos",
         "embedding_model": ps_dict.get("embedding_model") or settings.EMBEDDING_MODEL or "text-embedding-3-small",
         "default_llm_tier": default_tier,
-        "available_tiers": LLM_MODEL_TIERS,
+        "default_fallback_tier": ps_dict.get("default_fallback_tier") or "",
+        "available_tiers": await model_routing_service.get_effective_tiers(db),
+        "model_tier_overrides": ps_dict.get("model_tier_overrides") or {},
     }
 
 
@@ -568,6 +822,7 @@ async def update_llm_keys(
                 "api_base": (prov_input.api_base or "").strip(),
                 "zone": zone,
                 "enabled": prov_input.enabled,
+                "monthly_budget_usd": prov_input.monthly_budget_usd,
             })
         current_settings["custom_providers"] = saved_providers
 
@@ -588,12 +843,44 @@ async def update_llm_keys(
             current_settings["mistral_api_key"] = encrypt_api_key(val)
             settings.MISTRAL_API_KEY = val
 
-    # 3. Update Platform Default Tier
+    # 3. Update Platform Default Tier or Master Model
     if payload.default_llm_tier is not None:
-        val = payload.default_llm_tier.strip().lower()
-        if val in LLM_MODEL_TIERS:
-            current_settings["default_llm_tier"] = val
-            settings.DEFAULT_LLM_MODEL = LLM_MODEL_TIERS[val]["model_string"]
+        val = payload.default_llm_tier.strip()
+        current_settings["default_llm_tier"] = val
+        if val.lower() in LLM_MODEL_TIERS:
+            settings.DEFAULT_LLM_MODEL = LLM_MODEL_TIERS[val.lower()]["model_string"]
+        else:
+            settings.DEFAULT_LLM_MODEL = val
+
+    # 3bis. Update Platform Default Fallback Tier (03/09) -- distinct du palier
+    # principal ci-dessus. Chaine vide explicite = retour au mode automatique
+    # historique (premier fournisseur actif dote d'une cle, voir
+    # model_routing_service.get_fallback_candidate()).
+    if payload.default_fallback_tier is not None:
+        fb_val = payload.default_fallback_tier.strip()
+        if fb_val:
+            current_settings["default_fallback_tier"] = fb_val
+            if fb_val.lower() in LLM_MODEL_TIERS:
+                settings.FALLBACK_LLM_MODEL = LLM_MODEL_TIERS[fb_val.lower()]["model_string"]
+            else:
+                settings.FALLBACK_LLM_MODEL = fb_val
+        else:
+            current_settings.pop("default_fallback_tier", None)
+
+    # 4. Update per-tier model string overrides (29/08 -- repointer un tier vers un
+    # nouveau modèle sans déploiement de code). Clés hors LLM_MODEL_TIERS ignorées ;
+    # valeur vide/blanche pour un tier retire la surcharge (retour au modèle par défaut).
+    if payload.model_tier_overrides is not None:
+        existing_overrides = dict(current_settings.get("model_tier_overrides") or {})
+        for tier_id, model_string in payload.model_tier_overrides.items():
+            if tier_id not in LLM_MODEL_TIERS:
+                continue
+            cleaned = (model_string or "").strip()
+            if cleaned:
+                existing_overrides[tier_id] = cleaned
+            else:
+                existing_overrides.pop(tier_id, None)
+        current_settings["model_tier_overrides"] = existing_overrides
 
     if ps:
         ps.settings = dict(current_settings)
@@ -692,8 +979,21 @@ async def test_llm_provider_connection(
 
         resp = litellm.completion(**kwargs)
         latency_ms = max(1, int((time.perf_counter() - start_t) * 1000))
+        raw_model = getattr(resp, "model", None)
+        if isinstance(raw_model, str) and raw_model.strip():
+            confirmed_model = raw_model.strip()
+        else:
+            confirmed_model = str(payload.litellm_id)
 
-        # Update test result in PlatformSettings
+        # Enregistrement du résultat ET de la clé qui vient de fonctionner.
+        #
+        # CORRECTIF (03/09) : ce test validait la clé puis l'oubliait. L'écran
+        # affichait « Connecté », l'administrateur passait à autre chose, et
+        # aucune clé n'était en base — toutes les générations retombaient
+        # ensuite sur le moteur de gabarits avec un message parlant d'un
+        # « service temporairement indisponible », ce qui n'était pas la cause.
+        # Une clé qui vient de répondre est une clé valide : on la garde.
+        key_persisted = False
         if payload.provider_id:
             stmt = select(PlatformSettings).where(PlatformSettings.id == "global")
             res = await db.execute(stmt)
@@ -704,10 +1004,43 @@ async def test_llm_provider_connection(
                 test_results[payload.provider_id] = {
                     "status": "success",
                     "latency_ms": latency_ms,
+                    "confirmed_model": confirmed_model,
                     "last_tested_at": now.isoformat() + "Z",
                     "error": None,
                 }
                 settings_dict["test_results"] = test_results
+
+                # La clé n'est retenue que si l'administrateur vient de la saisir
+                # en clair dans le formulaire. Un test relancé sur une clé déjà
+                # stockée (champ masqué) ne réécrit rien.
+                if raw_key and "•••" not in raw_key and "***" not in raw_key:
+                    providers = list(settings_dict.get("custom_providers") or [])
+                    if not providers:
+                        providers = [dict(pr) for pr in DEFAULT_CUSTOM_PROVIDERS]
+                    found = False
+                    for prov in providers:
+                        if prov.get("id") == payload.provider_id:
+                            prov["api_key"] = encrypt_api_key(raw_key)
+                            if payload.litellm_id:
+                                prov["litellm_id"] = payload.litellm_id
+                            if payload.api_base is not None:
+                                prov["api_base"] = (payload.api_base or "").strip()
+                            prov["enabled"] = True
+                            found = True
+                            break
+                    if not found:
+                        providers.append({
+                            "id": payload.provider_id,
+                            "name": payload.name or payload.provider_id,
+                            "litellm_id": payload.litellm_id,
+                            "api_key": encrypt_api_key(raw_key),
+                            "api_base": (payload.api_base or "").strip(),
+                            "zone": "non-verifie",
+                            "enabled": True,
+                        })
+                    settings_dict["custom_providers"] = providers
+                    key_persisted = True
+
                 ps.settings = settings_dict
                 ps.updated_at = now
                 flag_modified(ps, "settings")
@@ -717,7 +1050,7 @@ async def test_llm_provider_connection(
             admin_user=admin_user,
             action="test_llm_provider_success",
             entity_type="llm_provider",
-            details={"provider_id": payload.provider_id, "litellm_id": payload.litellm_id, "latency_ms": latency_ms},
+            details={"provider_id": payload.provider_id, "litellm_id": payload.litellm_id, "confirmed_model": confirmed_model, "latency_ms": latency_ms},
             ip_address=request.client.host if request.client else None,
         )
         await db.commit()
@@ -726,7 +1059,12 @@ async def test_llm_provider_connection(
             "success": True,
             "status": "success",
             "latency_ms": latency_ms,
-            "message": f"Connexion réussie ({latency_ms} ms)",
+            "confirmed_model": confirmed_model,
+            "key_persisted": key_persisted,
+            "message": (
+                f"Connexion réussie en {latency_ms} ms — modèle confirmé : {confirmed_model}."
+                + (" La clé est enregistrée." if key_persisted else "")
+            ),
             "tested_at": now.isoformat() + "Z",
         }
     except Exception as e:
@@ -771,7 +1109,221 @@ async def test_llm_provider_connection(
         }
 
 
+@router.get("/llm-catalog")
+async def get_llm_catalog(
+    admin_user: CurrentTenantUser = Depends(require_platform_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Catalogue de modèles (référence -- liste, prix, statut). Auto-synchronise en
+    interne si les données sont absentes ou périmées (30/08, >24h) -- demande explicite
+    utilisateur ("si la liste se met jamais à jour c'est nul") : un simple GET déclenche
+    désormais lui-même une resynchro quand nécessaire, sans cron invisible en arrière-plan
+    (le risque d'échec silencieux identifié à la conception initiale reste évité : toute
+    erreur ici est absorbée, ne casse jamais l'affichage, et le prochain GET réessaiera).
+    Reste aussi disponible manuellement : voir POST /llm-catalog/sync."""
+    stmt = select(PlatformSettings).where(PlatformSettings.id == "global")
+    res = await db.execute(stmt)
+    ps = res.scalar_one_or_none()
+    ps_dict = ps.settings if ps and ps.settings else {}
 
+    last_synced_raw = ps_dict.get("llm_catalog_last_synced_at")
+    is_stale = True
+    if last_synced_raw:
+        try:
+            last_synced_dt = datetime.fromisoformat(str(last_synced_raw).replace("Z", "+00:00"))
+            if last_synced_dt.tzinfo is None:
+                last_synced_dt = last_synced_dt.replace(tzinfo=timezone.utc)
+            is_stale = (datetime.now(timezone.utc) - last_synced_dt) > timedelta(hours=24)
+        except (ValueError, TypeError):
+            is_stale = True
+
+    if is_stale:
+        try:
+            sync_result = await llm_catalog_service.sync_catalog(db)
+            settings_dict = dict(ps_dict)
+            settings_dict["llm_catalog_last_synced_at"] = sync_result["synced_at"]
+            if ps:
+                ps.settings = settings_dict
+                ps.updated_at = datetime.utcnow()
+                flag_modified(ps, "settings")
+            else:
+                ps = PlatformSettings(id="global", settings=settings_dict, updated_at=datetime.utcnow())
+                db.add(ps)
+            await db.commit()
+            ps_dict = settings_dict
+        except Exception as e:
+            print(f"[AdminAPI] Auto-synchro catalogue LLM notice: {e} -- affichage des données existantes (potentiellement périmées ou vides).")
+            await db.rollback()
+
+    models = await llm_catalog_service.list_catalog(db, include_inactive=True)
+    return {
+        "models": models,
+        "total": len(models),
+        "last_synced_at": ps_dict.get("llm_catalog_last_synced_at"),
+    }
+
+
+@router.post("/llm-catalog/sync")
+async def sync_llm_catalog(
+    request: Request,
+    admin_user: CurrentTenantUser = Depends(require_platform_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Synchronise le catalogue depuis OpenRouter (appel direct, déclenché par l'admin --
+    volontairement pas de cron nocturne invisible, voir llm_catalog_service.py)."""
+    try:
+        result = await llm_catalog_service.sync_catalog(db)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Échec de la synchronisation du catalogue OpenRouter : {str(e)[:300]}")
+
+    # Mémorise l'horodatage dans PlatformSettings pour affichage ("Dernière synchro : ...").
+    # Un seul commit() pour toute la requête (catalogue + horodatage) -- voir la note dans
+    # llm_catalog_service.sync_catalog() sur pourquoi un commit intermédiaire casse get_db().
+    stmt = select(PlatformSettings).where(PlatformSettings.id == "global")
+    res = await db.execute(stmt)
+    ps = res.scalar_one_or_none()
+    if ps:
+        settings_dict = dict(ps.settings or {})
+        settings_dict["llm_catalog_last_synced_at"] = result["synced_at"]
+        ps.settings = settings_dict
+        ps.updated_at = datetime.utcnow()
+        flag_modified(ps, "settings")
+
+    await _record_audit_log(
+        db=db,
+        admin_user=admin_user,
+        action="sync_llm_catalog",
+        entity_type="llm_catalog",
+        details=result,
+        ip_address=request.client.host if request.client else None,
+    )
+    await db.commit()
+
+    return result
+
+
+@router.get("/llm-usage-summary")
+async def get_llm_usage_summary(
+    admin_user: CurrentTenantUser = Depends(require_platform_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Suivi de consommation LLM (30/08) : totaux du mois en cours par fournisseur (appels,
+    tokens, coût estimé) et plafond mensuel configuré si présent. Réponse directe à la
+    demande utilisateur ("aucune limite paramétrable... suivi de consommation... dommage
+    qu'on ne puisse pas le faire en back admin")."""
+    month_start = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    stmt = (
+        select(
+            LlmUsageLog.provider_id,
+            func.count(LlmUsageLog.id).label("call_count"),
+            func.coalesce(func.sum(LlmUsageLog.prompt_tokens), 0).label("prompt_tokens"),
+            func.coalesce(func.sum(LlmUsageLog.completion_tokens), 0).label("completion_tokens"),
+            func.coalesce(func.sum(LlmUsageLog.estimated_cost_usd), 0).label("estimated_cost_usd"),
+        )
+        .where(LlmUsageLog.created_at >= month_start)
+        .group_by(LlmUsageLog.provider_id)
+    )
+    res = await db.execute(stmt)
+    rows = res.all()
+
+    ps_stmt = select(PlatformSettings).where(PlatformSettings.id == "global")
+    ps_res = await db.execute(ps_stmt)
+    ps = ps_res.scalar_one_or_none()
+    providers_list = (ps.settings.get("custom_providers") if ps and ps.settings else None) or DEFAULT_CUSTOM_PROVIDERS
+    providers_by_id = {p.get("id"): p for p in providers_list}
+
+    by_provider = []
+    for r in rows:
+        prov = providers_by_id.get(r.provider_id, {})
+        by_provider.append({
+            "provider_id": r.provider_id,
+            "provider_name": prov.get("name") or r.provider_id or "Inconnu",
+            "call_count": r.call_count,
+            "prompt_tokens": int(r.prompt_tokens),
+            "completion_tokens": int(r.completion_tokens),
+            "estimated_cost_usd": float(r.estimated_cost_usd),
+            "monthly_budget_usd": prov.get("monthly_budget_usd"),
+        })
+
+    return {
+        "period_start": month_start.isoformat(),
+        "by_provider": by_provider,
+        "total_estimated_cost_usd": sum(p["estimated_cost_usd"] for p in by_provider),
+    }
+
+@router.get("/revenue-summary")
+async def get_revenue_summary(
+    admin_user=Depends(require_platform_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Estimation honnete du revenu (30/08) -- remplace un calcul FRONTEND qui multipliait
+    le nombre TOTAL de tenants (y compris ceux sans abonnement enregistre et les essais
+    gratuits) par une grille de prix codee en dur et DESYNCHRONISEE de la vraie table
+    subscription_plans (starter a 190 au lieu de 199, pro a 490 au lieu de 499, et un
+    prix "enterprise" a 1490 entierement invente alors que ce palier est explicitement
+    a tarif negocie -- price_monthly_cents=0 -- dans subscription_plans). Resultat : les
+    cartes MRR/ARR affichaient un chiffre plausible mais faux sur 2 axes a la fois
+    (mauvais prix ET mauvaise base de tenants), presente comme si c'etait du chiffre
+    d'affaires reel.
+
+    Ce endpoint ne pretend PAS mesurer un paiement reellement encaisse : aucune
+    integration processeur de paiement n'est active dans ce projet (tenant_subscriptions
+    a bien des colonnes stripe_customer_id / stripe_subscription_id, mais elles sont
+    NULL sur les seuls tenants qui ont un abonnement enregistre -- Stripe n'a jamais ete
+    reellement branche). C'est donc une estimation basee sur les abonnements enregistres
+    en base et leur statut declare, avec la VRAIE grille tarifaire de subscription_plans
+    -- exclut explicitement les essais gratuits et les paliers a tarif negocie ("sur
+    devis", prix catalogue = 0), et signale separement les tenants qui n'ont meme pas de
+    ligne d'abonnement (tres probablement des tenants de demo/test, pas des clients).
+    """
+    stmt = (
+        select(TenantSubscription, SubscriptionPlan)
+        .join(SubscriptionPlan, TenantSubscription.plan_id == SubscriptionPlan.id)
+    )
+    res = await db.execute(stmt)
+    rows = res.all()
+
+    total_tenants = (await db.execute(select(func.count(Tenant.id)))).scalar() or 0
+
+    billed_active: List[Dict[str, Any]] = []
+    free_trial_count = 0
+    custom_pricing_count = 0
+    other_status_count = 0
+
+    for sub, plan in rows:
+        if sub.status != "active":
+            other_status_count += 1
+            continue
+        if sub.billing_mode == "free_trial":
+            free_trial_count += 1
+            continue
+        if not plan.price_monthly_cents:
+            custom_pricing_count += 1
+            continue
+        billed_active.append({
+            "tenant_id": str(sub.tenant_id),
+            "plan_id": plan.id,
+            "plan_name": plan.name,
+            "price_monthly_eur": plan.price_monthly_cents / 100,
+            "has_verified_payment_link": bool(sub.stripe_customer_id and sub.stripe_subscription_id),
+        })
+
+    mrr_estimated_eur = sum(b["price_monthly_eur"] for b in billed_active)
+
+    return {
+        "mrr_estimated_eur": mrr_estimated_eur,
+        "arr_estimated_eur": mrr_estimated_eur * 12,
+        "billed_active_count": len(billed_active),
+        "free_trial_count": free_trial_count,
+        "custom_pricing_count": custom_pricing_count,
+        "other_status_count": other_status_count,
+        "tenants_with_subscription_record": len(rows),
+        "tenants_without_subscription_record": max(total_tenants - len(rows), 0),
+        "total_tenants": total_tenants,
+        "any_payment_processor_verified": any(b["has_verified_payment_link"] for b in billed_active),
+        "by_tenant": billed_active,
+    }
 
 
 @router.get("/rag-supervision")
@@ -789,13 +1341,23 @@ async def get_rag_supervision(
     assets_res = await db.execute(assets_count_stmt)
     knowledge_chunks_count = assets_res.scalar() or 0
 
+    # 29/08 : le badge "ONLINE" ci-dessous était auparavant toujours vert, quel
+    # que soit l'état réel -- corrigé pour refléter honnêtement si une vraie clé
+    # d'embedding (OpenAI/Mistral, admin ou .env) est configurée ou si le système
+    # est actuellement en repli sur le vecteur pseudo-aléatoire déterministe.
+    from app.services.embedding_service import embedding_service
+    await embedding_service.sync_platform_key(db)
+    embedding_status = embedding_service.get_embedding_status()
+
     return {
-        "embedding_model": settings.EMBEDDING_MODEL or "text-embedding-3-small",
+        "embedding_model": embedding_status.get("model") or (settings.EMBEDDING_MODEL or "text-embedding-3-small"),
         "dimensions": 1536,
         "similarity_metric": "Cosinus (1 - (a <=> b))",
         "total_dce_chunks": dce_chunks_count,
         "total_knowledge_chunks": knowledge_chunks_count,
         "index_type": "HNSW",
+        "embedding_mode": embedding_status.get("mode"),
+        "embedding_provider": embedding_status.get("provider"),
     }
 
 
@@ -821,11 +1383,16 @@ async def get_tenant_model_routing(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found")
 
     branding = tenant.branding_config or {}
-    routing = branding.get("model_routing", {
-        "extraction_gonogo": {"provider": "Anthropic", "model": "claude-3-5-sonnet-20241022"},
-        "redaction_memoire": {"provider": "Anthropic", "model": "claude-3-5-sonnet-20241022"},
+    # 02/09 : double lecture des 2 cles historiques (comme resolve_model_for_tenant()
+    # et list_tenants) -- corrige une incoherence trouvee ou cet endpoint ignorait
+    # model_routing_config (l'ancienne cle, encore ecrite par la creation de tenant)
+    # et affichait des valeurs par defaut codees en dur a la place de la vraie config
+    # enregistree pour ce tenant.
+    routing = branding.get("model_routing") or branding.get("model_routing_config") or {
+        "extraction_gonogo": {"provider": "Anthropic", "model": "claude-sonnet-5"},
+        "redaction_memoire": {"provider": "Anthropic", "model": "claude-sonnet-5"},
         "analyse_prix": {"provider": "Mistral AI", "model": "mistral-large-2407"},
-    })
+    }
 
     await _record_audit_log(
         db=db,
@@ -861,8 +1428,8 @@ async def update_tenant_model_routing(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found")
 
     routing_config = {
-        "extraction_gonogo": payload.extraction_gonogo or {"provider": "Anthropic", "model": "claude-3-5-sonnet-20241022"},
-        "redaction_memoire": payload.redaction_memoire or {"provider": "Anthropic", "model": "claude-3-5-sonnet-20241022"},
+        "extraction_gonogo": payload.extraction_gonogo or {"provider": "Anthropic", "model": "claude-sonnet-5"},
+        "redaction_memoire": payload.redaction_memoire or {"provider": "Anthropic", "model": "claude-sonnet-5"},
         "analyse_prix": payload.analyse_prix or {"provider": "Mistral AI", "model": "mistral-large-2407"},
     }
 
@@ -974,8 +1541,25 @@ class AdminSubscriptionPayload(BaseModel):
     status: str = "active"
     billing_mode: str = "manual_enterprise"
     custom_quota_dossiers: Optional[int] = None
+    # Plafond mensuel de coût IA propre à ce client, exprimé dans la devise ci-dessous.
+    # Laisser vide pour hériter du plafond du forfait (voir /admin/cost-limits).
+    custom_llm_cost_cap: Optional[float] = None
+    custom_llm_cost_cap_currency: str = "EUR"
     allow_overage: bool = True
     duration_days: int = 365
+
+
+class CostLimitSettingsPayload(BaseModel):
+    display_currency: Optional[str] = None
+    eur_usd_rate: Optional[float] = None
+    target_llm_share: Optional[float] = None
+    alert_threshold_pct: Optional[int] = None
+
+
+class CostCapPayload(BaseModel):
+    """Un plafond mensuel. `amount` vide = plafond retiré (aucune limite appliquée)."""
+    amount: Optional[float] = None
+    currency: str = "EUR"
 
 
 @router.get("/audit-logs")
@@ -1064,6 +1648,9 @@ async def get_tenant_subscription_admin(
         ip_address=request.client.host if request.client else None,
     )
 
+    effective_cap = await billing_service.get_effective_cost_cap_usd(t_uuid, db)
+    current_spend = await billing_service.get_tenant_current_month_spend_usd(t_uuid, db)
+
     if not sub:
         return {
             "has_subscription": False,
@@ -1072,6 +1659,9 @@ async def get_tenant_subscription_admin(
             "status": "active",
             "billing_mode": "free_trial",
             "custom_quota_dossiers": None,
+            "custom_llm_cost_cap_usd": None,
+            "effective_llm_cost_cap_usd": effective_cap,
+            "llm_spend_current_month_usd": current_spend,
             "quota": 3,
             "dossiers_used": usage.dossiers_generated,
             "allow_overage": True,
@@ -1085,6 +1675,9 @@ async def get_tenant_subscription_admin(
         "status": sub.status,
         "billing_mode": sub.billing_mode,
         "custom_quota_dossiers": sub.custom_quota_dossiers,
+        "custom_llm_cost_cap_usd": float(sub.custom_llm_cost_cap_usd) if sub.custom_llm_cost_cap_usd is not None else None,
+        "effective_llm_cost_cap_usd": effective_cap,
+        "llm_spend_current_month_usd": current_spend,
         "allow_overage": sub.allow_overage,
         "dossiers_used": usage.dossiers_generated,
         "current_period_start": sub.current_period_start.isoformat(),
@@ -1130,11 +1723,25 @@ async def update_tenant_subscription_admin(
     now = datetime.utcnow()
     period_end = now + timedelta(days=payload.duration_days)
 
+    # Le plafond est saisi dans la devise choisie par l'admin et stocké en dollars,
+    # devise de facturation des fournisseurs et des journaux de consommation.
+    ps_res = await db.execute(select(PlatformSettings).where(PlatformSettings.id == "global"))
+    ps_row = ps_res.scalar_one_or_none()
+    cost_cfg = cost_limits_service.get_settings(ps_row.settings if ps_row else None)
+    cap_usd = cost_limits_service.to_usd(
+        payload.custom_llm_cost_cap,
+        payload.custom_llm_cost_cap_currency,
+        float(cost_cfg["eur_usd_rate"]),
+    )
+    if cap_usd is not None and cap_usd < 0:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Un plafond ne peut pas être négatif.")
+
     if sub:
         sub.plan_id = payload.plan_id
         sub.status = payload.status
         sub.billing_mode = payload.billing_mode
         sub.custom_quota_dossiers = payload.custom_quota_dossiers
+        sub.custom_llm_cost_cap_usd = cap_usd
         sub.allow_overage = payload.allow_overage
         sub.current_period_start = now
         sub.current_period_end = period_end
@@ -1147,6 +1754,7 @@ async def update_tenant_subscription_admin(
             status=payload.status,
             billing_mode=payload.billing_mode,
             custom_quota_dossiers=payload.custom_quota_dossiers,
+            custom_llm_cost_cap_usd=cap_usd,
             allow_overage=payload.allow_overage,
             current_period_start=now,
             current_period_end=period_end,
@@ -1165,6 +1773,7 @@ async def update_tenant_subscription_admin(
             "plan_id": payload.plan_id,
             "status": payload.status,
             "custom_quota": payload.custom_quota_dossiers,
+            "custom_llm_cost_cap_usd": cap_usd,
             "allow_overage": payload.allow_overage,
         },
         ip_address=request.client.host if request.client else None,
@@ -1466,3 +2075,159 @@ async def delete_country_source_admin(
     )
     await db.commit()
     return {"success": True, "message": f"Source '{source.portal_name}' desactivee (retiree de la whitelist active)."}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PLAFONDS DE DÉPENSE IA — fournisseur, forfait, client
+# Voir app/services/cost_limits_service.py pour la logique et le raisonnement
+# derrière les plafonds conseillés.
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/cost-limits")
+async def get_cost_limits(
+    request: Request,
+    admin_user: CurrentTenantUser = Depends(require_platform_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Vue consolidée des trois niveaux de plafond et de la consommation du mois en cours."""
+    overview = await cost_limits_service.build_overview(db)
+    await _record_audit_log(
+        db=db,
+        admin_user=admin_user,
+        action="read_cost_limits",
+        entity_type="platform_settings",
+        ip_address=request.client.host if request.client else None,
+    )
+    await db.commit()
+    return overview
+
+
+@router.put("/cost-limits/settings")
+async def update_cost_limit_settings(
+    payload: CostLimitSettingsPayload,
+    request: Request,
+    admin_user: CurrentTenantUser = Depends(require_platform_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Devise d'affichage, taux de conversion, part cible de coût IA et seuil d'alerte."""
+    try:
+        cfg = await cost_limits_service.save_settings(db, payload.dict(exclude_unset=True))
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    await _record_audit_log(
+        db=db,
+        admin_user=admin_user,
+        action="update_cost_limit_settings",
+        entity_type="platform_settings",
+        details=payload.dict(exclude_unset=True),
+        ip_address=request.client.host if request.client else None,
+    )
+    await db.commit()
+    return {"success": True, "settings": cfg}
+
+
+@router.put("/cost-limits/providers/{provider_id}")
+async def update_provider_cost_cap(
+    provider_id: str,
+    payload: CostCapPayload,
+    request: Request,
+    admin_user: CurrentTenantUser = Depends(require_platform_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Plafond mensuel de dépense pour un fournisseur d'API. Au-delà, sa clé n'est plus
+    servie et le routage bascule sur un autre fournisseur configuré."""
+    try:
+        result = await cost_limits_service.set_provider_cap(db, provider_id, payload.amount, payload.currency)
+    except KeyError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    await _record_audit_log(
+        db=db,
+        admin_user=admin_user,
+        action="update_provider_cost_cap",
+        entity_type="platform_settings",
+        details=result,
+        ip_address=request.client.host if request.client else None,
+    )
+    await db.commit()
+    return {"success": True, **result}
+
+
+@router.put("/cost-limits/plans/{plan_id}")
+async def update_plan_cost_cap(
+    plan_id: str,
+    payload: CostCapPayload,
+    request: Request,
+    admin_user: CurrentTenantUser = Depends(require_platform_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Plafond mensuel appliqué par défaut à tout client de ce forfait."""
+    try:
+        result = await cost_limits_service.set_plan_cap(db, plan_id, payload.amount, payload.currency)
+    except KeyError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    await _record_audit_log(
+        db=db,
+        admin_user=admin_user,
+        action="update_plan_cost_cap",
+        entity_type="subscription_plan",
+        details=result,
+        ip_address=request.client.host if request.client else None,
+    )
+    await db.commit()
+    return {"success": True, **result}
+
+
+@router.put("/cost-limits/tenants/{tenant_id}")
+async def update_tenant_cost_cap(
+    tenant_id: str,
+    payload: CostCapPayload,
+    request: Request,
+    admin_user: CurrentTenantUser = Depends(require_platform_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Plafond nominatif d'un client, prioritaire sur celui de son forfait."""
+    try:
+        t_uuid = uuid.UUID(tenant_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Identifiant client invalide")
+    try:
+        result = await cost_limits_service.set_tenant_cap(db, t_uuid, payload.amount, payload.currency)
+    except KeyError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    await _record_audit_log(
+        db=db,
+        admin_user=admin_user,
+        action="update_tenant_cost_cap",
+        entity_type="tenant_subscription",
+        tenant_id=t_uuid,
+        details=result,
+        ip_address=request.client.host if request.client else None,
+    )
+    await db.commit()
+    return {"success": True, **result}
+
+
+@router.post("/cost-limits/plans/apply-recommended")
+async def apply_recommended_plan_cost_caps(
+    request: Request,
+    admin_user: CurrentTenantUser = Depends(require_platform_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Écrit sur chaque forfait le plafond conseillé (part cible du prix de vente)."""
+    applied = await cost_limits_service.apply_recommended_plan_caps(db)
+    await _record_audit_log(
+        db=db,
+        admin_user=admin_user,
+        action="apply_recommended_plan_cost_caps",
+        entity_type="subscription_plan",
+        details={"applied": applied},
+        ip_address=request.client.host if request.client else None,
+    )
+    await db.commit()
+    return {"success": True, "applied": applied}

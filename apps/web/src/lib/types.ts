@@ -30,23 +30,46 @@ export interface CustomLLMProvider {
   last_tested_at?: string | null;
   last_latency_ms?: number | null;
   last_error_message?: string | null;
+  monthly_budget_usd?: number | null;
 }
 
+/* Paliers de qualité proposés dans l'admin. Repli d'affichage uniquement : la source
+   de vérité est le backend (app/services/llm_reference_catalog.py), interrogé via
+   /admin/llm-keys → available_tiers. Prix relevés le 2026-09-02 sur les pages
+   tarifaires officielles des fournisseurs. */
 export const LLM_MODEL_TIERS = [
+  {
+    id: 'gratuit',
+    name: 'Gratuit — Gemini 3.8 Flash',
+    pricing: 'inclus dans le palier gratuit du fournisseur',
+    display_label: 'Gratuit — Gemini 3.8 Flash (essais et recette, quotas gratuits Google AI Studio)',
+    zone: 'US' as ProviderZone,
+    is_non_eu: false,
+    warning_message: null,
+  },
   {
     id: 'economique',
     name: 'Économique — Claude Haiku 4.5',
-    pricing: '≈ 1 $ / 5 $ par million de tokens',
-    display_label: 'Économique — Claude Haiku 4.5 (≈ 1 $ / 5 $ par million de tokens)',
+    pricing: '1.00 $ / 5.00 $ par million de tokens',
+    display_label: 'Économique — Claude Haiku 4.5 (extraction rapide des pièces du DCE)',
     zone: 'US' as ProviderZone,
+    is_non_eu: false,
+    warning_message: null,
+  },
+  {
+    id: 'souverain',
+    name: 'Souverain UE — Mistral Large 3',
+    pricing: '0.50 $ / 1.50 $ par million de tokens',
+    display_label: 'Souverain UE — Mistral Large 3 (marchés publics, données hébergées dans l’Union européenne)',
+    zone: 'UE' as ProviderZone,
     is_non_eu: false,
     warning_message: null,
   },
   {
     id: 'equilibre',
     name: 'Équilibré — Claude Sonnet 5',
-    pricing: '≈ 2 $ / 10 $ par million de tokens',
-    display_label: 'Équilibré — Claude Sonnet 5 (≈ 2 $ / 10 $ par million de tokens)',
+    pricing: '2.00 $ / 10.00 $ par million de tokens',
+    display_label: 'Équilibré — Claude Sonnet 5 (rédaction du mémoire technique au quotidien)',
     zone: 'US' as ProviderZone,
     is_non_eu: false,
     warning_message: null,
@@ -54,17 +77,17 @@ export const LLM_MODEL_TIERS = [
   {
     id: 'avance',
     name: 'Avancé — Claude Opus 5',
-    pricing: '≈ 5 $ / 25 $ par million de tokens',
-    display_label: 'Avancé — Claude Opus 5 (≈ 5 $ / 25 $ par million de tokens)',
+    pricing: '5.00 $ / 25.00 $ par million de tokens',
+    display_label: 'Avancé — Claude Opus 5 (analyse juridique et pièces de marché complexes)',
     zone: 'US' as ProviderZone,
     is_non_eu: false,
     warning_message: null,
   },
   {
     id: 'maximum',
-    name: 'Maximum — Claude Fable 5',
-    pricing: '≈ 10 $ / 50 $ par million de tokens',
-    display_label: 'Maximum — Claude Fable 5 (≈ 10 $ / 50 $ par million de tokens)',
+    name: 'Maximum — Claude Fable 5.1',
+    pricing: '10.00 $ / 50.00 $ par million de tokens',
+    display_label: 'Maximum — Claude Fable 5.1 (dossiers à fort enjeu, raisonnement long)',
     zone: 'US' as ProviderZone,
     is_non_eu: false,
     warning_message: null,
@@ -84,6 +107,7 @@ export interface Tenant {
   llm_provider?: string;
   llm_model?: string;
   llm_model_tier?: string;
+  llm_fallback_tier?: string;
   users_count?: number;
   projects_count?: number;
   active_projects_count?: number;
@@ -104,6 +128,7 @@ export interface CreateTenantInput {
   llm_provider?: string;
   llm_model?: string;
   llm_model_tier?: string;
+  llm_fallback_tier?: string;
   model_routing_config?: any;
   branding_config?: any;
 }
@@ -117,6 +142,7 @@ export interface UpdateTenantInput {
   llm_provider?: string;
   llm_model?: string;
   llm_model_tier?: string;
+  llm_fallback_tier?: string;
   branding_config?: any;
 }
 
@@ -149,6 +175,7 @@ export interface Project {
     price_weight: number;
   };
   strategic_directives?: string;
+  output_language?: 'fr' | 'en' | 'ar' | string;
   go_no_go?: GoNoGoAnalysis | null;
   created_at: string;
   updated_at?: string;
@@ -276,7 +303,45 @@ export interface PlatformLLMKeys {
   encryption_status?: string;
   embedding_model: string;
   default_llm_tier: string;
+  default_fallback_tier?: string;
   available_tiers: Record<string, any>;
+  model_tier_overrides?: Record<string, string>;
+}
+
+// 29/08 : catalogue de modèles en lecture seule, synchronisé depuis OpenRouter --
+// référence (liste à jour, prix, dépréciation), n'affecte pas le chemin d'appel réel.
+export interface LlmCatalogModelEntry {
+  id: string;
+  external_id: string;
+  display_name: string | null;
+  provider_slug: string | null;
+  context_length: number | null;
+  pricing_prompt_per_million: number | null;
+  pricing_completion_per_million: number | null;
+  is_moderated: boolean;
+  expiration_date: string | null;
+  is_active: boolean;
+  first_seen_at: string | null;
+  last_seen_at: string | null;
+  source?: string | null;
+  free_tier?: boolean;
+}
+
+/* `source` vaut 'reference_catalog' pour les modèles issus du socle daté relevé sur
+   les pages tarifaires officielles ; les autres viennent de la base LiteLLM embarquée
+   ou d'OpenRouter, et peuvent donc encore lister des générations retirées. */
+export interface LlmCatalogResponse {
+  models: LlmCatalogModelEntry[];
+  total: number;
+  last_synced_at: string | null;
+}
+
+export interface LlmCatalogSyncResult {
+  synced_at: string;
+  total_seen: number;
+  created: number;
+  updated: number;
+  deactivated: number;
 }
 
 export type TeamRole = 'owner' | 'conducteur_travaux' | 'chiffreur' | 'member' | 'read_only';
@@ -335,3 +400,79 @@ export interface GanttTask {
 
 
 
+
+
+/* ── Plafonds de dépense IA ────────────────────────────────────────────────
+   Trois niveaux indépendants : fournisseur d'API, forfait, client. Les montants
+   circulent en dollars (devise de facturation des fournisseurs) ; l'équivalent en
+   euros est calculé côté serveur avec le taux saisi par l'administrateur. */
+
+export type CostLimitState = 'ok' | 'alerte' | 'bloque' | 'sans_plafond';
+
+export interface CostLimitProviderRow {
+  id: string;
+  name: string;
+  litellm_id: string | null;
+  zone: string | null;
+  is_non_eu: boolean;
+  enabled: boolean;
+  has_api_key: boolean;
+  cap_usd: number | null;
+  cap_eur: number | null;
+  spend_usd: number;
+  spend_eur: number | null;
+  state: CostLimitState;
+}
+
+export interface CostLimitPlanRow {
+  id: string;
+  name: string;
+  price_monthly_eur: number;
+  included_dossiers_month: number;
+  tenant_count: number;
+  cap_usd: number | null;
+  cap_eur: number | null;
+  recommended_cap_usd: number;
+  recommended_cap_eur: number | null;
+  spend_usd: number;
+  is_configured: boolean;
+}
+
+export interface CostLimitTenantRow {
+  id: string;
+  name: string;
+  plan_id: string;
+  status: string;
+  custom_cap_usd: number | null;
+  custom_cap_eur: number | null;
+  inherited_cap_usd: number | null;
+  effective_cap_usd: number | null;
+  effective_cap_eur: number | null;
+  source: 'client' | 'forfait' | 'aucun';
+  spend_usd: number;
+  spend_eur: number | null;
+  state: CostLimitState;
+}
+
+export interface CostLimitsOverview {
+  settings: {
+    display_currency: 'EUR' | 'USD';
+    eur_usd_rate: number;
+    eur_usd_rate_updated_at: string | null;
+    target_llm_share: number;
+    alert_threshold_pct: number;
+    rate_source: string;
+  };
+  period_start: string;
+  totals: {
+    spend_usd: number;
+    spend_eur: number | null;
+    providers_without_cap: number;
+    plans_without_cap: number;
+    tenants_without_cap: number;
+    tenants_blocked: number;
+  };
+  providers: CostLimitProviderRow[];
+  plans: CostLimitPlanRow[];
+  tenants: CostLimitTenantRow[];
+}

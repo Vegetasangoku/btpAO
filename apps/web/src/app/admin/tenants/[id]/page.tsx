@@ -24,11 +24,18 @@ import {
   FileUp,
   HardDrive,
   AlertTriangle,
+  Palette,
+  Eye,
+  Download,
+  ExternalLink,
+  X,
 } from 'lucide-react';
 
 import { supabase } from '@/lib/supabase/client';
 import { api } from '@/lib/api';
 import { LLM_MODEL_TIERS } from '@/lib/types';
+import { useTranslation } from '@/components/i18n-provider';
+import { DismissibleNotice } from '@/components/ui/dismissible-notice';
 
 interface TenantDetail {
   id: string;
@@ -42,6 +49,7 @@ interface TenantDetail {
   llm_provider?: string;
   llm_model?: string;
   llm_model_tier?: string;
+  llm_fallback_tier?: string;
   branding_config?: any;
   model_routing_config?: {
     extraction_gonogo?: { provider: string; model: string };
@@ -62,14 +70,19 @@ interface TenantSettings {
 interface TenantDocument {
   id: string;
   file_name: string;
+  title?: string;
+  category?: string;
   file_path: string;
   file_type: string;
   file_size: number;
   status: string;
+  source?: string;
+  can_download?: boolean;
   created_at: string;
 }
 
 export default function TenantDetailPage() {
+  const { t } = useTranslation();
   const router = useRouter();
   const params = useParams();
   const rawId = params?.id;
@@ -80,23 +93,70 @@ export default function TenantDetailPage() {
   const [tenant, setTenant] = useState<TenantDetail | null>(null);
   const [settings, setSettings] = useState<TenantSettings | null>(null);
   const [modelTier, setModelTier] = useState<string>('inherit');
+  // Palier de repli propre a ce tenant (03/09) -- 'inherit' = suit le reglage
+  // plateforme (lui-meme automatique si rien n'est configure la non plus).
+  const [modelFallbackTier, setModelFallbackTier] = useState<string>('inherit');
   const [documents, setDocuments] = useState<TenantDocument[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [openingDocId, setOpeningDocId] = useState<string | null>(null);
+  const [previewDoc, setPreviewDoc] = useState<{ title: string; url: string; isPdf: boolean } | null>(null);
+  const [notice, setNotice] = useState<{ message: string; detail?: string; variant?: 'error' | 'success' } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const AVAILABLE_MODELS = [
-    { id: 'claude-sonnet-5', provider: 'Anthropic', name: 'Claude Sonnet 5 (Rédaction Haute Qualité)' },
-    { id: 'claude-haiku-4-5-20251001', provider: 'Anthropic', name: 'Claude Haiku 4.5 (Synthèse Rapide)' },
-    { id: 'claude-opus-5', provider: 'Anthropic', name: 'Claude Opus 5 (Analyse Complexe)' },
-    { id: 'claude-fable-5', provider: 'Anthropic', name: 'Claude Fable 5 (Performance Max)' },
-    { id: 'gpt-4o', provider: 'OpenAI', name: 'GPT-4o (Synthèse Rapide & Go/No-Go)' },
-    { id: 'gemini-1.5-pro', provider: 'Google', name: 'Gemini 1.5 Pro (Grand Contexte DCE)' },
-    { id: 'mistral-large-latest', provider: 'Mistral AI', name: 'Mistral Large 2 (Souveraineté RGPD)' },
-  ];
+  // Visualiser / Aperçu immédiat d'un document
+  async function handleViewDocument(doc: TenantDocument) {
+    setOpeningDocId(doc.id);
+    try {
+      let url = '';
+      if (doc.source === 'tenant_documents' && doc.file_path && !doc.file_path.startsWith('tenants/')) {
+        const { data, error } = await supabase.storage.from('company-memories').createSignedUrl(doc.file_path, 3600);
+        if (error) throw error;
+        url = data.signedUrl;
+      } else {
+        url = await api.getAdminTenantDocumentBlobUrl(tenantId, doc.id, true);
+      }
 
+      const isPdf = (doc.file_name || doc.title || '').toLowerCase().endsWith('.pdf') || (doc.file_type || '').includes('pdf');
+      if (isPdf) {
+        setPreviewDoc({ title: doc.file_name || doc.title || 'Document', url, isPdf: true });
+      } else {
+        window.open(url, '_blank');
+      }
+    } catch (err: any) {
+      alert("Impossible de prévisualiser ce document : " + (err.message || 'Erreur inconnue'));
+    } finally {
+      setOpeningDocId(null);
+    }
+  }
+
+  // Téléchargement direct d'un document
+  async function handleDownloadDocument(doc: TenantDocument) {
+    setOpeningDocId(doc.id);
+    try {
+      let url = '';
+      if (doc.source === 'tenant_documents' && doc.file_path && !doc.file_path.startsWith('tenants/')) {
+        const { data, error } = await supabase.storage.from('company-memories').createSignedUrl(doc.file_path, 3600);
+        if (error) throw error;
+        url = data.signedUrl;
+      } else {
+        url = await api.getAdminTenantDocumentBlobUrl(tenantId, doc.id, false);
+      }
+
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = doc.file_name || doc.title || 'document';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    } catch (err: any) {
+      alert("Erreur lors du téléchargement : " + (err.message || 'Erreur inconnue'));
+    } finally {
+      setOpeningDocId(null);
+    }
+  }
 
   useEffect(() => {
     async function loadData() {
@@ -121,10 +181,12 @@ export default function TenantDetailPage() {
           } catch {}
         }
 
-
         if (loadedTenant) {
           setTenant(loadedTenant);
           setModelTier(loadedTenant.llm_model_tier || loadedTenant.branding_config?.llm_model_tier || 'inherit');
+          setModelFallbackTier(loadedTenant.llm_fallback_tier || loadedTenant.branding_config?.llm_fallback_tier || 'inherit');
+        } else {
+          setNotice({ message: t('admin.tenant_detail.err_load_data'), variant: 'error' });
         }
 
         // 2. Settings & Memory (resilient fallback)
@@ -147,23 +209,65 @@ export default function TenantDetailPage() {
           }
         } catch {}
 
-        // 3. Documents RAG (resilient fallback)
+        // 3. Documents unifiés (Savoir-faire Entreprise, Templates et Archives)
         try {
-          const { data: docsData } = await supabase
-            .from('tenant_documents')
-            .select('*')
-            .eq('tenant_id', tenantId)
-            .order('created_at', { ascending: false });
+          const unifiedDocs = await api.getAdminTenantDocuments(tenantId);
+          if (unifiedDocs && unifiedDocs.length > 0) {
+            setDocuments(unifiedDocs as any);
+          } else {
+            // Fallback : lecture directe des tables Supabase
+            const { data: assetsData } = await supabase
+              .from('company_assets')
+              .select('*')
+              .eq('tenant_id', tenantId)
+              .order('created_at', { ascending: false });
 
-          setDocuments(docsData || []);
-        } catch {}
+            const { data: legacyDocs } = await supabase
+              .from('tenant_documents')
+              .select('*')
+              .eq('tenant_id', tenantId)
+              .order('created_at', { ascending: false });
+
+            const merged: TenantDocument[] = [
+              ...(assetsData || []).map((a: any) => ({
+                id: a.id,
+                file_name: a.metadata_json?.file_name || a.title,
+                title: a.title,
+                category: a.category,
+                file_path: a.s3_url || '',
+                file_type: a.metadata_json?.content_type || 'document',
+                file_size: a.metadata_json?.file_size || 0,
+                status: a.status || 'Prêt',
+                source: 'company_knowledge',
+                created_at: a.created_at,
+                can_download: true,
+              })),
+              ...(legacyDocs || []).map((d: any) => ({
+                ...d,
+                source: 'tenant_documents',
+                can_download: true,
+              })),
+            ];
+            setDocuments(merged);
+          }
+        } catch {
+          // Fallback legacy
+          try {
+            const { data: docsData } = await supabase
+              .from('tenant_documents')
+              .select('*')
+              .eq('tenant_id', tenantId)
+              .order('created_at', { ascending: false });
+
+            setDocuments(docsData || []);
+          } catch {}
+        }
       } catch (err) {
         console.error('Erreur chargement client:', err);
       } finally {
         setLoading(false);
       }
     }
-
 
     if (tenantId) loadData();
   }, [tenantId]);
@@ -222,7 +326,7 @@ export default function TenantDetailPage() {
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 3000);
     } catch (err: any) {
-      alert('Erreur upload : ' + err.message);
+      setNotice({ message: t('admin.tenant_detail.err_upload'), detail: err.message, variant: 'error' });
     } finally {
       setUploading(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
@@ -230,13 +334,13 @@ export default function TenantDetailPage() {
   }
 
   async function handleDeleteDocument(docId: string, filePath: string) {
-    if (!confirm('Supprimer ce document RAG du client ?')) return;
+    if (!confirm(t('admin.tenant_detail.confirm_delete_doc'))) return;
     try {
       await supabase.storage.from('company-memories').remove([filePath]);
       await supabase.from('tenant_documents').delete().eq('id', docId);
       setDocuments(prev => prev.filter(d => d.id !== docId));
     } catch (err: any) {
-      alert('Erreur suppression : ' + err.message);
+      setNotice({ message: t('admin.tenant_detail.err_delete_doc'), detail: err.message, variant: 'error' });
     }
   }
 
@@ -254,9 +358,11 @@ export default function TenantDetailPage() {
           contact_email: tenant.contact_email,
           plan: tenant.plan,
           llm_model_tier: modelTier,
+          llm_fallback_tier: modelFallbackTier,
           branding_config: {
             ...(tenant.branding_config || {}),
             llm_model_tier: modelTier,
+            llm_fallback_tier: modelFallbackTier,
             model_routing_config: tenant.model_routing_config,
           },
         });
@@ -273,6 +379,7 @@ export default function TenantDetailPage() {
             branding_config: {
               ...(tenant.branding_config || {}),
               llm_model_tier: modelTier,
+              llm_fallback_tier: modelFallbackTier,
             },
           })
           .eq('id', tenantId);
@@ -300,27 +407,26 @@ export default function TenantDetailPage() {
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 3000);
     } catch (err: any) {
-      alert('Erreur enregistrement : ' + err.message);
+      setNotice({ message: t('admin.tenant_detail.err_save'), detail: err.message, variant: 'error' });
     } finally {
       setSaving(false);
     }
   }
 
   async function handleDelete() {
-    if (!confirm(`Supprimer définitivement l'entreprise "${tenant?.name}" et tous ses projets/données associées (RGPD) ?`)) return;
+    if (!confirm(t('admin.tenant_detail.confirm_delete_tenant', { name: tenant?.name || '' }))) return;
     try {
       await api.deleteTenant(tenantId);
-      alert('Entreprise supprimée avec succès.');
       router.push('/admin/tenants');
     } catch (err: any) {
-      alert('Erreur suppression : ' + (err?.message || err));
+      setNotice({ message: t('admin.tenant_detail.err_delete_tenant'), detail: String(err?.message || err), variant: 'error' });
     }
   }
 
   function formatBytes(bytes: number) {
-    if (bytes === 0) return '0 Ko';
+    if (bytes === 0) return '0 ' + t('admin.tenant_detail.rag.unit_kb');
     const k = 1024;
-    const sizes = ['Octets', 'Ko', 'Mo', 'Go'];
+    const sizes = [t('admin.tenant_detail.rag.unit_bytes'), t('admin.tenant_detail.rag.unit_kb'), t('admin.tenant_detail.rag.unit_mb'), t('admin.tenant_detail.rag.unit_gb')];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
   }
@@ -328,8 +434,8 @@ export default function TenantDetailPage() {
   if (loading) {
     return (
       <div className="p-16 text-center space-y-3">
-        <Loader2 className="w-8 h-8 text-rose-500 animate-spin mx-auto" />
-        <p className="text-xs text-slate-400">Chargement de la fiche client...</p>
+        <Loader2 className="w-8 h-8 text-hl animate-spin mx-auto" />
+        <p className="text-xs text-muted-foreground">{t('admin.tenant_detail.loading')}</p>
       </div>
     );
   }
@@ -337,18 +443,23 @@ export default function TenantDetailPage() {
   if (!tenant) {
     return (
       <div className="p-12 text-center space-y-4">
-        <h2 className="text-base font-bold text-white">Entreprise cliente introuvable</h2>
-        <Link href="/admin/tenants" className="text-xs text-rose-400 hover:underline">
-          ← Retour à la liste des entreprises
+        <h2 className="text-base font-bold text-foreground font-heading">{t('admin.tenant_detail.not_found_title')}</h2>
+        <Link href="/admin/tenants" className="text-xs text-hl hover:underline">
+          {t('admin.tenant_detail.not_found_back')}
         </Link>
+        {notice && (
+          <div className="max-w-md mx-auto text-left">
+            <DismissibleNotice
+              message={notice.message}
+              detail={notice.detail}
+              variant={notice.variant}
+              onDismiss={() => setNotice(null)}
+            />
+          </div>
+        )}
       </div>
     );
   }
-
-  const routing = tenant.model_routing_config || {};
-  const currentGoNoGo = routing.extraction_gonogo?.model || 'gpt-4o';
-  const currentRedaction = routing.redaction_memoire?.model || tenant.llm_model || 'claude-3-5-sonnet-20241022';
-  const currentPricing = routing.analyse_prix?.model || 'gemini-1.5-pro';
 
   return (
     <div className="space-y-8 pb-16 max-w-5xl">
@@ -356,65 +467,74 @@ export default function TenantDetailPage() {
       <div className="flex flex-wrap items-center justify-between gap-4">
         <Link
           href="/admin/tenants"
-          className="inline-flex items-center gap-2 text-xs font-bold text-slate-400 hover:text-white transition-colors"
+          className="inline-flex items-center gap-2 text-xs font-bold text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white transition-colors"
         >
           <ArrowLeft className="w-4 h-4" />
-          <span>Retour aux entreprises clientes</span>
+          <span>{t('admin.tenant_detail.back_link')}</span>
         </Link>
 
         <div className="flex items-center gap-3">
           {saveSuccess && (
-            <div className="px-3 py-1.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-bold flex items-center gap-1.5 animate-in fade-in">
+            <div className="px-3 py-1.5 rounded-xl bg-positive/10 border border-positive/30 text-positive text-xs font-bold flex items-center gap-1.5 animate-in fade-in">
               <CheckCircle2 className="w-4 h-4" />
-              <span>Modifications enregistrées !</span>
+              <span>{t('admin.tenant_detail.save_success')}</span>
             </div>
           )}
 
           <button
             onClick={handleDelete}
-            className="p-2 rounded-xl text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 transition-colors"
-            title="Supprimer le tenant"
+            className="p-2 rounded-xl text-slate-500 hover:text-danger hover:bg-danger/10 transition-colors cursor-pointer"
+            title={t('admin.tenant_detail.delete_title')}
           >
             <Trash2 className="w-4 h-4" />
           </button>
         </div>
       </div>
 
+      {notice && (
+        <DismissibleNotice
+          message={notice.message}
+          detail={notice.detail}
+          variant={notice.variant}
+          onDismiss={() => setNotice(null)}
+        />
+      )}
+
       {/* Main Info Card */}
-      <div className="p-6 rounded-3xl bg-slate-900/90 border border-slate-800 shadow-xl space-y-4">
+      <div className="p-5 sm:p-6 rounded-2xl bg-card border border-line shadow-xs space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <div className="w-12 h-12 rounded-2xl bg-slate-800 text-rose-400 font-black text-sm flex items-center justify-center border border-slate-700">
+          <div className="flex items-center gap-3.5">
+            <div className="w-12 h-12 rounded-xl bg-hl/10 text-hl font-bold text-sm flex items-center justify-center border border-hl/20">
               {tenant.name.substring(0, 2).toUpperCase()}
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-sky-500/10 text-sky-400 border border-sky-500/20 uppercase">
-                  Plan {tenant.plan}
+                <span className="text-[9px] font-mono font-bold px-2 py-0.5 rounded-full bg-hl/10 text-hl border border-hl/20 uppercase">
+                  {t('admin.tenant_detail.plan_badge', { plan: tenant.plan })}
                 </span>
-                <span className="text-xs text-slate-500 font-mono">ID : {tenant.id}</span>
+                <span className="text-xs text-muted-foreground font-mono">{t('admin.tenant_detail.id_label', { id: tenant.id })}</span>
               </div>
-              <h1 className="text-xl sm:text-2xl font-black text-white">{tenant.name}</h1>
+              <h1 className="text-xl sm:text-2xl font-extrabold text-foreground font-heading tracking-tight mt-0.5">{tenant.name}</h1>
             </div>
           </div>
 
           <div className="text-right">
-            <p className="text-xs text-slate-400 font-mono">Quota mensuel</p>
-            <p className="text-lg font-black text-white">
-              {tenant.used_this_month || 0} <span className="text-xs text-slate-400 font-normal">/ {tenant.monthly_limit || 15} DCE</span>
+            <p className="text-xs text-muted-foreground font-mono">{t('admin.tenant_detail.monthly_quota')}</p>
+            <p className="text-lg font-bold text-foreground font-mono">
+              {tenant.used_this_month || 0} <span className="text-xs text-muted-foreground font-normal">/ {tenant.monthly_limit || 15} DCE</span>
             </p>
           </div>
         </div>
       </div>
 
       {/* Tabs */}
-      <div className="flex flex-wrap border-b border-slate-800 gap-2">
+      <div className="flex flex-wrap border-b border-line gap-1.5">
         {[
-          { id: 'rag', label: 'Documents RAG (Base de Connaissance)', icon: BookOpen },
-          { id: 'memory', label: 'Prompt & Mémoire Continue', icon: BrainCircuit },
-          { id: 'routing', label: 'Moteurs IA Assignés', icon: Cpu },
-          { id: 'economic', label: 'Règles Économiques & Inflation', icon: Sliders },
-          { id: 'info', label: 'Informations Entreprise', icon: Building2 },
+          { id: 'rag', label: t('admin.tenant_detail.tab_rag'), icon: BookOpen },
+          { id: 'memory', label: t('admin.tenant_detail.tab_memory'), icon: BrainCircuit },
+          { id: 'routing', label: t('admin.tenant_detail.tab_routing'), icon: Cpu },
+          { id: 'economic', label: t('admin.tenant_detail.tab_economic'), icon: Sliders },
+          { id: 'info', label: t('admin.tenant_detail.tab_info'), icon: Building2 },
         ].map((tab) => {
           const Icon = tab.icon;
           const isActive = activeTab === tab.id;
@@ -422,13 +542,13 @@ export default function TenantDetailPage() {
             <button
               key={tab.id}
               onClick={() => setActiveTab(tab.id as any)}
-              className={`flex items-center gap-2 px-4 py-3 border-b-2 text-xs font-bold transition-all ${
+              className={`flex items-center gap-2 px-3.5 py-2.5 border-b-2 text-xs transition-all font-semibold cursor-pointer ${
                 isActive
-                  ? 'border-rose-500 text-rose-400 bg-rose-500/5'
-                  : 'border-transparent text-slate-400 hover:text-slate-200'
+                  ? 'border-hl text-hl bg-hl/10 rounded-t-xl'
+                  : 'border-transparent text-muted-foreground hover:text-slate-900 dark:hover:text-white'
               }`}
             >
-              <Icon className="w-4 h-4" />
+              <Icon className={`w-3.5 h-3.5 ${isActive ? 'text-hl' : 'text-muted-foreground'}`} />
               <span>{tab.label}</span>
             </button>
           );
@@ -437,12 +557,12 @@ export default function TenantDetailPage() {
 
       {/* TAB 1: RAG DOCUMENTS (SUPER ADMIN MANAGEMENT) */}
       {activeTab === 'rag' && (
-        <div className="space-y-6">
+        <div className="space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-4">
             <div>
-              <h2 className="text-base font-bold text-white">Documents RAG du Client (Bucket company-memories)</h2>
-              <p className="text-xs text-slate-400">
-                Vous pouvez ajouter des documents de référence (anciens mémoires, certificats) pour enrichir la mémoire de ce client.
+              <h2 className="text-sm font-bold text-foreground font-heading">{t('admin.tenant_detail.rag.title')}</h2>
+              <p className="text-xs text-muted-foreground">
+                {t('admin.tenant_detail.rag.desc')}
               </p>
             </div>
 
@@ -458,54 +578,105 @@ export default function TenantDetailPage() {
               <button
                 onClick={() => fileInputRef.current?.click()}
                 disabled={uploading}
-                className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold shadow-lg shadow-rose-900/30 transition-all disabled:opacity-50"
+                className="btn-primary !py-2 !px-4 !text-xs cursor-pointer"
               >
-                {uploading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
-                <span>{uploading ? 'Téléversement...' : 'Ajouter un document RAG'}</span>
+                {uploading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Upload className="w-3.5 h-3.5" />}
+                <span>{uploading ? t('admin.tenant_detail.rag.btn_uploading') : t('admin.tenant_detail.rag.btn_add_doc')}</span>
               </button>
             </div>
           </div>
 
-          <div className="bg-slate-900/90 border border-slate-800 rounded-3xl overflow-hidden shadow-xl">
+          <div className="bg-card border border-line rounded-2xl overflow-hidden shadow-xs">
             {documents.length === 0 ? (
-              <div className="p-8 text-center text-xs text-slate-500 space-y-2">
-                <BookOpen className="w-8 h-8 mx-auto text-slate-600" />
-                <p>Aucun document RAG téléversé pour ce client.</p>
+              <div className="p-8 text-center text-xs text-muted-foreground space-y-2">
+                <BookOpen className="w-8 h-8 mx-auto text-muted-foreground" />
+                <p>{t('admin.tenant_detail.rag.empty')}</p>
               </div>
             ) : (
-              <div className="divide-y divide-slate-800">
+              <div className="divide-y divide-line">
                 {documents.map((doc) => (
-                  <div key={doc.id} className="p-4 flex items-center justify-between hover:bg-slate-800/40 transition-colors">
-                    <div className="flex items-center gap-3">
-                      <div className="w-9 h-9 rounded-xl bg-rose-500/10 text-rose-400 border border-rose-500/20 flex items-center justify-center font-bold text-xs">
+                  <div key={doc.id} className="p-3.5 sm:p-4 flex flex-wrap items-center justify-between gap-3 hover:bg-slate-50/60 dark:hover:bg-raised/50 transition-colors">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="w-9 h-9 rounded-xl bg-hl/10 text-hl flex items-center justify-center font-bold text-xs shrink-0">
                         <FileText className="w-4 h-4" />
                       </div>
-                      <div>
-                        <p className="text-xs font-bold text-white">{doc.file_name}</p>
-                        <p className="text-[10px] text-slate-400 font-mono">
-                          {formatBytes(doc.file_size)} • Indexé le {new Date(doc.created_at).toLocaleDateString('fr-FR')}
+                      <div className="min-w-0 cursor-pointer" onClick={() => handleViewDocument(doc)}>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <p className="text-xs font-bold text-foreground hover:text-hl transition-colors truncate">
+                            {doc.file_name || doc.title}
+                          </p>
+                          {doc.source === 'company_knowledge' && (
+                            <span className="text-[9px] font-bold px-1.5 py-0.2 rounded bg-hl/10 text-hl border border-hl/20">
+                              Savoir-faire Client
+                            </span>
+                          )}
+                          {doc.source === 'export_template' && (
+                            <span className="text-[9px] font-bold px-1.5 py-0.2 rounded bg-corten/10 text-corten border border-corten/20">
+                              Modèle Word
+                            </span>
+                          )}
+                          {doc.source === 'tenant_documents' && (
+                            <span className="text-[9px] font-bold px-1.5 py-0.2 rounded bg-hl/10 text-hl border border-hl/20">
+                              Document Admin
+                            </span>
+                          )}
+                          {doc.category && doc.category !== 'document' && (
+                            <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-sunken text-muted-foreground border border-line">
+                              {doc.category}
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-[10px] text-muted-foreground font-mono mt-0.5">
+                          {doc.file_size ? `${formatBytes(doc.file_size)} • ` : ''}
+                          {doc.created_at ? new Date(doc.created_at).toLocaleDateString('fr-FR') : 'Date inconnue'}
                         </p>
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-3">
-                      {doc.status.includes('OCR') ? (
-                        <span className="text-[10px] font-bold px-2.5 py-1 rounded bg-amber-500/10 text-amber-300 border border-amber-500/30 flex items-center gap-1.5 animate-pulse">
-                          <Loader2 className="w-3 h-3 animate-spin text-amber-400" />
-                          <span>En cours de traitement OCR...</span>
+                    <div className="flex items-center gap-2">
+                      {doc.status && doc.status.includes('OCR') ? (
+                        <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-full bg-hl/10 text-hl border border-hl/20 flex items-center gap-1.5 animate-pulse">
+                          <Loader2 className="w-3 h-3 animate-spin text-hl" />
+                          <span>{t('admin.tenant_detail.rag.status_ocr')}</span>
                         </span>
                       ) : (
-                        <span className="text-[10px] font-bold px-2.5 py-1 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 flex items-center gap-1.5">
-                          <CheckCircle2 className="w-3 h-3 text-emerald-400" />
-                          <span>Prêt - Indexé</span>
+                        <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-full bg-positive/10 text-positive border border-positive/25 flex items-center gap-1.5">
+                          <CheckCircle2 className="w-3 h-3 text-positive" />
+                          <span>{t('admin.tenant_detail.rag.status_ready')}</span>
                         </span>
                       )}
+
+                      {/* Visualiser / Preview Button */}
+                      <button
+                        onClick={() => handleViewDocument(doc)}
+                        disabled={openingDocId === doc.id}
+                        className="p-1.5 rounded-lg text-slate-500 hover:text-hl hover:bg-hl/10 transition-colors cursor-pointer"
+                        title="Visualiser le document"
+                      >
+                        {openingDocId === doc.id ? (
+                          <Loader2 className="w-4 h-4 animate-spin text-hl" />
+                        ) : (
+                          <Eye className="w-4 h-4" />
+                        )}
+                      </button>
+
+                      {/* Télécharger / Download Button */}
+                      <button
+                        onClick={() => handleDownloadDocument(doc)}
+                        disabled={openingDocId === doc.id}
+                        className="p-1.5 rounded-lg text-slate-500 hover:text-positive hover:bg-positive/10 transition-colors cursor-pointer"
+                        title="Télécharger le fichier original"
+                      >
+                        <Download className="w-4 h-4" />
+                      </button>
+
+                      {/* Supprimer Button */}
                       <button
                         onClick={() => handleDeleteDocument(doc.id, doc.file_path)}
-                        className="p-1.5 rounded-lg text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 transition-colors"
-                        title="Supprimer le document"
+                        className="p-1.5 rounded-lg text-slate-400 hover:text-danger hover:bg-danger/10 transition-colors cursor-pointer"
+                        title={t('admin.tenant_detail.rag.btn_delete_doc_title')}
                       >
-                        <Trash2 className="w-4 h-4" />
+                        <Trash2 className="w-3.5 h-3.5" />
                       </button>
                     </div>
                   </div>
@@ -518,22 +689,22 @@ export default function TenantDetailPage() {
 
       {/* TAB 2: PROMPT & CONTINUOUS LEARNING LOOP */}
       {activeTab === 'memory' && (
-        <form onSubmit={handleSave} className="space-y-6">
+        <form onSubmit={handleSave} className="space-y-4">
           <div>
-            <h2 className="text-base font-bold text-white">Cerveau Client & Boucle d'Apprentissage (Prompt Memory)</h2>
-            <p className="text-xs text-slate-400">
-              Ajustez les consignes permanentes et les règles apprises injectées dans le moteur de rédaction de cette entreprise.
+            <h2 className="text-sm font-bold text-foreground font-heading">{t('admin.tenant_detail.memory.title')}</h2>
+            <p className="text-xs text-muted-foreground">
+              {t('admin.tenant_detail.memory.desc')}
             </p>
           </div>
 
-          <div className="p-6 rounded-3xl bg-slate-900/90 border border-slate-800 space-y-4 shadow-xl">
+          <div className="p-5 sm:p-6 rounded-2xl bg-card border border-line space-y-3 shadow-xs">
             <div className="space-y-1">
-              <label className="block text-xs font-bold text-white flex items-center gap-2">
-                <BrainCircuit className="w-4 h-4 text-rose-400" />
-                <span>Règles Métier Apprises & Mémoire Continue (`system_prompt_memory`)</span>
+              <label className="block text-xs font-semibold text-slate-800 dark:text-zinc-200 flex items-center gap-2">
+                <BrainCircuit className="w-4 h-4 text-hl" />
+                <span>{t('admin.tenant_detail.memory.label_learned_rules')}</span>
               </label>
-              <p className="text-[11px] text-slate-400">
-                Ces consignes sont prioritaires et automatiquement injectées lors de chaque génération de mémoire technique pour ce client.
+              <p className="text-[11px] text-muted-foreground">
+                {t('admin.tenant_detail.memory.desc_learned_rules')}
               </p>
             </div>
 
@@ -541,22 +712,22 @@ export default function TenantDetailPage() {
               rows={8}
               value={settings?.system_prompt_memory || ''}
               onChange={(e) => setSettings(prev => ({ ...prev, system_prompt_memory: e.target.value }))}
-              placeholder="- Toujours valoriser notre flotte de grues en propriété propre..."
-              className="w-full p-4 rounded-2xl bg-slate-950 border border-slate-800 focus:border-rose-500 text-slate-200 text-xs font-mono focus:outline-none leading-relaxed"
+              placeholder={t('admin.tenant_detail.memory.placeholder_learned_rules')}
+              className="w-full p-3.5 rounded-xl bg-sunken border border-line focus:border-hl text-slate-800 dark:text-zinc-200 text-xs font-mono focus:outline-none leading-relaxed"
             />
           </div>
 
-          <div className="p-6 rounded-3xl bg-slate-900/90 border border-slate-800 space-y-4 shadow-xl">
+          <div className="p-5 sm:p-6 rounded-2xl bg-card border border-line space-y-3 shadow-xs">
             <div className="space-y-1">
-              <label className="block text-xs font-bold text-white">Prompt Système Global (`custom_system_prompt`)</label>
-              <p className="text-[11px] text-slate-400">Rôle de base attribué au modèle IA lors de la rédaction.</p>
+              <label className="block text-xs font-semibold text-slate-800 dark:text-zinc-200">{t('admin.tenant_detail.memory.label_system_prompt')}</label>
+              <p className="text-[11px] text-muted-foreground">{t('admin.tenant_detail.memory.desc_system_prompt')}</p>
             </div>
 
             <textarea
               rows={3}
               value={settings?.custom_system_prompt || ''}
               onChange={(e) => setSettings(prev => ({ ...prev, custom_system_prompt: e.target.value }))}
-              className="w-full p-3 rounded-2xl bg-slate-950 border border-slate-800 focus:border-rose-500 text-slate-200 text-xs font-mono focus:outline-none leading-relaxed"
+              className="w-full p-3 rounded-xl bg-sunken border border-line focus:border-hl text-slate-800 dark:text-zinc-200 text-xs font-mono focus:outline-none leading-relaxed"
             />
           </div>
 
@@ -564,9 +735,9 @@ export default function TenantDetailPage() {
             <button
               type="submit"
               disabled={saving}
-              className="px-6 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold shadow-lg shadow-rose-900/30 transition-all disabled:opacity-50"
+              className="btn-primary !py-2 !px-5 !text-xs cursor-pointer"
             >
-              {saving ? 'Enregistrement...' : 'Enregistrer le cerveau client'}
+              {saving ? t('admin.common.saving') : t('admin.tenant_detail.memory.btn_save')}
             </button>
           </div>
         </form>
@@ -574,46 +745,52 @@ export default function TenantDetailPage() {
 
       {/* TAB 3: LLM ROUTING */}
       {activeTab === 'routing' && (
-        <form onSubmit={handleSave} className="space-y-6">
+        <form onSubmit={handleSave} className="space-y-4">
           <div>
-            <h2 className="text-base font-bold text-white">Moteurs d'Intelligence Artificielle & Modèle Assigné</h2>
-            <p className="text-xs text-slate-400">
-              Définissez le niveau d'intelligence artificielle alloué à cette entreprise cliente (override spécifique ou héritage).
+            <h2 className="text-sm font-bold text-foreground font-heading">{t('admin.tenant_detail.routing.title')}</h2>
+            <p className="text-xs text-muted-foreground">
+              {t('admin.tenant_detail.routing.desc')}
+            </p>
+            <p className="text-[11px] text-muted-foreground mt-1">
+              {t('admin.tenant_detail.routing.also_on_main_tab')}{' '}
+              <Link href="/admin?tab=routing" className="text-hl hover:underline">
+                {t('admin.tenant_detail.routing.main_tab_link')}
+              </Link>
             </p>
           </div>
 
           {/* Level 2: Per-Client Model Tier Selection */}
-          <div className="p-6 rounded-3xl bg-slate-900/90 border border-slate-800 space-y-4 shadow-xl">
-            <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="p-5 sm:p-6 rounded-2xl bg-card border border-line space-y-3.5 shadow-xs">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line pb-3">
               <div>
-                <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                  <Cpu className="w-4 h-4 text-sky-400" />
-                  <span>Modèle IA Assigné (Override Client)</span>
+                <h3 className="text-xs font-bold text-foreground flex items-center gap-2 font-heading">
+                  <Cpu className="w-4 h-4 text-hl" />
+                  <span>{t('admin.common.ai_model_override_title')}</span>
                 </h3>
-                <p className="text-xs text-slate-400 mt-0.5">
-                  Choisissez le palier de performance et de coût pour les générations de cette entreprise.
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  {t('admin.tenant_detail.routing.desc2')}
                 </p>
               </div>
-              <span className={`text-[10px] font-bold px-2.5 py-1 rounded border ${
+              <span className={`text-[9px] font-mono font-bold px-2 py-0.5 rounded-full border ${
                 modelTier === 'inherit' 
-                  ? 'bg-slate-800 text-slate-300 border-slate-700' 
-                  : 'bg-rose-500/10 text-rose-300 border-rose-500/30'
+                  ? 'bg-sunken text-muted-foreground border-line' 
+                  : 'bg-hl/10 text-hl border-hl/20'
               }`}>
-                {modelTier === 'inherit' ? 'Mode Hérité (Plateforme)' : 'Override Spécifique'}
+                {modelTier === 'inherit' ? t('admin.tenant_detail.routing.badge_inherited') : t('admin.tenant_detail.routing.badge_override')}
               </span>
             </div>
 
             <div className="space-y-2">
-              <label htmlFor="tenant-model-tier-select" className="block text-xs font-bold text-slate-200">
-                Palier de Modèle IA
+              <label htmlFor="tenant-model-tier-select" className="block text-xs font-semibold text-foreground">
+                {t('admin.tenant_detail.routing.label_tier')}
               </label>
               <select
                 id="tenant-model-tier-select"
                 value={modelTier}
                 onChange={(e) => setModelTier(e.target.value)}
-                className="w-full px-4 py-3 rounded-xl bg-slate-950 border border-slate-800 focus:border-rose-500 text-xs text-white font-medium focus:outline-none cursor-pointer"
+                className="w-full px-3 py-2 rounded-xl bg-sunken border border-line focus:border-hl text-xs text-foreground font-medium focus:outline-none cursor-pointer"
               >
-                <option value="inherit">Hériter du réglage général (par défaut)</option>
+                <option value="inherit">{t('admin.common.inherit_option')}</option>
                 {LLM_MODEL_TIERS.map((tier) => (
                   <option key={tier.id} value={tier.id}>
                     {tier.display_label}
@@ -621,101 +798,32 @@ export default function TenantDetailPage() {
                 ))}
               </select>
 
-              {/* RGPD Warning Banner for non-EU/US model override */}
-              {(() => {
-                const selectedTier = LLM_MODEL_TIERS.find((t) => t.id === modelTier);
-                if (selectedTier?.is_non_eu) {
-                  return (
-                    <div className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs flex items-start gap-2.5 animate-in fade-in">
-                      <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-                      <div>
-                        <p className="font-bold">Avertissement Souveraineté & RGPD :</p>
-                        <p className="text-[11px] text-amber-200/90 mt-0.5">
-                          Hébergement hors UE — conformité RGPD non confirmée, voir avec un juriste avant usage sur des données clients réelles.
-                        </p>
-                      </div>
-                    </div>
-                  );
-                }
-                return null;
-              })()}
-
-              <p className="text-[11px] text-slate-500">
-                Si "Hériter du réglage général" est sélectionné, le client utilise instantanément le modèle global défini par le super-admin.
+              <p className="text-[11px] text-muted-foreground">
+                {t('admin.tenant_detail.routing.hint_inherit')}
               </p>
             </div>
-          </div>
 
-
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div className="p-4 rounded-2xl bg-slate-950/80 border border-slate-800 space-y-2">
-              <label className="block text-xs font-bold text-slate-200">1. Synthèse DCE & Go/No-Go</label>
-
+            <div className="space-y-2 pt-2">
+              <label htmlFor="tenant-fallback-tier-select" className="block text-xs font-semibold text-foreground">
+                Modèle de repli pour ce client
+              </label>
               <select
-                value={currentGoNoGo}
-                onChange={(e) => {
-                  const model = e.target.value;
-                  const provider = model.includes('claude') ? 'anthropic' : model.includes('gpt') ? 'openai' : 'google';
-                  setTenant({
-                    ...tenant,
-                    model_routing_config: {
-                      ...(tenant.model_routing_config || {}),
-                      extraction_gonogo: { provider, model },
-                    },
-                  });
-                }}
-                className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-800 focus:border-rose-500 text-xs text-white focus:outline-none"
+                id="tenant-fallback-tier-select"
+                value={modelFallbackTier}
+                onChange={(e) => setModelFallbackTier(e.target.value)}
+                className="w-full px-3 py-2 rounded-xl bg-sunken border border-line focus:border-hl text-xs text-foreground font-medium focus:outline-none cursor-pointer"
               >
-                {AVAILABLE_MODELS.map((m) => (
-                  <option key={m.id} value={m.id}>{m.name}</option>
+                <option value="inherit">{t('admin.common.inherit_option')}</option>
+                {LLM_MODEL_TIERS.map((tier) => (
+                  <option key={tier.id} value={tier.id}>
+                    {tier.display_label}
+                  </option>
                 ))}
               </select>
-            </div>
 
-            <div className="p-4 rounded-2xl bg-slate-950/80 border border-rose-950/60 space-y-2">
-              <label className="block text-xs font-bold text-rose-300">2. Rédaction Mémoire (30+ pages)</label>
-              <select
-                value={currentRedaction}
-                onChange={(e) => {
-                  const model = e.target.value;
-                  const provider = model.includes('claude') ? 'anthropic' : model.includes('gpt') ? 'openai' : 'google';
-                  setTenant({
-                    ...tenant,
-                    model_routing_config: {
-                      ...(tenant.model_routing_config || {}),
-                      redaction_memoire: { provider, model },
-                    },
-                  });
-                }}
-                className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-rose-900/60 focus:border-rose-500 text-xs text-white focus:outline-none"
-              >
-                {AVAILABLE_MODELS.map((m) => (
-                  <option key={m.id} value={m.id}>{m.name}</option>
-                ))}
-              </select>
-            </div>
-
-            <div className="p-4 rounded-2xl bg-slate-950/80 border border-slate-800 space-y-2">
-              <label className="block text-xs font-bold text-slate-200">3. Chiffrage & Inflation</label>
-              <select
-                value={currentPricing}
-                onChange={(e) => {
-                  const model = e.target.value;
-                  const provider = model.includes('claude') ? 'anthropic' : model.includes('gpt') ? 'openai' : 'google';
-                  setTenant({
-                    ...tenant,
-                    model_routing_config: {
-                      ...(tenant.model_routing_config || {}),
-                      analyse_prix: { provider, model },
-                    },
-                  });
-                }}
-                className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-800 focus:border-rose-500 text-xs text-white focus:outline-none"
-              >
-                {AVAILABLE_MODELS.map((m) => (
-                  <option key={m.id} value={m.id}>{m.name}</option>
-                ))}
-              </select>
+              <p className="text-[11px] text-muted-foreground">
+                Modèle utilisé pour UN essai de secours si l'appel au modèle principal de ce client échoue, avant le moteur de gabarits. « Hérite » suit le réglage plateforme (lui-même automatique si rien n'y est configuré).
+              </p>
             </div>
           </div>
 
@@ -723,9 +831,9 @@ export default function TenantDetailPage() {
             <button
               type="submit"
               disabled={saving}
-              className="px-6 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold shadow-lg shadow-rose-900/30 transition-all disabled:opacity-50"
+              className="btn-primary !py-2 !px-5 !text-xs cursor-pointer"
             >
-              {saving ? 'Enregistrement...' : 'Enregistrer le routage IA'}
+              {saving ? t('admin.common.saving') : t('admin.tenant_detail.routing.btn_save')}
             </button>
           </div>
         </form>
@@ -733,38 +841,38 @@ export default function TenantDetailPage() {
 
       {/* TAB 4: ECONOMIC RULES */}
       {activeTab === 'economic' && (
-        <form onSubmit={handleSave} className="space-y-6">
+        <form onSubmit={handleSave} className="space-y-4">
           <div>
-            <h2 className="text-base font-bold text-white">Règles Économiques & Inflation</h2>
-            <p className="text-xs text-slate-400">Paramètres financiers appliqués au calcul des bordereaux de prix.</p>
+            <h2 className="text-sm font-bold text-foreground font-heading">{t('admin.tenant_detail.tab_economic')}</h2>
+            <p className="text-xs text-muted-foreground">{t('admin.tenant_detail.economic.desc')}</p>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div className="p-4 rounded-2xl bg-slate-950/80 border border-slate-800 space-y-2">
-              <label className="block text-xs font-bold text-slate-300">Taux d'Ajustement Inflation (%)</label>
+            <div className="p-4 rounded-2xl bg-card border border-line space-y-2 shadow-xs">
+              <label className="block text-xs font-semibold text-foreground">{t('admin.tenant_detail.economic.label_inflation')}</label>
               <div className="relative">
                 <input
                   type="number"
                   step="0.1"
                   value={settings?.taux_inflation_pct || 3.5}
                   onChange={(e) => setSettings(prev => ({ ...prev, taux_inflation_pct: parseFloat(e.target.value) || 0 }))}
-                  className="w-full pl-3 pr-8 py-2 rounded-xl bg-slate-900 border border-slate-800 text-white font-mono text-xs focus:outline-none"
+                  className="w-full pl-3 pr-8 py-2 rounded-xl bg-sunken border border-line text-foreground font-mono text-xs focus:border-hl focus:outline-none"
                 />
-                <Percent className="w-4 h-4 text-slate-500 absolute right-3 top-2" />
+                <Percent className="w-3.5 h-3.5 text-muted-foreground absolute right-3 top-2.5" />
               </div>
             </div>
 
-            <div className="p-4 rounded-2xl bg-slate-950/80 border border-slate-800 space-y-2">
-              <label className="block text-xs font-bold text-slate-300">Marge Cible (%)</label>
+            <div className="p-4 rounded-2xl bg-card border border-line space-y-2 shadow-xs">
+              <label className="block text-xs font-semibold text-foreground">{t('admin.tenant_detail.economic.label_margin')}</label>
               <div className="relative">
                 <input
                   type="number"
                   step="0.1"
                   value={settings?.marge_cible_pct || 12.0}
                   onChange={(e) => setSettings(prev => ({ ...prev, marge_cible_pct: parseFloat(e.target.value) || 0 }))}
-                  className="w-full pl-3 pr-8 py-2 rounded-xl bg-slate-900 border border-slate-800 text-white font-mono text-xs focus:outline-none"
+                  className="w-full pl-3 pr-8 py-2 rounded-xl bg-sunken border border-line text-foreground font-mono text-xs focus:border-hl focus:outline-none"
                 />
-                <Percent className="w-4 h-4 text-slate-500 absolute right-3 top-2" />
+                <Percent className="w-3.5 h-3.5 text-muted-foreground absolute right-3 top-2.5" />
               </div>
             </div>
           </div>
@@ -773,9 +881,9 @@ export default function TenantDetailPage() {
             <button
               type="submit"
               disabled={saving}
-              className="px-6 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold shadow-lg shadow-rose-900/30 transition-all disabled:opacity-50"
+              className="btn-primary !py-2 !px-5 !text-xs cursor-pointer"
             >
-              {saving ? 'Enregistrement...' : 'Enregistrer les règles économiques'}
+              {saving ? t('admin.common.saving') : t('admin.tenant_detail.economic.btn_save')}
             </button>
           </div>
         </form>
@@ -783,45 +891,93 @@ export default function TenantDetailPage() {
 
       {/* TAB 5: COMPANY INFO */}
       {activeTab === 'info' && (
-        <form onSubmit={handleSave} className="space-y-6">
-          <div className="p-6 rounded-3xl bg-slate-900/90 border border-slate-800 space-y-4">
-            <h2 className="text-sm font-bold text-white flex items-center gap-2">
-              <Building2 className="w-4 h-4 text-rose-400" />
-              <span>Informations de l'Entreprise</span>
+        <form onSubmit={handleSave} className="space-y-4">
+          <div className="p-5 sm:p-6 rounded-2xl bg-card border border-line space-y-4 shadow-xs">
+            <h2 className="text-xs font-bold text-foreground flex items-center gap-2 font-heading">
+              <Building2 className="w-4 h-4 text-hl" />
+              <span>{t('admin.tenant_detail.info.title')}</span>
             </h2>
 
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
               <div>
-                <label className="block text-xs font-bold text-slate-300 mb-1">Raison Sociale</label>
+                <label className="block text-xs font-semibold text-foreground mb-1">{t('admin.tenant_detail.info.label_name')}</label>
                 <input
                   type="text"
                   required
                   value={tenant.name}
                   onChange={(e) => setTenant({ ...tenant, name: e.target.value })}
-                  className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 focus:border-rose-500 text-white text-xs focus:outline-none"
+                  className="w-full px-3 py-2 rounded-xl bg-sunken border border-line focus:border-hl text-foreground text-xs focus:outline-none font-medium"
                 />
               </div>
 
               <div>
-                <label className="block text-xs font-bold text-slate-300 mb-1">Numéro SIRET</label>
+                <label className="block text-xs font-semibold text-foreground mb-1">{t('admin.super.modal.label_siret')}</label>
                 <input
                   type="text"
                   value={tenant.siret || ''}
                   onChange={(e) => setTenant({ ...tenant, siret: e.target.value })}
-                  placeholder="452 871 609 00041"
-                  className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 focus:border-rose-500 text-white text-xs focus:outline-none"
+                  placeholder={t('admin.tenant_detail.info.placeholder_siret')}
+                  className="w-full px-3 py-2 rounded-xl bg-sunken border border-line focus:border-hl text-foreground text-xs focus:outline-none font-mono"
                 />
               </div>
 
               <div>
-                <label className="block text-xs font-bold text-slate-300 mb-1">Email Contact</label>
+                <label className="block text-xs font-semibold text-foreground mb-1">{t('admin.tenant_detail.info.label_email')}</label>
                 <input
                   type="email"
                   value={tenant.contact_email || ''}
                   onChange={(e) => setTenant({ ...tenant, contact_email: e.target.value })}
-                  placeholder="direction@entreprise.fr"
-                  className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 focus:border-rose-500 text-white text-xs focus:outline-none"
+                  placeholder={t('admin.tenant_detail.info.placeholder_email')}
+                  className="w-full px-3 py-2 rounded-xl bg-sunken border border-line focus:border-hl text-foreground text-xs focus:outline-none font-medium"
                 />
+              </div>
+            </div>
+          </div>
+
+          {/* BT02 (01/09) : jusqu'ici branding_config.primary_color etait deja lu par
+              gantt_service.py / diagram_service.py mais AUCUN champ, ici ou ailleurs,
+              ne permettait de le regler -- seule une ecriture DB directe le pouvait. Ce
+              bloc est le premier point d'entree UI reel, avec le nouveau shape_style. */}
+          <div className="p-5 sm:p-6 rounded-2xl bg-card border border-line space-y-4 shadow-xs">
+            <h2 className="text-xs font-bold text-foreground flex items-center gap-2 font-heading">
+              <Palette className="w-4 h-4 text-hl" />
+              <span>{t('admin.tenant_detail.branding.title')}</span>
+            </h2>
+            <p className="text-[11px] text-muted-foreground -mt-2">{t('admin.tenant_detail.branding.subtitle')}</p>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-semibold text-foreground mb-1">{t('admin.tenant_detail.branding.label_color')}</label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="color"
+                    value={tenant.branding_config?.primary_color || '#1C6091'}
+                    onChange={(e) => setTenant({ ...tenant, branding_config: { ...(tenant.branding_config || {}), primary_color: e.target.value } })}
+                    className="w-10 h-9 rounded-lg border border-line bg-transparent cursor-pointer shrink-0"
+                  />
+                  <input
+                    type="text"
+                    value={tenant.branding_config?.primary_color || ''}
+                    onChange={(e) => setTenant({ ...tenant, branding_config: { ...(tenant.branding_config || {}), primary_color: e.target.value } })}
+                    placeholder="#1C6091"
+                    className="w-full px-3 py-2 rounded-xl bg-sunken border border-line focus:border-hl text-foreground text-xs focus:outline-none font-mono"
+                  />
+                </div>
+                <p className="text-[10px] text-muted-foreground mt-1">{t('admin.tenant_detail.branding.hint_color')}</p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-foreground mb-1">{t('admin.tenant_detail.branding.label_shape')}</label>
+                <select
+                  value={tenant.branding_config?.shape_style || 'arrondi'}
+                  onChange={(e) => setTenant({ ...tenant, branding_config: { ...(tenant.branding_config || {}), shape_style: e.target.value } })}
+                  className="w-full px-3 py-2 rounded-xl bg-sunken border border-line focus:border-hl text-foreground text-xs focus:outline-none font-medium"
+                >
+                  <option value="anguleux">{t('admin.tenant_detail.branding.shape_anguleux')}</option>
+                  <option value="arrondi">{t('admin.tenant_detail.branding.shape_arrondi')}</option>
+                  <option value="pilule">{t('admin.tenant_detail.branding.shape_pilule')}</option>
+                </select>
+                <p className="text-[10px] text-muted-foreground mt-1">{t('admin.tenant_detail.branding.hint_shape')}</p>
               </div>
             </div>
           </div>
@@ -830,12 +986,52 @@ export default function TenantDetailPage() {
             <button
               type="submit"
               disabled={saving}
-              className="px-6 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold shadow-lg shadow-rose-900/30 transition-all disabled:opacity-50"
+              className="btn-primary !py-2 !px-5 !text-xs cursor-pointer"
             >
-              {saving ? 'Enregistrement...' : 'Enregistrer les informations'}
+              {saving ? t('admin.common.saving') : t('admin.tenant_detail.info.btn_save')}
             </button>
           </div>
         </form>
+      )}
+
+      {/* MODAL DE PRÉVISUALISATION DU DOCUMENT */}
+      {previewDoc && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs animate-fade-in">
+          <div className="bg-card border border-line rounded-2xl w-full max-w-4xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+            <div className="flex items-center justify-between p-4 border-b border-line">
+              <div className="flex items-center gap-2.5">
+                <FileText className="w-5 h-5 text-hl" />
+                <h3 className="text-sm font-bold text-foreground truncate max-w-md">
+                  {previewDoc.title}
+                </h3>
+              </div>
+              <div className="flex items-center gap-2">
+                <a
+                  href={previewDoc.url}
+                  download={previewDoc.title}
+                  className="btn-secondary !py-1.5 !px-3 !text-xs flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Télécharger</span>
+                </a>
+                <button
+                  onClick={() => setPreviewDoc(null)}
+                  className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-raised transition-colors cursor-pointer"
+                  title="Fermer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+            <div className="flex-1 bg-slate-100 dark:bg-slate-950 p-2 overflow-hidden">
+              <iframe
+                src={previewDoc.url}
+                className="w-full h-[70vh] rounded-xl border border-line"
+                title={previewDoc.title}
+              />
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

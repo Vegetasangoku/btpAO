@@ -96,6 +96,21 @@ services:
       # Azure OCR (optional)
       AZURE_DOC_INTELLIGENCE_ENDPOINT: ${AZURE_DOC_INTELLIGENCE_ENDPOINT}
       AZURE_DOC_INTELLIGENCE_KEY: ${AZURE_DOC_INTELLIGENCE_KEY}
+      # Stripe, recherche web, email (03/09 -- absents jusqu'ici, donc inutilisables
+      # sous docker-compose meme avec de vraies valeurs dans .env)
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET}
+      SERPER_API_KEY: ${SERPER_API_KEY}
+      BRAVE_SEARCH_API_KEY: ${BRAVE_SEARCH_API_KEY}
+      WEB_SEARCH_PROVIDER: ${WEB_SEARCH_PROVIDER:-serper}
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASSWORD: ${SMTP_PASSWORD}
+      SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL}
+      SMTP_FROM_NAME: ${SMTP_FROM_NAME}
+      NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-http://localhost:3000}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
       # Demo
       ALLOW_MOCK_FALLBACK: "true"
       CORS_ORIGINS: '["http://localhost:3000","http://127.0.0.1:3000"]'
@@ -140,6 +155,10 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       MISTRAL_API_KEY: ${MISTRAL_API_KEY}
       OPENAI_API_KEY: ${OPENAI_API_KEY}
+      # Recherche web (03/09) -- utilisee par tasks.py (redaction) en plus de l'API
+      SERPER_API_KEY: ${SERPER_API_KEY}
+      BRAVE_SEARCH_API_KEY: ${BRAVE_SEARCH_API_KEY}
+      WEB_SEARCH_PROVIDER: ${WEB_SEARCH_PROVIDER:-serper}
       ALLOW_MOCK_FALLBACK: "true"
     depends_on:
       redis:
