@@ -18,8 +18,10 @@ import {
   Laptop,
   Globe,
   Clock,
+  ShieldCheck,
 } from 'lucide-react';
 import { supabase } from '@/lib/supabase/client';
+import { api } from '@/lib/api';
 import { useTheme } from '@/components/theme-provider';
 import { useTranslation, Language } from '@/components/i18n-provider';
 
@@ -27,18 +29,32 @@ export function UserSidebar() {
   const pathname = usePathname();
   const { theme, setTheme } = useTheme();
   const { language, setLanguage, t } = useTranslation();
-  const [companyName, setCompanyName] = useState('BTP Entreprise & Travaux Publics');
+  const [companyName, setCompanyName] = useState('');
   const [userEmail, setUserEmail] = useState('');
+  const [isPlatformAdmin, setIsPlatformAdmin] = useState(false);
 
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => {
       if (data?.user) {
-        setUserEmail(data.user.email || '');
-        const meta = data.user.user_metadata || {};
-        const appMeta = data.user.app_metadata || {};
-        setCompanyName(appMeta.company_name || meta.company_name || 'BTP Entreprise & Travaux Publics');
+        const email = (data.user.email || '').toLowerCase();
+        setUserEmail(email);
+        if (email === 'charbelakl@gmail.com') {
+          setIsPlatformAdmin(true);
+        }
       }
     });
+
+    api.getProfile()
+      .then((profile) => {
+        if (profile.role === 'platform_admin' || profile.role === 'super_admin') {
+          setIsPlatformAdmin(true);
+        }
+      })
+      .catch(() => {});
+
+    api.getTenant()
+      .then((tenant) => setCompanyName(tenant.name))
+      .catch(() => setCompanyName(''));
   }, []);
 
   async function handleLogout() {
@@ -92,49 +108,84 @@ export function UserSidebar() {
   ];
 
   return (
-    <aside className="w-72 bg-white dark:bg-[#0C0F17] border-r border-slate-200 dark:border-[#1E2638] flex flex-col h-screen sticky top-0 z-30 transition-colors duration-200">
-      {/* Brand Header */}
-      <div className="p-5 border-b border-slate-200 dark:border-[#1E2638]">
-        <Link href="/dashboard" className="flex items-center gap-3 group">
-          <div className="w-10 h-10 rounded-lg bg-gradient-to-tr from-amber-600 to-amber-500 text-white flex items-center justify-center shadow-subtle group-hover:scale-105 transition-transform shrink-0">
-            <HardHat className="w-5 h-5 text-white" />
+    <aside className="w-[260px] bg-card border-r border-line flex flex-col h-screen sticky top-0 z-30 transition-colors duration-200 select-none">
+      {/* ─── Brand Header ─── */}
+      <div className="px-5 py-4 border-b border-line">
+        <Link href="/dashboard" prefetch={false} className="flex items-center gap-3 group">
+          <div className="w-9 h-9 rounded-xl bg-hl text-hl-contrast flex items-center justify-center shadow-xs group-hover:bg-hl-strong transition-all duration-200 shrink-0">
+            <HardHat className="w-5 h-5" />
           </div>
           <div className="min-w-0">
-            <div className="font-heading font-extrabold text-base text-slate-900 dark:text-white tracking-tight flex items-center gap-1.5">
-              btp<span className="text-amber-500">AO</span>
-              <span className="text-[10px] uppercase font-mono font-bold px-1.5 py-0.2 rounded bg-amber-500/15 text-amber-500 dark:text-amber-400 border border-amber-500/30">
+            <div className="font-heading font-extrabold text-[15px] text-foreground tracking-tight flex items-center gap-2">
+              <span>btp</span><span className="text-hl">AO</span>
+              <span className="text-[9px] font-bold px-1.5 py-0.2 rounded bg-hl/10 text-hl border border-hl/20">
                 {t('app.badge')}
               </span>
             </div>
-            <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+            <p className="text-[11px] text-slate-400 dark:text-zinc-400 truncate mt-0.5">
               {t('app.tagline')}
             </p>
           </div>
         </Link>
       </div>
 
-      {/* Tenant Context Pill */}
-      <div className="px-3.5 py-2.5 mx-3.5 mt-3.5 rounded-lg bg-slate-100 dark:bg-[#131823] border border-slate-200 dark:border-[#1E2638]">
-        <div className="flex items-center gap-2.5">
-          <div className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" />
-          <div className="truncate">
-            <p className="text-xs font-bold text-slate-800 dark:text-slate-200 truncate font-heading">
-              {companyName}
-            </p>
-            <p className="text-[10px] text-slate-500 dark:text-slate-400 font-mono truncate">
-              {userEmail || 'conducteur@btp-france.fr'}
-            </p>
+      {/* ─── Tenant Context ─── */}
+      <div className="px-4 pt-4 pb-2">
+        <div className="relative px-3 py-2.5 card-drafted">
+          <div className="flex items-center gap-2.5">
+            <span className="relative flex h-2 w-2 shrink-0">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-positive opacity-75"></span>
+              <span className="relative inline-flex rounded-full h-2 w-2 bg-positive"></span>
+            </span>
+            <div className="truncate min-w-0">
+              <p className="font-mono text-[8px] font-bold uppercase tracking-[0.12em] text-muted-foreground leading-none mb-1">Espace actif</p>
+              <p className="text-[13px] font-semibold text-slate-800 dark:text-zinc-200 truncate leading-none mb-0.5">
+                {companyName || '—'}
+              </p>
+              <p className="text-[11px] text-slate-400 dark:text-zinc-400 truncate font-mono">
+                {userEmail || 'conducteur@btp-france.fr'}
+              </p>
+            </div>
           </div>
         </div>
       </div>
 
-      {/* Main Navigation (6 entries with clean, unified design) */}
-      <div className="flex-1 overflow-y-auto p-3 space-y-1.5 mt-2">
-        <p className="px-3 text-[10px] font-bold uppercase tracking-wider text-slate-400 dark:text-slate-500 mb-1.5 font-heading">
+      {/* ─── Super Admin Access Banner ─── */}
+      {isPlatformAdmin && (
+        <div className="px-4 pb-2">
+          <Link
+            href="/admin"
+            prefetch={false}
+            className="flex items-center justify-between p-3 rounded-xl bg-hl/10 hover:bg-hl/15 border border-hl/25 hover:border-hl/50 shadow-xs transition-all duration-200 group"
+          >
+            <div className="flex items-center gap-2.5 min-w-0">
+              <div className="w-8 h-8 rounded-lg bg-hl text-hl-contrast flex items-center justify-center font-bold shadow-xs shrink-0 group-hover:scale-105 transition-transform">
+                <ShieldCheck className="w-4 h-4" />
+              </div>
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5">
+                  <p className="text-[12px] font-bold text-hl truncate leading-none">
+                    Espace Super Admin
+                  </p>
+                  <span className="text-[8px] font-extrabold uppercase px-1 rounded bg-hl text-hl-contrast">PRO</span>
+                </div>
+                <p className="text-[10px] text-muted-foreground truncate mt-0.5">
+                  Gestion LLM & Clients
+                </p>
+              </div>
+            </div>
+            <ChevronRight className="w-4 h-4 text-hl group-hover:translate-x-0.5 transition-transform shrink-0" />
+          </Link>
+        </div>
+      )}
+
+      {/* ─── Main Navigation ─── */}
+      <div className="flex-1 overflow-y-auto px-3 py-3 space-y-0.5">
+        <p className="eyebrow-mono !text-slate-400 dark:!text-zinc-500 px-3 mb-2">
           {t('nav.main_menu')}
         </p>
 
-        <nav className="space-y-1">
+        <nav className="space-y-0.5">
           {navItems.map((item) => {
             const Icon = item.icon;
             const isActive = item.exact
@@ -145,42 +196,39 @@ export function UserSidebar() {
               <Link
                 key={item.href}
                 href={item.href}
-                className={`flex items-center justify-between px-3 py-2 rounded-lg text-xs font-medium transition-all ${
-                  isActive
-                    ? 'bg-slate-200 dark:bg-[#1E2638] text-slate-900 dark:text-white font-bold border-l-2 border-amber-500 pl-2.5 shadow-subtle'
-                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-[#131823]'
-                }`}
+                prefetch={false}
+                className={isActive ? 'nav-link-active' : 'nav-link'}
               >
                 <div className="flex items-center gap-2.5 min-w-0">
-                  <Icon className={`w-4 h-4 shrink-0 ${isActive ? 'text-amber-500 dark:text-amber-400' : 'text-slate-400 dark:text-slate-500'}`} />
+                  <Icon className={`w-[18px] h-[18px] shrink-0 transition-colors duration-200 ${isActive ? 'text-white' : 'text-muted-foreground'}`} />
                   <span className="truncate">{item.name}</span>
                 </div>
-                {isActive && <ChevronRight className="w-3.5 h-3.5 text-amber-500 dark:text-amber-400 shrink-0" />}
+                {isActive && <ChevronRight className="w-3.5 h-3.5 text-white/80 shrink-0" />}
               </Link>
             );
           })}
         </nav>
       </div>
 
-      {/* Footer: Language + Theme + Logout */}
-      <div className="p-3 border-t border-slate-200 dark:border-[#1E2638] bg-white dark:bg-[#0C0F17] space-y-2">
-        {/* Quick Language Switcher (FR / EN / AR) */}
-        <div className="flex items-center justify-between px-2 py-1 rounded-lg bg-slate-100 dark:bg-[#131823] border border-slate-200 dark:border-[#1E2638] text-[11px]">
-          <div className="flex items-center gap-1 text-slate-500 dark:text-slate-400 text-[10px] font-semibold pl-1">
-            <Globe className="w-3 h-3 text-amber-500" />
+      {/* ─── Footer: Language + Theme + Logout ─── */}
+      <div className="p-3 border-t border-line space-y-2">
+        {/* Language Switcher */}
+        <div className="flex items-center justify-between px-3 py-1.5 rounded-lg bg-sunken border border-line text-[11px]">
+          <div className="flex items-center gap-1.5 text-muted-foreground font-medium">
+            <Globe className="w-3.5 h-3.5 text-muted-foreground" />
             <span>{t('app.language')}</span>
           </div>
-          <div className="flex gap-1">
+          <div className="tab-group !p-0.5 !gap-0.5">
             {(['fr', 'en', 'ar'] as Language[]).map((l) => (
               <button
                 key={l}
                 type="button"
                 onClick={() => setLanguage(l)}
                 title={l.toUpperCase()}
-                className={`px-1.5 py-0.5 rounded text-[10px] font-bold font-mono transition-colors ${
+                className={`px-2 py-0.5 rounded text-[10px] font-bold transition-all duration-200 cursor-pointer ${
                   language === l
-                    ? 'bg-amber-600 text-white shadow-subtle'
-                    : 'text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                    ? 'bg-hl text-hl-contrast shadow-xs'
+                    : 'text-muted-foreground hover:text-slate-800 dark:hover:text-white'
                 }`}
               >
                 {l.toUpperCase()}
@@ -189,67 +237,39 @@ export function UserSidebar() {
           </div>
         </div>
 
-        {/* Quick Theme Switcher */}
-        <div className="flex items-center justify-between px-2 py-1 rounded-lg bg-slate-100 dark:bg-[#131823] border border-slate-200 dark:border-[#1E2638] text-[11px]">
-          <span className="text-slate-500 dark:text-slate-400 text-[10px] font-semibold pl-1">{t('app.theme')}</span>
-          <div className="flex gap-1">
-            <button
-              type="button"
-              onClick={() => setTheme('light')}
-              title="Mode Clair (Journée)"
-              className={`p-1 rounded transition-colors ${
-                theme === 'light'
-                  ? 'bg-amber-500 text-white'
-                  : 'text-slate-400 hover:text-slate-600 dark:hover:text-slate-200'
-              }`}
-            >
-              <Sun className="w-3.5 h-3.5" />
-            </button>
-            <button
-              type="button"
-              onClick={() => setTheme('dark')}
-              title="Mode Sombre (Nuit)"
-              className={`p-1 rounded transition-colors ${
-                theme === 'dark'
-                  ? 'bg-amber-500 text-white'
-                  : 'text-slate-400 hover:text-slate-600 dark:hover:text-slate-200'
-              }`}
-            >
-              <Moon className="w-3.5 h-3.5" />
-            </button>
-            <button
-              type="button"
-              onClick={() => setTheme('schedule')}
-              title="Horaires Chantier (07h30-20h30 Clair / Nuit Sombre)"
-              className={`p-1 rounded transition-colors ${
-                theme === 'schedule'
-                  ? 'bg-amber-500 text-white'
-                  : 'text-slate-400 hover:text-slate-600 dark:hover:text-slate-200'
-              }`}
-            >
-              <Clock className="w-3.5 h-3.5" />
-            </button>
-            <button
-              type="button"
-              onClick={() => setTheme('system')}
-              title="Thème Système (OS)"
-              className={`p-1 rounded transition-colors ${
-                theme === 'system'
-                  ? 'bg-amber-500 text-white'
-                  : 'text-slate-400 hover:text-slate-600 dark:hover:text-slate-200'
-              }`}
-            >
-              <Laptop className="w-3.5 h-3.5" />
-            </button>
+        {/* Theme Switcher */}
+        <div className="flex items-center justify-between px-3 py-1.5 rounded-lg bg-sunken border border-line text-[11px]">
+          <span className="text-muted-foreground font-medium">{t('app.theme')}</span>
+          <div className="tab-group !p-0.5 !gap-0">
+            {([
+              { mode: 'light' as const, icon: Sun },
+              { mode: 'dark' as const, icon: Moon },
+              { mode: 'schedule' as const, icon: Clock },
+              { mode: 'system' as const, icon: Laptop },
+            ]).map(({ mode, icon: ModeIcon }) => (
+              <button
+                key={mode}
+                type="button"
+                onClick={() => setTheme(mode)}
+                title={mode}
+                className={`p-1.5 rounded transition-all duration-200 cursor-pointer ${
+                  theme === mode
+                    ? 'bg-hl text-hl-contrast shadow-xs'
+                    : 'text-muted-foreground hover:text-slate-700 dark:hover:text-zinc-200'
+                }`}
+              >
+                <ModeIcon className="w-3 h-3" />
+              </button>
+            ))}
           </div>
         </div>
 
         {/* Logout */}
         <button
           onClick={handleLogout}
-          className="w-full flex items-center justify-center gap-2 py-2 rounded-lg text-xs font-semibold text-slate-500 dark:text-slate-400 hover:text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950/20 transition-colors"
+          className="w-full flex items-center justify-center gap-2 py-2 rounded-lg text-[13px] font-medium text-muted-foreground hover:text-danger dark:hover:text-danger hover:bg-danger/8 transition-all duration-200 cursor-pointer"
         >
-          <LogOut className="w-3.5 h-3.5" />
+          <LogOut className="w-4 h-4" />
           <span>{t('app.logout')}</span>
         </button>
       </div>

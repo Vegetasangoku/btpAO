@@ -43,7 +43,7 @@ SUPABASE_URL=https://ykdbjsvwzxeftlddubgy.supabase.co
 SUPABASE_ANON_KEY=<votre_anon_key>
 SUPABASE_SERVICE_ROLE_KEY=<votre_service_role_key>
 SUPABASE_JWT_SECRET=<votre_jwt_secret>
-DATABASE_URL=postgresql://postgres.ykdbjsvwzxeftlddubgy:<password>@aws-0-eu-west-3.pooler.supabase.com:6543/postgres
+DATABASE_URL=postgresql://postgres.ykdbjsvwzxeftlddubgy:<password>@aws-1-eu-west-3.pooler.supabase.com:6543/postgres
 
 ANTHROPIC_API_KEY=sk-ant-...        # Claude 3.5 Sonnet
 MISTRAL_API_KEY=...                 # Fallback LLM
@@ -197,3 +197,4 @@ btpAO/
 ## 📄 Licence
 
 Propriétaire — Organisation **Appel offre Charb** — Supabase project `ykdbjsvwzxeftlddubgy`
+# btpAO

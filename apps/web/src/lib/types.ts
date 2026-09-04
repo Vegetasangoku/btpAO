@@ -2,6 +2,41 @@
  * TypeScript Type Definitions for btpAO Frontend
  */
 
+export interface CountryOption {
+  country_code: string;
+  country_name: string;
+  currency?: string | null;
+}
+
+export interface CountryDetectionSignal {
+  country_code: string;
+  marker: string;
+  where: string;
+  weight: number;
+  kind: string;
+}
+
+/** Pays du MARCHE applique a un dossier (04/09) -- distinct du pays de l'entreprise. */
+export interface ProjectCountryState {
+  project_id: string;
+  country_code: string | null;
+  effective_country_code: string;
+  is_tenant_fallback: boolean;
+  tenant_country_code: string;
+  detection: {
+    detected_code?: string | null;
+    confidence?: 'high' | 'medium' | 'low' | 'none';
+    method?: string;
+    reason?: string;
+    signals?: CountryDetectionSignal[];
+    scores?: Record<string, number>;
+    auto_applied?: boolean;
+    overridden_by_user?: boolean;
+    detected_at?: string;
+  };
+  available_countries: CountryOption[];
+}
+
 export interface TenantBranding {
   primary_color: string;
   secondary_color: string;
@@ -396,6 +431,17 @@ export interface GanttTask {
   milestone_label: string | null;
   depends_on: string[];
   is_critical: boolean;
+}
+
+export interface OrganigrammeNode {
+  id: string;
+  project_id: string;
+  nom: string;
+  role: string;
+  experience_ans: number;
+  presence_hebdo_pct: number;
+  qualif: string | null;
+  sequence: number;
 }
 
 

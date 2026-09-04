@@ -119,9 +119,6 @@ export default function DashboardProjectsPage() {
     }
   }
 
-  // "Je confirme être conforme" — ajoute le critère manquant au corpus entreprise (via l'endpoint
-  // existant /knowledge/assets) puis relance un vrai recalcul Go/No-Go (pas de score simulé
-  // côté client) pour refléter instantanément l'information nouvellement disponible.
   async function handleConfirmCompliance(issue: string) {
     if (!selectedModalProject) return;
     setConfirmingIssue(issue);
@@ -157,46 +154,37 @@ export default function DashboardProjectsPage() {
   });
 
   return (
-    <div className="space-y-6 pb-20 max-w-5xl mx-auto">
-      {/* Top Header */}
-      <div className="p-6 sm:p-8 rounded-2xl bg-white dark:bg-[#131823] border border-slate-200 dark:border-[#1E2638] shadow-sm flex flex-wrap items-center justify-between gap-4">
-        <div className="space-y-1">
-          <div className="flex items-center gap-2">
-            <span className="text-[10px] font-mono font-bold px-2.5 py-0.5 rounded-full bg-amber-500/10 text-amber-700 dark:text-amber-400 border border-amber-500/20">
-              {t('projects.badge')}
-            </span>
-          </div>
-          <h1 className="text-xl sm:text-2xl font-black text-slate-900 dark:text-white tracking-tight">
+    <div className="page-container max-w-5xl mx-auto">
+      {/* ─── Top Header ─── */}
+      <div className="card-elevated p-6 sm:p-7 flex flex-wrap items-center justify-between gap-4">
+        <div className="space-y-2">
+          <span className="badge-pill text-[10px]">{t('projects.badge')}</span>
+          <h1 className="text-xl sm:text-2xl font-extrabold text-foreground font-heading tracking-tight">
             {t('projects.title')}
           </h1>
-          <p className="text-xs text-slate-600 dark:text-slate-400">
-            {t('projects.desc')}
-          </p>
+          <p className="section-desc">{t('projects.desc')}</p>
         </div>
 
-        <Link
-          href="/dashboard/wizard"
-          className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-black shadow-sm shadow-amber-500/20 transition-all cursor-pointer"
-        >
+        <Link href="/dashboard/wizard" className="btn-primary">
           <Sparkles className="w-4 h-4" />
           <span>{t('projects.btn_new')}</span>
         </Link>
       </div>
 
-      {/* Filter & Search Bar */}
-      <div className="p-4 rounded-2xl bg-white dark:bg-[#131823] border border-slate-200 dark:border-[#1E2638] shadow-sm flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-2 bg-slate-50 dark:bg-[#0C0F17] px-3.5 py-2 rounded-xl border border-slate-200 dark:border-[#1E2638] flex-1 min-w-[240px]">
-          <Search className="w-4 h-4 text-slate-400 shrink-0" />
+      {/* ─── Filter & Search Bar ─── */}
+      <div className="card-modern p-3.5 flex flex-wrap items-center justify-between gap-3">
+        <div className="relative flex-1 min-w-[240px]">
+          <Search className="w-4 h-4 text-muted-foreground absolute left-3.5 top-1/2 -translate-y-1/2" />
           <input
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             placeholder={t('projects.search_placeholder')}
-            className="w-full bg-transparent text-xs text-slate-900 dark:text-white placeholder:text-slate-500 focus:outline-none"
+            className="input-field-with-icon !py-2 !rounded-lg"
           />
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="tab-group">
           {[
             { id: 'all', label: t('projects.filter_all') },
             { id: 'in_progress', label: t('projects.filter_in_progress') },
@@ -205,11 +193,7 @@ export default function DashboardProjectsPage() {
             <button
               key={tab.id}
               onClick={() => setStatusFilter(tab.id)}
-              className={`px-3.5 py-1.5 rounded-xl text-xs font-bold border transition-all cursor-pointer ${
-                statusFilter === tab.id
-                  ? 'bg-amber-500 text-slate-950 border-amber-500 shadow-sm'
-                  : 'bg-slate-50 dark:bg-[#0C0F17] text-slate-600 dark:text-slate-400 border-slate-200 dark:border-[#1E2638] hover:text-slate-900 dark:hover:text-white'
-              }`}
+              className={statusFilter === tab.id ? 'tab-item-active' : 'tab-item'}
             >
               {tab.label}
             </button>
@@ -217,21 +201,18 @@ export default function DashboardProjectsPage() {
         </div>
       </div>
 
-      {/* Projects List */}
-      <div className="space-y-4">
+      {/* ─── Projects List ─── */}
+      <div className="space-y-3">
         {loading ? (
-          <div className="p-12 rounded-2xl bg-white dark:bg-[#131823] border border-slate-200 dark:border-[#1E2638] text-center text-xs text-slate-500 flex items-center justify-center gap-2">
-            <Loader2 className="w-4 h-4 animate-spin text-amber-500" />
+          <div className="card-modern p-12 text-center text-[13px] text-muted-foreground flex items-center justify-center gap-2.5">
+            <Loader2 className="w-4 h-4 animate-spin text-hl" />
             <span>{t('dash.loading')}</span>
           </div>
         ) : filteredProjects.length === 0 ? (
-          <div className="p-12 rounded-2xl bg-white dark:bg-[#131823] border border-slate-200 dark:border-[#1E2638] text-center space-y-3 shadow-sm">
-            <FolderKanban className="w-8 h-8 text-slate-400 mx-auto" />
-            <p className="text-xs font-bold text-slate-700 dark:text-slate-300">{t('projects.empty_title')}</p>
-            <Link
-              href="/dashboard/wizard"
-              className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold transition-colors"
-            >
+          <div className="card-modern p-12 text-center space-y-3">
+            <FolderKanban className="w-10 h-10 text-slate-300 dark:text-zinc-600 mx-auto" />
+            <p className="text-[14px] font-semibold text-foreground font-heading">{t('projects.empty_title')}</p>
+            <Link href="/dashboard/wizard" className="btn-primary">
               <Plus className="w-4 h-4" />
               <span>{t('projects.empty_btn')}</span>
             </Link>
@@ -244,27 +225,27 @@ export default function DashboardProjectsPage() {
             return (
               <div
                 key={project.id}
-                className="p-6 rounded-2xl bg-white dark:bg-[#131823] border border-slate-200 dark:border-[#1E2638] space-y-4 shadow-sm hover:border-amber-500/40 transition-colors"
+                className="card-modern-hover p-5 space-y-4 rounded-2xl"
               >
                 <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div className="space-y-1 min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-amber-700 dark:text-amber-400 border border-slate-200 dark:border-slate-700">
+                  <div className="space-y-1.5 min-w-0 flex-1">
+                    <div className="flex items-center gap-2.5">
+                      <span className="badge-pill-slate text-[10px]">
                         {project.reference_code || 'AO-EN-COURS'}
                       </span>
-                      <span className="text-xs text-slate-500 font-semibold">{project.lot_number || 'Marché Public BTP'}</span>
+                      <span className="text-[11px] text-muted-foreground">{project.lot_number || 'Marché Public BTP'}</span>
                     </div>
                     <Link href={`/projects/${project.id}`} className="block group">
-                      <h3 className="text-base font-bold text-slate-900 dark:text-white group-hover:text-amber-600 dark:group-hover:text-amber-400 transition-colors truncate">
+                      <h3 className="text-[15px] font-bold text-foreground group-hover:text-hl transition-colors truncate font-heading">
                         {project.title}
                       </h3>
                     </Link>
-                    <p className="text-xs text-slate-600 dark:text-slate-400">
-                      {t('projects.buyer')} : <strong className="text-slate-800 dark:text-slate-200">{project.client_name}</strong> • {project.location || 'France'}
+                    <p className="text-[12px] text-muted-foreground">
+                      {t('projects.buyer')} : <strong className="text-foreground">{project.client_name}</strong> • {project.location || 'France'}
                     </p>
                   </div>
 
-                  <div className="flex items-center gap-2 shrink-0">
+                  <div className="flex items-center gap-2.5 shrink-0">
                     {hasScore && (
                       <button
                         type="button"
@@ -272,95 +253,89 @@ export default function DashboardProjectsPage() {
                           e.stopPropagation();
                           handleOpenScoreModal(project);
                         }}
-                        className={`text-[11px] font-mono font-black px-2.5 py-1 rounded-full border flex items-center gap-1.5 cursor-pointer shadow-xs hover:scale-105 transition-all ${
-                          projectScore.recommendation === 'GO'
-                            ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/30 hover:bg-emerald-500/25'
-                            : projectScore.recommendation === 'RESERVES' || projectScore.recommendation === 'RÉSERVES'
-                            ? 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/30 hover:bg-amber-500/25'
-                            : 'bg-rose-500/15 text-rose-700 dark:text-rose-300 border-rose-500/30 hover:bg-rose-500/25'
-                        }`}
+                        className="font-mono text-[11px] font-bold px-2.5 py-1 rounded-lg card-inset hover:border-hl/30 transition-all flex items-center gap-1.5 cursor-pointer"
                         title="Voir la matrice de décision Go / No-Go"
                       >
-                        <TrendingUp className="w-3 h-3" />
-                        <span>{Math.round(projectScore.score)}% {projectScore.recommendation}</span>
+                        <TrendingUp className="w-3.5 h-3.5 text-hl" />
+                        <span className={
+                          projectScore.recommendation === 'GO'
+                            ? 'text-positive'
+                            : projectScore.recommendation === 'RESERVES' || projectScore.recommendation === 'RÉSERVES'
+                            ? 'text-hl'
+                            : 'text-danger'
+                        }>
+                          {Math.round(projectScore.score)}%
+                        </span>
+                        <span className="text-muted-foreground">{projectScore.recommendation}</span>
                       </button>
                     )}
-                    <span
-                      className={`text-[11px] font-mono font-bold px-3 py-1 rounded-full border ${
-                        project.status === 'completed' || project.outcome_status === 'won'
-                          ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20'
-                          : 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20'
-                      }`}
-                    >
+                    <span className="text-[11px] text-muted-foreground flex items-center gap-2 min-w-[70px]">
+                      <span className={`w-2 h-2 rounded-full ${project.status === 'completed' || project.outcome_status === 'won' ? 'bg-positive' : 'bg-hl'}`}></span>
                       {project.status === 'completed' ? t('projects.status_ready') : t('projects.status_drafting')}
                     </span>
                   </div>
                 </div>
 
-                {/* Action Buttons to Dossier Tools */}
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 pt-3 border-t border-slate-200 dark:border-[#1E2638]">
-                  {/* 1. Go / No-Go Button with Direct Score Preview */}
+                {/* Action Buttons */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 pt-3.5 border-t border-line">
                   <button
                     type="button"
                     onClick={() => handleOpenScoreModal(project)}
-                    className="p-3 rounded-xl bg-slate-50 dark:bg-[#0C0F17] border border-slate-200 dark:border-[#1E2638] hover:border-amber-500/50 hover:bg-amber-500/5 text-left transition-all group cursor-pointer"
+                    className="card-inset p-3.5 text-left transition-all group cursor-pointer hover:border-hl/40"
                   >
                     <div className="flex items-center justify-between">
-                      <p className="text-[10px] text-slate-500 font-mono">Décision</p>
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Décision</p>
                       {hasScore ? (
                         <span
-                          className={`text-[10px] font-mono font-black px-1.5 py-0.5 rounded ${
+                          className={`text-[10px] font-mono font-bold ${
                             projectScore.recommendation === 'GO'
-                              ? 'bg-emerald-500/20 text-emerald-600 dark:text-emerald-400'
+                              ? 'text-positive'
                               : projectScore.recommendation === 'RESERVES' || projectScore.recommendation === 'RÉSERVES'
-                              ? 'bg-amber-500/20 text-amber-700 dark:text-amber-400'
-                              : 'bg-rose-500/20 text-rose-600 dark:text-rose-400'
+                              ? 'text-hl'
+                              : 'text-danger'
                           }`}
                         >
-                          {Math.round(projectScore.score)}% {projectScore.recommendation}
+                          {Math.round(projectScore.score)}%
                         </span>
                       ) : (
-                        <span className="text-[10px] font-mono text-slate-400">Score...</span>
+                        <span className="text-[10px] text-muted-foreground">Score...</span>
                       )}
                     </div>
-                    <p className="text-xs font-bold text-slate-800 dark:text-slate-200 group-hover:text-amber-600 dark:group-hover:text-amber-400 flex items-center gap-1 mt-0.5">
-                      <TrendingUp className="w-3.5 h-3.5 text-amber-500" />
+                    <p className="text-[13px] font-semibold text-foreground group-hover:text-hl flex items-center gap-1.5 mt-1 font-heading">
+                      <TrendingUp className="w-3.5 h-3.5 text-hl" />
                       <span>{t('projects.btn_gonogo')}</span>
                     </p>
                   </button>
 
-                  {/* 2. Planning & Gantt Button */}
                   <Link
                     href={`/projects/${project.id}/visuals`}
-                    className="p-3 rounded-xl bg-slate-50 dark:bg-[#0C0F17] border border-slate-200 dark:border-[#1E2638] hover:border-amber-500/50 hover:bg-amber-500/5 text-left transition-all group"
+                    className="card-inset p-3.5 text-left transition-all group hover:border-hl/40"
                   >
-                    <p className="text-[10px] text-slate-500 font-mono">Chantier</p>
-                    <p className="text-xs font-bold text-slate-800 dark:text-slate-200 group-hover:text-amber-600 dark:group-hover:text-amber-400 flex items-center gap-1 mt-0.5">
-                      <BarChart2 className="w-3.5 h-3.5 text-amber-500" />
+                    <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Chantier</p>
+                    <p className="text-[13px] font-semibold text-foreground group-hover:text-hl flex items-center gap-1.5 mt-1 font-heading">
+                      <BarChart2 className="w-3.5 h-3.5 text-hl" />
                       <span>{t('projects.btn_planning')}</span>
                     </p>
                   </Link>
 
-                  {/* 3. AI Editor Button */}
                   <Link
                     href={`/projects/${project.id}/editor`}
-                    className="p-3 rounded-xl bg-slate-50 dark:bg-[#0C0F17] border border-slate-200 dark:border-[#1E2638] hover:border-amber-500/50 hover:bg-amber-500/5 text-left transition-all group"
+                    className="card-inset p-3.5 text-left transition-all group hover:border-hl/40"
                   >
-                    <p className="text-[10px] text-slate-500 font-mono">Rédaction</p>
-                    <p className="text-xs font-bold text-slate-800 dark:text-slate-200 group-hover:text-amber-600 dark:group-hover:text-amber-400 flex items-center gap-1 mt-0.5">
-                      <Edit3 className="w-3.5 h-3.5 text-amber-500" />
+                    <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Rédaction</p>
+                    <p className="text-[13px] font-semibold text-foreground group-hover:text-hl flex items-center gap-1.5 mt-1 font-heading">
+                      <Edit3 className="w-3.5 h-3.5 text-hl" />
                       <span>{t('projects.btn_wizard')}</span>
                     </p>
                   </Link>
 
-                  {/* 4. Export & Download Button */}
                   <Link
                     href={`/projects/${project.id}/export`}
-                    className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 hover:bg-amber-500/20 text-left transition-all group"
+                    className="card-inset p-3.5 text-left transition-all group hover:border-hl/40"
                   >
-                    <p className="text-[10px] text-amber-700 dark:text-amber-400 font-mono">Livraison</p>
-                    <p className="text-xs font-bold text-amber-700 dark:text-amber-300 flex items-center gap-1 mt-0.5">
-                      <Download className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
+                    <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Livraison</p>
+                    <p className="text-[13px] font-semibold text-foreground group-hover:text-hl flex items-center gap-1.5 mt-1 font-heading">
+                      <Download className="w-3.5 h-3.5 text-hl" />
                       <span>{t('projects.btn_download')}</span>
                     </p>
                   </Link>
@@ -371,20 +346,20 @@ export default function DashboardProjectsPage() {
         )}
       </div>
 
-      {/* MODAL: GO / NO-GO SCORE DETAILS POPUP */}
+      {/* ═══ MODAL: GO / NO-GO SCORE DETAILS ═══ */}
       {selectedModalProject && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-md animate-in fade-in">
-          <div className="relative w-full max-w-xl rounded-3xl bg-white dark:bg-[#0F1422] border border-slate-200 dark:border-[#1E293F] p-6 sm:p-7 shadow-2xl space-y-5">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-md animate-in fade-in">
+          <div className="relative w-full max-w-xl bg-card border border-line rounded-2xl p-6 sm:p-7 shadow-floating space-y-5 animate-scale-in">
             {/* Modal Header */}
-            <div className="flex items-start justify-between gap-4 border-b border-slate-100 dark:border-slate-800 pb-4">
+            <div className="flex items-start justify-between gap-4 pb-4 border-b border-line">
               <div className="space-y-1">
-                <div className="flex items-center gap-2">
-                  <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-amber-500/15 text-amber-700 dark:text-amber-400 border border-amber-500/30">
-                    {selectedModalProject.reference_code || 'AO-REF'}
+                <div className="flex items-center gap-2.5">
+                  <span className="badge-pill text-[9px]">
+                    {selectedModalProject.reference_code || t('projects.gonogo_modal.ref_fallback')}
                   </span>
-                  <span className="text-xs text-slate-500">Évaluation Stratégique IA</span>
+                  <span className="text-[11px] text-muted-foreground">{t('projects.gonogo_modal.eyebrow')}</span>
                 </div>
-                <h3 className="text-base font-bold text-slate-900 dark:text-white truncate max-w-md">
+                <h3 className="text-[15px] font-bold text-foreground truncate max-w-md font-heading">
                   {selectedModalProject.title}
                 </h3>
               </div>
@@ -392,126 +367,120 @@ export default function DashboardProjectsPage() {
               <button
                 type="button"
                 onClick={() => setSelectedModalProject(null)}
-                className="p-2 rounded-xl text-slate-400 hover:text-slate-700 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+                className="p-2 rounded-lg text-slate-400 hover:text-foreground hover:bg-slate-100 dark:hover:bg-raised transition-all cursor-pointer"
               >
-                <X className="w-5 h-5" />
+                <X className="w-4 h-4" />
               </button>
             </div>
 
             {/* Modal Content */}
             {loadingModalScore ? (
-              <div className="p-12 text-center space-y-3">
-                <Loader2 className="w-8 h-8 text-amber-500 animate-spin mx-auto" />
-                <p className="text-xs text-slate-500">Chargement de la matrice Go/No-Go...</p>
+              <div className="p-12 text-center space-y-2.5">
+                <Loader2 className="w-6 h-6 text-hl animate-spin mx-auto" />
+                <p className="text-[13px] text-muted-foreground">{t('projects.gonogo_modal.loading')}</p>
               </div>
             ) : modalAnalysis ? (
-              <div className="space-y-4">
-                {/* Taux de Complétion — avancement factuel du remplissage du dossier, toujours affiché */}
-                <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-950/80 border border-slate-200 dark:border-slate-800 space-y-2">
+              <div className="space-y-4 max-h-[60vh] overflow-y-auto pr-1">
+                {/* Completion Rate */}
+                <div className="card-inset p-4 space-y-2 rounded-xl">
                   <div className="flex items-center justify-between">
-                    <span className="text-[11px] font-bold text-slate-600 dark:text-slate-400 uppercase tracking-wide">Taux de Complétion du Dossier</span>
-                    <span className="text-sm font-black font-mono text-slate-900 dark:text-white">
+                    <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">{t('projects.gonogo_modal.completion_label')}</span>
+                    <span className="text-[14px] font-extrabold text-foreground">
                       {Math.round(modalAnalysis.completion_rate ?? 0)}%
                     </span>
                   </div>
-                  <div className="h-2 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
+                  <div className="h-2 rounded-full bg-slate-200 dark:bg-raised overflow-hidden">
                     <div
-                      className="h-full rounded-full bg-amber-500 transition-all"
+                      className="h-full rounded-full bg-hl transition-all duration-500"
                       style={{ width: `${Math.min(100, Math.max(0, modalAnalysis.completion_rate ?? 0))}%` }}
                     />
                   </div>
-                  <p className="text-[10px] text-slate-500 dark:text-slate-500">
-                    Données trouvées vs. requises pour ce dossier (sections du mémoire technique générées).
-                  </p>
+                  <p className="text-[11px] text-muted-foreground">{t('projects.gonogo_modal.completion_desc')}</p>
                 </div>
 
-                {/* Score Stratégique — masqué si aucune donnée réelle ne permet de le justifier (jamais de score arbitraire) */}
+                {/* Strategic Score */}
                 {modalAnalysis.has_sufficient_data === false ? (
-                  <div className="p-5 rounded-2xl bg-slate-50 dark:bg-slate-950/80 border border-dashed border-slate-300 dark:border-slate-700 text-center space-y-1.5">
-                    <p className="text-xs font-bold text-slate-600 dark:text-slate-400">Score Stratégique non disponible</p>
-                    <p className="text-[11px] text-slate-500 dark:text-slate-500 max-w-sm mx-auto">
-                      Données insuffisantes (DCE, qualifications, délais, historique) pour évaluer la pertinence stratégique de cet AO. Complétez le profil entreprise ou le DCE pour débloquer ce score.
-                    </p>
+                  <div className="card-inset p-5 text-center space-y-1.5 border-dashed rounded-xl">
+                    <p className="text-[14px] font-semibold text-foreground">{t('projects.gonogo_modal.score_unavailable_title')}</p>
+                    <p className="text-[12px] text-muted-foreground max-w-sm mx-auto">{t('projects.gonogo_modal.score_unavailable_desc')}</p>
                   </div>
                 ) : (
-                <div className="p-5 rounded-2xl bg-slate-50 dark:bg-slate-950/80 border border-slate-200 dark:border-slate-800 flex items-center justify-between gap-4">
-                  <div className="space-y-1.5">
+                <div className="card-inset p-5 flex items-center justify-between gap-4 rounded-xl">
+                  <div className="space-y-2">
                     <span
-                      className={`text-xs font-black uppercase tracking-wider px-3 py-1 rounded-full border inline-block ${
+                      className={`badge-pill text-[10px] ${
                         modalAnalysis.recommendation === 'GO'
-                          ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/40'
+                          ? 'bg-positive/10 text-positive border-positive/20'
                           : modalAnalysis.recommendation === 'RESERVES' || modalAnalysis.recommendation === 'RÉSERVES'
-                          ? 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/40'
-                          : 'bg-rose-500/15 text-rose-700 dark:text-rose-300 border-rose-500/40'
+                          ? 'bg-hl/10 text-hl border-hl/20'
+                          : 'bg-danger/10 text-danger border-danger/20'
                       }`}
                     >
                       {modalAnalysis.recommendation === 'GO'
-                        ? '✅ DÉCISION : GO CONFIRMÉ'
+                        ? t('projects.export.gonogo_go')
                         : modalAnalysis.recommendation === 'RESERVES' || modalAnalysis.recommendation === 'RÉSERVES'
-                        ? '⚠️ DÉCISION : GO SOUS RÉSERVES'
-                        : '🛑 DÉCISION : NO-GO RECOMMANDÉ'}
+                        ? t('projects.export.gonogo_reserves')
+                        : t('projects.export.gonogo_nogo')}
                     </span>
-                    <p className="text-xs text-slate-700 dark:text-slate-300 leading-relaxed pt-1">
-                      {modalAnalysis.summary}
-                    </p>
+                    <p className="text-[13px] text-foreground leading-relaxed">{modalAnalysis.summary}</p>
                   </div>
 
-                  <div className="shrink-0 flex flex-col items-center justify-center p-4 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-center min-w-[100px] shadow-sm">
+                  <div className="shrink-0 flex flex-col items-center justify-center p-4 rounded-xl bg-white dark:bg-raised border border-line text-center min-w-[85px] shadow-xs">
                     <span
-                      className={`text-3xl font-black font-mono ${
+                      className={`text-2xl font-extrabold font-heading ${
                         modalAnalysis.score >= 70
-                          ? 'text-emerald-500'
+                          ? 'text-positive'
                           : modalAnalysis.score >= 50
-                          ? 'text-amber-500'
-                          : 'text-rose-500'
+                          ? 'text-hl'
+                          : 'text-danger'
                       }`}
                     >
                       {Math.round(modalAnalysis.score)}%
                     </span>
-                    <span className="text-[10px] text-slate-400 uppercase font-bold tracking-wider">Score Global</span>
+                    <span className="text-[9px] text-muted-foreground uppercase font-bold tracking-wider mt-0.5">{t('projects.gonogo_modal.score_global')}</span>
                   </div>
                 </div>
                 )}
 
                 {/* Criteria Checks */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                  <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800 flex items-start gap-2.5">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="card-inset p-3.5 flex items-start gap-2.5 rounded-xl">
                     {modalAnalysis.mandatory_criteria_met ? (
-                      <Check className="w-4 h-4 text-emerald-500 shrink-0 mt-0.5" />
+                      <Check className="w-4 h-4 text-positive shrink-0 mt-0.5" />
                     ) : (
-                      <XCircle className="w-4 h-4 text-rose-500 shrink-0 mt-0.5" />
+                      <XCircle className="w-4 h-4 text-danger shrink-0 mt-0.5" />
                     )}
                     <div>
-                      <p className="font-bold text-slate-900 dark:text-white">Critères éliminatoires</p>
-                      <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                      <p className="text-[13px] font-semibold text-foreground font-heading">{t('projects.export.mandatory_criteria')}</p>
+                      <p className="text-[11px] text-muted-foreground">
                         {modalAnalysis.mandatory_criteria_met
-                          ? '100% des critères minimaux DCE validés'
-                          : 'Critères obligatoires non satisfaits'}
+                          ? t('projects.export.mandatory_criteria_ok')
+                          : t('projects.gonogo_modal.criteria_ko')}
                       </p>
                     </div>
                   </div>
 
-                  <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800 flex items-start gap-2.5">
-                    <ShieldCheck className="w-4 h-4 text-sky-500 shrink-0 mt-0.5" />
+                  <div className="card-inset p-3.5 flex items-start gap-2.5 rounded-xl">
+                    <ShieldCheck className="w-4 h-4 text-hl shrink-0 mt-0.5" />
                     <div>
-                      <p className="font-bold text-slate-900 dark:text-white">Conformité Entreprise</p>
-                      <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                      <p className="text-[13px] font-semibold text-foreground font-heading">{t('projects.export.compliance')}</p>
+                      <p className="text-[11px] text-muted-foreground">
                         {modalAnalysis.blocking_issues && modalAnalysis.blocking_issues.length > 0
-                          ? `${modalAnalysis.blocking_issues.length} points de vigilance`
-                          : 'Aucun blocage réglementaire'}
+                          ? t('projects.gonogo_modal.compliance_issues', { count: String(modalAnalysis.blocking_issues.length) })
+                          : t('projects.gonogo_modal.compliance_ok')}
                       </p>
                     </div>
                   </div>
                 </div>
 
-                {/* Blocking Issues List (texte réel, pas juste un compteur) */}
+                {/* Blocking Issues List */}
                 {modalAnalysis.blocking_issues && modalAnalysis.blocking_issues.length > 0 && (
-                  <div className="p-3.5 rounded-xl bg-rose-50 dark:bg-rose-950/20 border border-rose-200 dark:border-rose-500/30 space-y-1.5">
-                    <p className="text-[11px] font-bold text-rose-700 dark:text-rose-300 uppercase tracking-wide">Points bloquants identifiés</p>
+                  <div className="p-4 rounded-xl bg-danger/5 border border-danger/30 dark:border-danger/20 space-y-2.5">
+                    <p className="text-[11px] font-bold text-danger uppercase tracking-wider">{t('projects.gonogo_modal.blocking_issues_title')}</p>
                     <ul className="space-y-2">
                       {modalAnalysis.blocking_issues.map((issue, idx) => (
-                        <li key={idx} className="text-[11px] text-rose-700 dark:text-rose-300 flex items-start justify-between gap-2">
-                          <span className="flex items-start gap-1.5">
+                        <li key={idx} className="text-[12px] text-danger flex items-start justify-between gap-2">
+                          <span className="flex items-start gap-2">
                             <span className="mt-0.5">•</span>
                             <span>{issue}</span>
                           </span>
@@ -519,14 +488,14 @@ export default function DashboardProjectsPage() {
                             type="button"
                             onClick={() => handleConfirmCompliance(issue)}
                             disabled={confirmingIssue === issue}
-                            className="shrink-0 flex items-center gap-1 px-2 py-1 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 text-emerald-700 dark:text-emerald-400 text-[10px] font-semibold disabled:opacity-50 transition-colors cursor-pointer"
+                            className="shrink-0 flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-positive/8 hover:bg-positive/15 border border-positive/20 text-positive text-[10px] font-semibold disabled:opacity-50 transition-all cursor-pointer"
                           >
                             {confirmingIssue === issue ? (
-                              <Loader2 className="w-3 h-3 animate-spin" />
+                              <Loader2 className="w-3 4-3 animate-spin" />
                             ) : (
                               <Check className="w-3 h-3" />
                             )}
-                            <span>Je confirme être conforme</span>
+                            <span>{t('projects.gonogo_modal.confirm_compliance_btn')}</span>
                           </button>
                         </li>
                       ))}
@@ -534,88 +503,74 @@ export default function DashboardProjectsPage() {
                   </div>
                 )}
 
-                {/* Detail facteur par facteur — donnees reelles calculees par go_no_go_service.py */}
+                {/* Factors Detail */}
                 {modalAnalysis.factors && modalAnalysis.factors.length > 0 && (
-                  <div className="space-y-2">
-                    <p className="text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wide px-0.5">
-                      Détail de l'analyse ({modalAnalysis.factors.length} critères évalués)
+                  <div className="space-y-2.5">
+                    <p className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider">
+                      {t('projects.gonogo_modal.factors_title', { count: String(modalAnalysis.factors.length) })}
                     </p>
                     {modalAnalysis.factors.map((factor, idx) => {
                       const statusStyles: Record<string, string> = {
-                        ok: 'border-emerald-200 dark:border-emerald-500/30 bg-emerald-50 dark:bg-emerald-950/20',
-                        warning: 'border-amber-200 dark:border-amber-500/30 bg-amber-50 dark:bg-amber-950/20',
-                        blocking: 'border-rose-200 dark:border-rose-500/30 bg-rose-50 dark:bg-rose-950/20',
-                        missing_data: 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/40',
-                      };
-                      const statusIcon: Record<string, string> = {
-                        ok: '✅',
-                        warning: '⚠️',
-                        blocking: '🛑',
-                        missing_data: 'ℹ️',
+                        ok: 'border-positive/60 dark:border-positive/20 bg-positive/5',
+                        warning: 'border-hl/30 bg-hl/5',
+                        blocking: 'border-danger/60 dark:border-danger/20 bg-danger/5',
+                        missing_data: 'border-line bg-slate-50/50 dark:bg-raised',
                       };
                       return (
                         <div
                           key={idx}
-                          className={`p-3 rounded-xl border text-xs space-y-1 ${statusStyles[factor.status] || statusStyles.missing_data}`}
+                          className={`p-3.5 rounded-xl border space-y-1 ${statusStyles[factor.status] || statusStyles.missing_data}`}
                         >
-                          <p className="font-bold text-slate-900 dark:text-white flex items-center gap-1.5">
-                            <span>{statusIcon[factor.status] || 'ℹ️'}</span>
-                            <span>{factor.title}</span>
-                          </p>
-                          <p className="text-[11px] text-slate-600 dark:text-slate-300 leading-relaxed">{factor.detail}</p>
+                          <p className="text-[13px] font-semibold text-foreground font-heading">{factor.title}</p>
+                          <p className="text-[12px] text-foreground/80 leading-relaxed">{factor.detail}</p>
                           {factor.recommendation && (
-                            <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
-                              <span className="font-semibold">Recommandation : </span>
+                            <p className="text-[11px] text-muted-foreground leading-relaxed">
+                              <span className="font-semibold">{t('projects.gonogo_modal.recommendation_label')}</span>
                               {factor.recommendation}
                             </p>
                           )}
                         </div>
                       );
                     })}
-                    <p className="text-[10px] text-slate-400 dark:text-slate-500 italic px-0.5 pt-1">
-                      Analyse calculée à partir de données réelles de votre dossier (DCE, profil entreprise, délais, historique) — aucune donnée n'est inventée.
-                    </p>
                   </div>
                 )}
               </div>
             ) : (
-              <div className="p-8 rounded-2xl bg-slate-50 dark:bg-slate-950/50 border border-dashed border-slate-200 dark:border-slate-800 text-center space-y-3">
-                <Sparkles className="w-8 h-8 text-amber-500 mx-auto animate-pulse" />
-                <p className="text-xs font-bold text-slate-900 dark:text-white">Analyse Go/No-Go non encore calculée</p>
-                <p className="text-[11px] text-slate-500 max-w-sm mx-auto">
-                  L'IA croise les critères extraits du DCE avec vos moyens disponibles pour calculer votre chance de remporter l'appel d'offres.
-                </p>
+              <div className="p-8 rounded-xl card-inset border-dashed text-center space-y-3">
+                <Sparkles className="w-8 h-8 text-hl mx-auto" />
+                <p className="text-[14px] font-semibold text-foreground font-heading">{t('projects.export.gonogo_empty_title')}</p>
+                <p className="text-[12px] text-muted-foreground max-w-sm mx-auto">{t('projects.gonogo_modal.empty_desc')}</p>
                 <button
                   type="button"
                   onClick={handleRecalculateModalScore}
                   disabled={recalculatingScore}
-                  className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-extrabold shadow-md shadow-amber-500/20 transition-all cursor-pointer"
+                  className="btn-primary cursor-pointer"
                 >
                   {recalculatingScore ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-                  <span>Calculer le score Go / No-Go</span>
+                  <span>{t('projects.gonogo_modal.calc_btn')}</span>
                 </button>
               </div>
             )}
 
-            {/* Modal Actions Footer */}
-            <div className="flex items-center justify-between gap-3 pt-3 border-t border-slate-100 dark:border-slate-800">
+            {/* Modal Footer Actions */}
+            <div className="flex items-center justify-between gap-3 pt-3.5 border-t border-line">
               {modalAnalysis ? (
                 <button
                   type="button"
                   onClick={handleRecalculateModalScore}
                   disabled={recalculatingScore}
-                  className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 text-xs font-bold border border-slate-200 dark:border-slate-700 transition-colors cursor-pointer disabled:opacity-50"
+                  className="btn-secondary !py-2 cursor-pointer"
                 >
-                  <RefreshCw className={`w-3.5 h-3.5 ${recalculatingScore ? 'animate-spin text-amber-500' : ''}`} />
-                  <span>Recalculer l'analyse</span>
+                  <RefreshCw className={`w-3.5 h-3.5 ${recalculatingScore ? 'animate-spin text-hl' : ''}`} />
+                  <span>{t('projects.gonogo_modal.recalc_btn')}</span>
                 </button>
               ) : <div />}
 
               <Link
                 href={`/projects/${selectedModalProject.id}/export`}
-                className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-black shadow-sm transition-all"
+                className="btn-primary !py-2 cursor-pointer"
               >
-                <span>Ouvrir l'Espace Export & Livrables</span>
+                <span>{t('projects.gonogo_modal.open_export_btn')}</span>
                 <ChevronRight className="w-4 h-4" />
               </Link>
             </div>

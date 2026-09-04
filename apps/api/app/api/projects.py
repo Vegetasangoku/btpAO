@@ -981,9 +981,14 @@ async def ask_project_assistant(
     if is_web_only_mode or is_combined_mode:
         from app.services.web_search_service import web_search_service
         from urllib.parse import urlparse
+        # Pays du MARCHE d'abord (04/09) : la whitelist de sources officielles doit suivre
+        # le dossier, pas l'entreprise. Repli explicite sur le pays du tenant si le projet
+        # n'a pas de pays determine.
         tenant_row_res = await db.execute(select(Tenant).where(Tenant.id == t_uuid))
         tenant_row = tenant_row_res.scalar_one_or_none()
-        tenant_country_code = tenant_row.country_code if tenant_row else "FR"
+        tenant_country_code = (
+            project.country_code or (tenant_row.country_code if tenant_row else "FR")
+        )
         whitelist_res = await db.execute(
             select(CountryOfficialSource).where(
                 CountryOfficialSource.country_code == tenant_country_code,
@@ -1194,5 +1199,158 @@ async def delete_project_assistant_message(
     }
 
 
+# ---------------------------------------------------------------------------
+# Detection du pays du marche (04/09)
+# ---------------------------------------------------------------------------
+
+class ProjectCountryOverride(BaseModel):
+    country_code: Optional[str] = None
 
 
+async def _load_project(db: AsyncSession, project_id: str, tenant_id: str) -> Project:
+    """Charge un projet en garantissant l'appartenance au tenant (meme controle que les
+    autres routes du fichier, factorise pour les trois endpoints pays ci-dessous)."""
+    try:
+        p_uuid = uuid.UUID(project_id)
+        t_uuid = uuid.UUID(tenant_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Invalid project ID format")
+
+    res = await db.execute(select(Project).where(Project.id == p_uuid, Project.tenant_id == t_uuid))
+    project = res.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Projet introuvable pour ce tenant.")
+    return project
+
+
+async def _load_country_context(db: AsyncSession, tenant_id: str) -> tuple:
+    """Charge le pays du tenant et les pays configures. A appeler AVANT tout commit :
+    get_db() ouvre la session dans un context manager, donc la moindre requete emise
+    apres un commit leve "Can't operate on closed transaction" (meme piege que les
+    db.refresh() retires le 04/09)."""
+    from app.models.entities import CountryRegulatoryProfile
+
+    t_res = await db.execute(select(Tenant.country_code).where(Tenant.id == uuid.UUID(tenant_id)))
+    tenant_country = t_res.scalar_one_or_none() or "FR"
+
+    prof_res = await db.execute(
+        select(CountryRegulatoryProfile)
+        .where(CountryRegulatoryProfile.is_active == True)  # noqa: E712
+        .order_by(CountryRegulatoryProfile.country_name)
+    )
+    available = [
+        {"country_code": p.country_code, "country_name": p.country_name, "currency": p.currency}
+        for p in prof_res.scalars().all()
+    ]
+    return tenant_country, available
+
+
+def _country_payload(project: Project, tenant_country: str, available: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Assemblage pur, sans I/O : utilisable apres un commit sans risque."""
+    return {
+        "project_id": str(project.id),
+        "country_code": project.country_code,
+        "effective_country_code": project.country_code or tenant_country,
+        "is_tenant_fallback": project.country_code is None,
+        "tenant_country_code": tenant_country,
+        "detection": project.country_detection or {},
+        "available_countries": available,
+    }
+
+
+@router.get("/{project_id}/country")
+async def get_project_country(
+    project_id: str,
+    current_user: CurrentTenantUser = Depends(get_current_tenant_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Pays applique au dossier, d'ou il vient, et pays disponibles."""
+    project = await _load_project(db, project_id, current_user.tenant_id)
+    tenant_country, available = await _load_country_context(db, current_user.tenant_id)
+    return _country_payload(project, tenant_country, available)
+
+
+@router.post("/{project_id}/country/detect")
+async def detect_project_country(
+    project_id: str,
+    current_user: CurrentTenantUser = Depends(get_current_tenant_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Analyse les pieces du dossier pour en deduire le pays du marche.
+
+    Le resultat est TOUJOURS enregistre dans country_detection (tracabilite), mais le pays
+    n'est applique automatiquement que si la detection est de confiance haute ET que
+    l'utilisateur n'a pas deja corrige a la main -- on ne revient jamais sur un choix humain.
+    Dans tous les cas l'interface doit afficher le pays retenu et pourquoi.
+    """
+    from app.services.country_detection_service import country_detection_service
+
+    project = await _load_project(db, project_id, current_user.tenant_id)
+    # Tout ce qui necessite la base est charge AVANT la mutation et le commit.
+    tenant_country, available = await _load_country_context(db, current_user.tenant_id)
+
+    detection = await country_detection_service.detect(
+        db=db, project=project, tenant_country_code=tenant_country
+    )
+
+    previously_overridden = bool((project.country_detection or {}).get("overridden_by_user"))
+    auto_applied = False
+    if (
+        detection.get("confidence") == "high"
+        and detection.get("detected_code")
+        and not previously_overridden
+    ):
+        project.country_code = detection["detected_code"]
+        auto_applied = True
+
+    detection["auto_applied"] = auto_applied
+    detection["overridden_by_user"] = previously_overridden
+    project.country_detection = detection
+    flag_modified(project, "country_detection")
+    await db.commit()
+
+    return _country_payload(project, tenant_country, available)
+
+
+@router.patch("/{project_id}/country")
+async def override_project_country(
+    project_id: str,
+    payload: ProjectCountryOverride,
+    current_user: CurrentTenantUser = Depends(get_current_tenant_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Correction manuelle du pays du marche. `country_code: null` remet le dossier sur le
+    pays du tenant. Un pays sans profil reglementaire actif est refuse explicitement plutot
+    que d'etre accepte puis de faire echouer la generation plus loin.
+    """
+    from app.models.entities import CountryRegulatoryProfile
+
+    project = await _load_project(db, project_id, current_user.tenant_id)
+    tenant_country, available = await _load_country_context(db, current_user.tenant_id)
+    code = (payload.country_code or "").strip().upper() or None
+
+    if code:
+        prof_res = await db.execute(
+            select(CountryRegulatoryProfile).where(
+                CountryRegulatoryProfile.country_code == code,
+                CountryRegulatoryProfile.is_active == True,  # noqa: E712
+            )
+        )
+        if prof_res.scalar_one_or_none() is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Aucun profil reglementaire actif pour le pays '{code}'.",
+            )
+
+    project.country_code = code
+    detection = dict(project.country_detection or {})
+    detection["overridden_by_user"] = True
+    detection["overridden_at"] = datetime.now(timezone.utc).isoformat()
+    detection["overridden_to"] = code
+    project.country_detection = detection
+    flag_modified(project, "country_detection")
+    await db.commit()
+
+    return _country_payload(project, tenant_country, available)

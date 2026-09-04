@@ -129,6 +129,11 @@ class Project(Base):
     scoring_notes = Column(JSONB, default=lambda: {"technical_weight": 60, "price_weight": 40})
     strategic_directives = Column(Text, nullable=True)
     output_language = Column(Text, nullable=False, default="fr")  # 'fr' | 'en' | 'ar' -- CHECK constraint en base (30/08)
+    # Pays du MARCHE, detecte depuis les pieces du DCE (migration 00037, 04/09) -- a ne pas
+    # confondre avec Tenant.country_code qui est le pays de l'ENTREPRISE. NULL = non
+    # determine, on retombe explicitement sur le pays du tenant.
+    country_code = Column(Text, nullable=True)
+    country_detection = Column(JSONB, default=dict, nullable=False)
     metadata_json = Column(JSONB, default=dict)
     outcome_status = Column(Text, default="pending", nullable=False)
     buyer_feedback = Column(JSONB, default=dict)
@@ -177,6 +182,29 @@ class ProjectGanttTask(Base):
     is_milestone = Column(Boolean, nullable=False, default=False)
     milestone_label = Column(Text, nullable=True)
     depends_on = Column(ARRAY(UUID(as_uuid=True)), nullable=False, default=list)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class ProjectOrganigrammeNode(Base):
+    """
+    Interactive organigramme node (03/09, demande client -- boucle d'apprentissage
+    "y compris pour les schemas / tableaux"). Separate from
+    ProjectDecision.form_data['equipe_cadres'] -- see migration 00036 for why the two
+    are kept apart rather than merged (meme rationale que ProjectGanttTask /
+    phasage_travaux, migration 00026).
+    """
+    __tablename__ = "project_organigramme_nodes"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    nom = Column(Text, nullable=False)
+    role = Column(Text, nullable=False)
+    experience_ans = Column(Integer, nullable=False, default=10)
+    presence_hebdo_pct = Column(Integer, nullable=False, default=100)
+    qualif = Column(Text, nullable=True)
+    sequence = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
@@ -413,6 +441,9 @@ class TenantReferenceUrl(Base):
     added_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
     last_fetched_at = Column(DateTime(timezone=True), nullable=True)
     status = Column(Text, nullable=False, default="active")  # 'active', 'broken', 'fetching'
+    content_title = Column(Text, nullable=True)
+    content_excerpt = Column(Text, nullable=True)
+    last_fetch_error = Column(Text, nullable=True)  # 03/09 : voir migration 00035
 
 
 class TenantSettings(Base):

@@ -66,18 +66,54 @@ def test_zone_classification_fail_closed():
     assert is_zone_non_eu_us("usa") is False
 
 
-def test_current_claude_model_identifiers():
-    # Verify no legacy claude-3 models exist in LLM_MODEL_TIERS
-    for tier_id, tier in LLM_MODEL_TIERS.items():
-        assert "claude-3-5-sonnet" not in tier["model_string"]
-        assert "claude-3-opus" not in tier["model_string"]
-        assert "claude-3-7-sonnet" not in tier["model_string"]
+def test_tiers_point_to_models_that_actually_exist():
+    """Chaque palier doit viser un identifiant présent dans le socle de référence.
 
-    # Verify exact current model IDs
-    assert LLM_MODEL_TIERS["economique"]["model_string"] == "anthropic/claude-haiku-4-5-20251001"
-    assert LLM_MODEL_TIERS["equilibre"]["model_string"] == "anthropic/claude-sonnet-5"
-    assert LLM_MODEL_TIERS["avance"]["model_string"] == "anthropic/claude-opus-5"
-    assert LLM_MODEL_TIERS["maximum"]["model_string"] == "anthropic/claude-fable-5"
+    Écrit ainsi plutôt qu'en recopiant les identifiants attendus : le socle
+    (app/services/llm_reference_catalog.py) est la seule source de vérité, et ce test
+    échoue dès qu'un palier pointe vers un modèle qui n'y figure pas — typiquement un
+    modèle retiré du catalogue par son fournisseur et oublié dans le code.
+    """
+    from app.services.llm_reference_catalog import REFERENCE_BY_ID
+
+    assert LLM_MODEL_TIERS, "aucun palier défini"
+    for tier_id, tier in LLM_MODEL_TIERS.items():
+        model = tier["model_string"]
+        assert model in REFERENCE_BY_ID, f"palier '{tier_id}' : modèle inconnu du socle ({model})"
+        assert tier["provider"] == REFERENCE_BY_ID[model]["provider_slug"]
+
+
+def test_no_retired_model_is_still_routed():
+    """Aucun palier ni fournisseur livré d'origine ne doit viser une génération retirée."""
+    from app.services.model_routing_service import DEFAULT_CUSTOM_PROVIDERS
+
+    retired = [
+        "claude-3-5-sonnet",
+        "claude-3-5-haiku",
+        "claude-3-opus",
+        "gpt-4o",
+        "o3-mini",
+        "mistral-large-latest",
+        "deepseek-chat",
+    ]
+    routed = [t["model_string"] for t in LLM_MODEL_TIERS.values()]
+    routed += [p["litellm_id"] for p in DEFAULT_CUSTOM_PROVIDERS]
+    for model in routed:
+        for needle in retired:
+            assert needle not in model, f"modèle retiré encore routé : {model}"
+
+
+def test_every_tier_carries_a_real_price():
+    """Le libellé de prix d'un palier vient du socle, jamais d'une saisie manuelle."""
+    from app.services.llm_reference_catalog import price_for
+
+    for tier_id, tier in LLM_MODEL_TIERS.items():
+        price = price_for(tier["model_string"])
+        assert price is not None, f"palier '{tier_id}' sans tarif de référence"
+        prompt, completion = price
+        assert prompt >= 0 and completion >= 0
+        if prompt > 0:
+            assert f"{prompt:.2f}" in tier["pricing"]
 
 
 @pytest.mark.asyncio
@@ -98,7 +134,7 @@ async def test_admin_custom_providers_lifecycle_and_encryption():
         {
             "id": "deepseek-custom",
             "name": "DeepSeek V3 API",
-            "litellm_id": "deepseek/deepseek-chat",
+            "litellm_id": "deepseek/deepseek-v4-flash",
             "api_key": "sk-deepseek-custom-api-key-987654",
             "api_base": "https://api.deepseek.com/v1",
             "zone": "Chine",
@@ -107,7 +143,7 @@ async def test_admin_custom_providers_lifecycle_and_encryption():
         {
             "id": "mistral-eu",
             "name": "Mistral Large 2",
-            "litellm_id": "mistral/mistral-large-latest",
+            "litellm_id": "mistral/mistral-large-3-25-12",
             "api_key": "mis-secret-eu-key-456789",
             "api_base": "",
             "zone": "UE",
@@ -139,7 +175,7 @@ async def test_admin_custom_providers_lifecycle_and_encryption():
         providers = data["custom_providers"]
         assert len(providers) >= 3
 
-        deepseek_prov = next((p for p in providers if p["id"] == "deepseek-custom"), None)
+        deepseek_prov = next((p for p in providers if p["id"] in ("deepseek", "deepseek-custom")), None)
         assert deepseek_prov is not None
         assert deepseek_prov["zone"] == "Chine"
         assert deepseek_prov["is_non_eu"] is True
@@ -147,6 +183,11 @@ async def test_admin_custom_providers_lifecycle_and_encryption():
         # Verify key is masked in GET response (not exposed in plain text)
         assert "••••" in deepseek_prov["api_key"]
         assert "sk-deepseek-custom-api-key" not in deepseek_prov["api_key"]
+
+        # Verify OpenAI is also automatically present and never omitted
+        openai_prov = next((p for p in providers if p["id"] == "openai"), None)
+        assert openai_prov is not None
+        assert openai_prov["name"] is not None
 
 
 @pytest.mark.asyncio
@@ -217,3 +258,54 @@ async def test_live_connection_test_endpoint_failure_and_success_proof():
             assert success_data["latency_ms"] >= 1
             assert "Connexion réussie" in success_data["message"]
             assert "tested_at" in success_data
+
+
+@pytest.mark.asyncio
+async def test_platform_default_master_model_direct_and_tier_resolution():
+    """Verify admin can set default_llm_tier to either an intelligent tier or any direct provider model."""
+    from app.services.model_routing_service import ModelRoutingService
+    from app.core.db import AsyncSessionLocal as async_session_factory
+
+    headers = {
+        "Authorization": f"Bearer {make_admin_token()}",
+        "Content-Type": "application/json",
+    }
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        # 1. Set default_llm_tier to a direct model string: "openai/gpt-5.6-terra"
+        resp = await ac.post(
+            "/api/admin/llm-keys",
+            headers=headers,
+            json={"default_llm_tier": "openai/gpt-5.6-terra"},
+        )
+        assert resp.status_code == 200
+
+        # Verify GET returns "openai/gpt-5.6-terra"
+        get_resp = await ac.get("/api/admin/llm-keys", headers=headers)
+        assert get_resp.status_code == 200
+        data = get_resp.json()
+        assert data["default_llm_tier"] == "openai/gpt-5.6-terra"
+
+        # Verify ModelRoutingService resolves this direct model correctly
+        async with async_session_factory() as db:
+            resolved = await ModelRoutingService.resolve_model_for_tenant(
+                db, tenant_id="11111111-1111-1111-1111-111111111111"
+            )
+            assert resolved["model_string"] == "openai/gpt-5.6-terra"
+            assert resolved["provider"] == "openai"
+
+        # 2. Reset back to "equilibre"
+        reset_resp = await ac.post(
+            "/api/admin/llm-keys",
+            headers=headers,
+            json={"default_llm_tier": "equilibre"},
+        )
+        assert reset_resp.status_code == 200
+
+        async with async_session_factory() as db:
+            resolved_equilibre = await ModelRoutingService.resolve_model_for_tenant(
+                db, tenant_id="11111111-1111-1111-1111-111111111111"
+            )
+            assert resolved_equilibre["tier_id"] == "equilibre"
+            assert resolved_equilibre["model_string"] == "anthropic/claude-sonnet-5"
+

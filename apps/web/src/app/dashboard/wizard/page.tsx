@@ -19,7 +19,7 @@ import {
   Trash2,
   Info,
 } from 'lucide-react';
-import { api } from '@/lib/api';
+import { api, fetchAuthenticatedBlobUrl } from '@/lib/api';
 import { Project, GeneratedSection, SuggestedTemplate } from '@/lib/types';
 import { TiptapEditor } from '@/components/editor/tiptap-editor';
 import { useTranslation } from '@/components/i18n-provider';
@@ -86,6 +86,9 @@ function ResponseWizardContent() {
         setReferenceCode(p.reference_code || '');
         setLocation(p.location || '');
         setStrategicDirectives(p.strategic_directives || '');
+        if (p.output_language) {
+          setSelectedLanguage(p.output_language as 'fr' | 'en' | 'ar');
+        }
         if (p.submission_deadline) {
           setSubmissionDeadline(p.submission_deadline.substring(0, 10));
         }
@@ -119,6 +122,7 @@ function ResponseWizardContent() {
           reference_code: referenceCode || `AO-${new Date().getFullYear()}-${Math.floor(Math.random() * 1000)}`,
           status: 'in_progress',
           strategic_directives: strategicDirectives || undefined,
+          output_language: selectedLanguage,
         });
         setProject(created);
       }
@@ -157,6 +161,7 @@ function ResponseWizardContent() {
         estimated_budget: estimatedBudget ? parseFloat(estimatedBudget) : undefined,
         submission_deadline: submissionDeadline ? new Date(submissionDeadline).toISOString() : undefined,
         strategic_directives: strategicDirectives || undefined,
+        output_language: selectedLanguage,
       });
       setProject(updated);
 
@@ -212,14 +217,37 @@ function ResponseWizardContent() {
     setIsExporting(true);
     setExportSuccessMsg(null);
     try {
-      const res = await api.exportProject(project.id, {
+      // Correctif (02/09, découvert en corrigeant la tâche #66) : ce bouton était
+      // entièrement muet -- res.docx_url n'a jamais existé sur la vraie réponse backend
+      // (ExportJobOut renvoie s3_docx_url, et de toute façon seulement une fois le job
+      // Celery terminé), donc window.open() ne s'exécutait jamais, alors que le message
+      // de succès s'affichait quand même, inconditionnellement. On interroge maintenant
+      // le job jusqu'à complétion puis on télécharge via un blob authentifié (une simple
+      // URL directe échouerait en 401, la route exige un Bearer token).
+      const job = await api.exportProject(project.id, {
         format: 'docx',
         include_visuals: true,
-        template: suggestedTemplate?.id,
       });
-
-      if (res.docx_url) {
-        window.open(res.docx_url, '_blank');
+      let attempts = 0;
+      let finalJob = job;
+      while (finalJob.status !== 'completed' && finalJob.status !== 'failed' && attempts < 30) {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        finalJob = await api.getExportJob(job.id);
+        attempts += 1;
+      }
+      if (finalJob.status === 'failed') {
+        throw new Error(finalJob.error_message || "Échec de la génération du document.");
+      }
+      if (finalJob.s3_docx_url) {
+        const apiBase = (process.env.NEXT_PUBLIC_API_URL || '').replace(/\/$/, '');
+        const blobUrl = await fetchAuthenticatedBlobUrl(`${apiBase}${finalJob.s3_docx_url}`);
+        const a = document.createElement('a');
+        a.href = blobUrl;
+        a.download = `Memoire_Technique_${project.id}.docx`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
       }
 
       setExportSuccessMsg('Mémoire technique Word compilé et généré avec succès !');
@@ -239,18 +267,19 @@ function ResponseWizardContent() {
   ];
 
   return (
-    <div className="space-y-6 max-w-5xl mx-auto pb-20">
-      {/* Top Banner & Stepper Header */}
-      <div className="p-6 rounded-xl bg-white dark:bg-[#131823] border border-slate-200 dark:border-[#1E2638] shadow-subtle space-y-6">
+    <div className="page-container max-w-5xl mx-auto font-sans">
+      {/* ─── Top Banner & Stepper Header ─── */}
+      <div className="card-elevated p-6 sm:p-7 space-y-6 rounded-2xl">
         <div className="flex flex-wrap items-center justify-between gap-4">
-          <div className="space-y-1">
-            <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20">
-              {t('wizard.badge')}
+          <div className="space-y-2">
+            <span className="badge-pill text-[10px]">
+              <Sparkles className="w-3 h-3 text-hl" />
+              <span>{t('wizard.badge')}</span>
             </span>
-            <h1 className="text-xl sm:text-2xl font-extrabold text-slate-900 dark:text-white font-heading">
+            <h1 className="text-xl sm:text-2xl font-extrabold text-foreground font-heading tracking-tight">
               {project ? project.title : t('wizard.title')}
             </h1>
-            <p className="text-xs text-slate-600 dark:text-slate-400">
+            <p className="section-desc">
               {t('wizard.desc')}
             </p>
           </div>
@@ -258,16 +287,16 @@ function ResponseWizardContent() {
           {project && (
             <Link
               href={`/projects/${project.id}`}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-[#1E2638] hover:bg-slate-200 dark:hover:bg-slate-700 text-xs text-slate-700 dark:text-slate-300 font-semibold border border-slate-300 dark:border-slate-700 transition-colors"
+              className="btn-secondary !py-2 !px-3.5 !text-[12px] cursor-pointer"
             >
-              <Info className="w-3.5 h-3.5 text-amber-500" />
+              <Info className="w-3.5 h-3.5 text-hl" />
               <span>{t('wizard.open_full_file')}</span>
             </Link>
           )}
         </div>
 
         {/* Stepper Navigation Bar */}
-        <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 pt-2 border-t border-slate-200 dark:border-[#1E2638]">
+        <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 pt-3 border-t border-line">
           {stepsList.map((step) => {
             const Icon = step.icon;
             const isCurrent = currentStep === step.num;
@@ -279,44 +308,44 @@ function ResponseWizardContent() {
                   if (project || step.num === 1) setCurrentStep(step.num);
                 }}
                 disabled={!project && step.num > 1}
-                className={`p-2.5 rounded-lg text-left border transition-all flex items-center gap-2 ${
+                className={`p-3 rounded-xl border text-left transition-all duration-200 flex items-center gap-2.5 cursor-pointer ${
                   isCurrent
-                    ? 'bg-amber-500/15 border-amber-500 text-slate-900 dark:text-white font-bold'
+                    ? 'bg-card border-hl text-foreground font-bold ring-1 ring-hl shadow-xs'
                     : isCompleted
-                    ? 'bg-slate-100 dark:bg-[#1E2638] border-emerald-500/40 text-emerald-600 dark:text-emerald-400 font-medium'
-                    : 'bg-slate-50 dark:bg-[#0F131D] border-slate-200 dark:border-slate-800 text-slate-400'
+                    ? 'card-inset border-positive/40 text-positive font-medium'
+                    : 'card-inset opacity-60 text-muted-foreground cursor-not-allowed'
                 }`}
               >
-                <div className={`w-5 h-5 rounded-md flex items-center justify-center text-xs shrink-0 ${
-                  isCurrent ? 'bg-amber-500 text-white' : isCompleted ? 'bg-emerald-600 text-white' : 'bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-400'
+                <div className={`w-6 h-6 rounded-lg flex items-center justify-center text-[11px] font-bold shrink-0 ${
+                  isCurrent ? 'bg-hl text-hl-contrast shadow-xs' : isCompleted ? 'bg-positive text-hl-contrast' : 'bg-slate-200 dark:bg-raised text-muted-foreground'
                 }`}>
-                  {isCompleted ? <CheckCircle2 className="w-3 h-3" /> : step.num}
+                  {isCompleted ? <CheckCircle2 className="w-3.5 h-3.5" /> : step.num}
                 </div>
-                <span className="text-[11px] truncate font-heading">{step.name}</span>
+                <span className="text-[12px] truncate font-heading">{step.name}</span>
               </button>
             );
           })}
         </div>
       </div>
 
-      {/* --- STEP 1: IMPORT PIÈCES --- */}
+      {/* ═══ STEP 1: IMPORT PIÈCES ═══ */}
       {currentStep === 1 && (
-        <div className="p-6 sm:p-8 rounded-xl bg-white dark:bg-[#131823] border border-slate-200 dark:border-[#1E2638] space-y-6 shadow-subtle">
-          <div className="space-y-1">
-            <h2 className="text-base font-bold text-slate-900 dark:text-white font-heading flex items-center gap-2">
-              <UploadCloud className="w-5 h-5 text-amber-500" />
+        <div className="card-modern p-6 sm:p-8 space-y-6 rounded-2xl animate-fade-in-up">
+          <div className="section-header">
+            <h2 className="section-title">
+              <UploadCloud className="w-5 h-5 text-hl" />
               <span>{t('wizard.step1_title')}</span>
             </h2>
-            <p className="text-xs text-slate-600 dark:text-slate-400">
+            <p className="section-desc">
               {t('wizard.step1_desc')}
             </p>
           </div>
 
-          <form onSubmit={handleStep1Submit} className="space-y-4">
+          <form onSubmit={handleStep1Submit} className="space-y-5">
             {/* Drag & Drop Zone */}
             <div
               onClick={() => fileInputRef.current?.click()}
-              className="p-8 border-2 border-dashed border-slate-300 dark:border-[#1E2638] hover:border-amber-500/50 rounded-xl bg-slate-50 dark:bg-[#0C0F17] text-center space-y-3 cursor-pointer transition-colors"
+              className="p-10 border-2 border-dashed border-slate-300 dark:border-line hover:border-hl/60 rounded-2xl card-inset text-center space-y-3 cursor-pointer transition-all duration-200 group"
             >
               <input
                 ref={fileInputRef}
@@ -330,14 +359,14 @@ function ResponseWizardContent() {
                   }
                 }}
               />
-              <div className="w-12 h-12 rounded-lg bg-amber-500/10 text-amber-600 dark:text-amber-400 flex items-center justify-center mx-auto">
-                <UploadCloud className="w-6 h-6" />
+              <div className="w-14 h-14 rounded-2xl bg-hl text-hl-contrast flex items-center justify-center mx-auto group-hover:scale-105 transition-transform duration-200 shadow-xs">
+                <UploadCloud className="w-7 h-7" />
               </div>
               <div className="space-y-1">
-                <p className="text-xs font-bold text-slate-800 dark:text-white">
+                <p className="text-[14px] font-bold text-foreground font-heading">
                   {t('wizard.drop_title')}
                 </p>
-                <p className="text-[11px] text-slate-500">
+                <p className="text-[12px] text-muted-foreground">
                   {t('wizard.drop_formats')}
                 </p>
               </div>
@@ -345,29 +374,29 @@ function ResponseWizardContent() {
 
             {/* Selected files list */}
             {files.length > 0 && (
-              <div className="space-y-2">
-                <p className="text-xs font-bold text-slate-700 dark:text-slate-300 font-heading">
+              <div className="space-y-2.5">
+                <p className="text-[13px] font-bold text-foreground font-heading">
                   {t('wizard.selected_files')} ({files.length}) :
                 </p>
-                <div className="space-y-1.5">
+                <div className="space-y-2">
                   {files.map((f, i) => (
                     <div
                       key={i}
-                      className="p-2.5 rounded-lg bg-slate-100 dark:bg-[#1A2130] flex items-center justify-between text-xs"
+                      className="card-inset p-3 flex items-center justify-between text-[13px] rounded-xl"
                     >
-                      <div className="flex items-center gap-2 min-w-0">
-                        <FileText className="w-4 h-4 text-amber-500 shrink-0" />
-                        <span className="truncate text-slate-800 dark:text-slate-200">{f.name}</span>
-                        <span className="text-[10px] text-slate-500 font-mono">
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <FileText className="w-4 h-4 text-hl shrink-0" />
+                        <span className="truncate text-foreground font-medium">{f.name}</span>
+                        <span className="text-[11px] text-muted-foreground font-mono shrink-0">
                           ({(f.size / (1024 * 1024)).toFixed(2)} Mo)
                         </span>
                       </div>
                       <button
                         type="button"
                         onClick={() => setFiles(files.filter((_, idx) => idx !== i))}
-                        className="text-slate-400 hover:text-rose-500 p-1"
+                        className="text-slate-400 hover:text-danger p-1.5 rounded-md hover:bg-danger/8 transition-colors cursor-pointer"
                       >
-                        <Trash2 className="w-3.5 h-3.5" />
+                        <Trash2 className="w-4 h-4" />
                       </button>
                     </div>
                   ))}
@@ -376,8 +405,8 @@ function ResponseWizardContent() {
             )}
 
             {/* Optional Manual Title */}
-            <div className="pt-2 border-t border-slate-200 dark:border-[#1E2638]">
-              <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
+            <div className="space-y-1.5 pt-2">
+              <label className="text-[13px] font-medium text-foreground">
                 {t('wizard.optional_title')}
               </label>
               <input
@@ -385,39 +414,69 @@ function ResponseWizardContent() {
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
                 placeholder={t('wizard.title_placeholder')}
-                className="w-full px-3 py-2 rounded-lg bg-slate-50 dark:bg-[#0C0F17] border border-slate-300 dark:border-[#1E2638] text-xs text-slate-900 dark:text-white focus:outline-none focus:border-amber-500"
+                className="input-field"
               />
             </div>
 
-            {/* Consignes Stratégiques Générales — directive prioritaire sur le RAG pour toute génération IA de ce dossier */}
-            <div className="pt-2 border-t border-slate-200 dark:border-[#1E2638]">
-              <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
-                {t('wizard.label_strategic_directives')}
+            {/* Consignes Stratégiques Générales */}
+            <div className="space-y-1.5">
+              <label className="text-[13px] font-medium text-foreground">
+                {t('wizard.strategic_directives')}
               </label>
               <textarea
                 value={strategicDirectives}
                 onChange={(e) => setStrategicDirectives(e.target.value)}
                 placeholder={t('wizard.placeholder_strategic_directives')}
                 rows={3}
-                className="w-full px-3 py-2 rounded-lg bg-slate-50 dark:bg-[#0C0F17] border border-slate-300 dark:border-[#1E2638] text-xs text-slate-900 dark:text-white focus:outline-none focus:border-amber-500"
+                className="input-field resize-none"
               />
-              <p className="text-[10px] text-slate-500 dark:text-slate-500 mt-1">
+              <p className="text-[11px] text-muted-foreground">
                 {t('wizard.help_strategic_directives')}
               </p>
             </div>
 
+            {/* Langue de rédaction du mémoire généré par IA */}
+            <div className="space-y-2">
+              <label className="text-[13px] font-medium text-foreground">
+                {t('wizard.output_language')}
+              </label>
+              <div className="grid grid-cols-3 gap-2.5">
+                {[
+                  { id: 'fr', label: '🇫🇷 Français' },
+                  { id: 'en', label: '🇬🇧 English' },
+                  { id: 'ar', label: '🇸🇦 العربية' },
+                ].map((lang) => (
+                  <button
+                    key={lang.id}
+                    type="button"
+                    onClick={() => setSelectedLanguage(lang.id as 'fr' | 'en' | 'ar')}
+                    className={`py-2.5 px-3 rounded-xl text-[13px] font-semibold border transition-all duration-200 cursor-pointer ${
+                      selectedLanguage === lang.id
+                        ? 'bg-hl text-hl-contrast font-bold border-hl shadow-xs'
+                        : 'card-inset text-foreground hover:border-slate-300 dark:hover:border-zinc-700'
+                    }`}
+                  >
+                    {lang.label}
+                  </button>
+                ))}
+              </div>
+              <p className="text-[11px] text-muted-foreground">
+                {t('wizard.help_output_language')}
+              </p>
+            </div>
+
             {uploadError && (
-              <div className="p-3 rounded-lg bg-rose-50 dark:bg-rose-950/40 border border-rose-300 dark:border-rose-500/40 text-xs text-rose-700 dark:text-rose-300 flex items-center gap-2">
-                <AlertTriangle className="w-4 h-4 text-rose-500 shrink-0" />
+              <div className="p-3.5 rounded-xl bg-danger/8 border border-danger/20 text-[13px] text-danger flex items-center gap-2.5">
+                <AlertTriangle className="w-4 h-4 text-danger shrink-0" />
                 <span>{uploadError}</span>
               </div>
             )}
 
-            <div className="flex justify-end pt-2">
+            <div className="flex justify-end pt-3 border-t border-line">
               <button
                 type="submit"
                 disabled={isUploading}
-                className="flex items-center gap-2 px-5 py-2.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold font-heading shadow-subtle transition-all disabled:opacity-50 cursor-pointer"
+                className="btn-primary cursor-pointer"
               >
                 {isUploading ? (
                   <>
@@ -436,23 +495,23 @@ function ResponseWizardContent() {
         </div>
       )}
 
-      {/* --- STEP 2: VERIFY EXTRACTED INFO --- */}
+      {/* ═══ STEP 2: VERIFY EXTRACTED INFO ═══ */}
       {currentStep === 2 && (
-        <div className="p-6 sm:p-8 rounded-xl bg-white dark:bg-[#131823] border border-slate-200 dark:border-[#1E2638] space-y-6 shadow-subtle">
-          <div className="space-y-1">
-            <h2 className="text-base font-bold text-slate-900 dark:text-white font-heading flex items-center gap-2">
-              <FileCheck2 className="w-5 h-5 text-amber-500" />
+        <div className="card-modern p-6 sm:p-8 space-y-6 rounded-2xl animate-fade-in-up">
+          <div className="section-header">
+            <h2 className="section-title">
+              <FileCheck2 className="w-5 h-5 text-hl" />
               <span>{t('wizard.step2_title')}</span>
             </h2>
-            <p className="text-xs text-slate-600 dark:text-slate-400">
+            <p className="section-desc">
               {t('wizard.step2_desc')}
             </p>
           </div>
 
           <form onSubmit={handleStep2Submit} className="space-y-4">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div className="space-y-1">
-                <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+              <div className="space-y-1.5">
+                <label className="text-[13px] font-medium text-foreground">
                   {t('wizard.label_market_title')}
                 </label>
                 <input
@@ -460,12 +519,12 @@ function ResponseWizardContent() {
                   required
                   value={title}
                   onChange={(e) => setTitle(e.target.value)}
-                  className="w-full px-3 py-2 rounded-lg bg-slate-50 dark:bg-[#0C0F17] border border-slate-300 dark:border-[#1E2638] text-xs text-slate-900 dark:text-white focus:outline-none focus:border-amber-500"
+                  className="input-field"
                 />
               </div>
 
-              <div className="space-y-1">
-                <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+              <div className="space-y-1.5">
+                <label className="text-[13px] font-medium text-foreground">
                   {t('wizard.label_buyer')}
                 </label>
                 <input
@@ -473,12 +532,12 @@ function ResponseWizardContent() {
                   required
                   value={clientName}
                   onChange={(e) => setClientName(e.target.value)}
-                  className="w-full px-3 py-2 rounded-lg bg-slate-50 dark:bg-[#0C0F17] border border-slate-300 dark:border-[#1E2638] text-xs text-slate-900 dark:text-white focus:outline-none focus:border-amber-500"
+                  className="input-field"
                 />
               </div>
 
-              <div className="space-y-1">
-                <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+              <div className="space-y-1.5">
+                <label className="text-[13px] font-medium text-foreground">
                   {t('wizard.label_ref_lot')}
                 </label>
                 <input
@@ -486,12 +545,12 @@ function ResponseWizardContent() {
                   value={referenceCode}
                   onChange={(e) => setReferenceCode(e.target.value)}
                   placeholder={t('wizard.placeholder_ref_lot')}
-                  className="w-full px-3 py-2 rounded-lg bg-slate-50 dark:bg-[#0C0F17] border border-slate-300 dark:border-[#1E2638] text-xs text-slate-900 dark:text-white focus:outline-none focus:border-amber-500"
+                  className="input-field"
                 />
               </div>
 
-              <div className="space-y-1">
-                <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+              <div className="space-y-1.5">
+                <label className="text-[13px] font-medium text-foreground">
                   {t('wizard.label_location')}
                 </label>
                 <input
@@ -499,24 +558,24 @@ function ResponseWizardContent() {
                   value={location}
                   onChange={(e) => setLocation(e.target.value)}
                   placeholder={t('wizard.placeholder_location')}
-                  className="w-full px-3 py-2 rounded-lg bg-slate-50 dark:bg-[#0C0F17] border border-slate-300 dark:border-[#1E2638] text-xs text-slate-900 dark:text-white focus:outline-none focus:border-amber-500"
+                  className="input-field"
                 />
               </div>
 
-              <div className="space-y-1">
-                <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+              <div className="space-y-1.5">
+                <label className="text-[13px] font-medium text-foreground">
                   {t('wizard.label_deadline')}
                 </label>
                 <input
                   type="date"
                   value={submissionDeadline}
                   onChange={(e) => setSubmissionDeadline(e.target.value)}
-                  className="w-full px-3 py-2 rounded-lg bg-slate-50 dark:bg-[#0C0F17] border border-slate-300 dark:border-[#1E2638] text-xs text-slate-900 dark:text-white focus:outline-none focus:border-amber-500"
+                  className="input-field"
                 />
               </div>
 
-              <div className="space-y-1">
-                <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+              <div className="space-y-1.5">
+                <label className="text-[13px] font-medium text-foreground">
                   {t('wizard.label_budget')}
                 </label>
                 <input
@@ -524,25 +583,25 @@ function ResponseWizardContent() {
                   value={estimatedBudget}
                   onChange={(e) => setEstimatedBudget(e.target.value)}
                   placeholder={t('wizard.placeholder_budget')}
-                  className="w-full px-3 py-2 rounded-lg bg-slate-50 dark:bg-[#0C0F17] border border-slate-300 dark:border-[#1E2638] text-xs text-slate-900 dark:text-white focus:outline-none focus:border-amber-500"
+                  className="input-field"
                 />
               </div>
             </div>
 
-            <div className="flex items-center justify-between pt-4 border-t border-slate-200 dark:border-[#1E2638]">
+            <div className="flex items-center justify-between pt-4 border-t border-line">
               <button
                 type="button"
                 onClick={() => setCurrentStep(1)}
-                className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-slate-100 dark:bg-[#1E2638] text-slate-700 dark:text-slate-300 text-xs font-semibold"
+                className="btn-secondary cursor-pointer"
               >
-                <ArrowLeft className="w-3.5 h-3.5" />
+                <ArrowLeft className="w-4 h-4" />
                 <span>{t('wizard.btn_back_docs')}</span>
               </button>
 
               <button
                 type="submit"
                 disabled={isSavingInfo}
-                className="flex items-center gap-2 px-5 py-2.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold font-heading shadow-subtle transition-all cursor-pointer"
+                className="btn-primary cursor-pointer"
               >
                 {isSavingInfo ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowRight className="w-4 h-4" />}
                 <span>{t('wizard.btn_to_drafting')}</span>
@@ -552,17 +611,17 @@ function ResponseWizardContent() {
         </div>
       )}
 
-      {/* --- STEP 3: REDACT MEMOIRE --- */}
+      {/* ═══ STEP 3: REDACT MEMOIRE ═══ */}
       {currentStep === 3 && (
-        <div className="space-y-4">
-          <div className="p-6 rounded-xl bg-white dark:bg-[#131823] border border-slate-200 dark:border-[#1E2638] space-y-2 shadow-subtle">
+        <div className="space-y-5 animate-fade-in-up">
+          <div className="card-modern p-6 space-y-4 rounded-2xl">
             <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <h2 className="text-base font-bold text-slate-900 dark:text-white font-heading flex items-center gap-2">
-                  <Edit3 className="w-5 h-5 text-amber-500" />
+              <div className="section-header">
+                <h2 className="section-title">
+                  <Edit3 className="w-5 h-5 text-hl" />
                   <span>{t('wizard.step3_title')}</span>
                 </h2>
-                <p className="text-xs text-slate-600 dark:text-slate-400">
+                <p className="section-desc">
                   {t('wizard.step3_desc')}
                 </p>
               </div>
@@ -570,16 +629,16 @@ function ResponseWizardContent() {
               <button
                 onClick={handleGenerateMissingSections}
                 disabled={isGeneratingSections}
-                className="flex items-center gap-2 px-4 py-2 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold font-heading transition-all shadow-subtle"
+                className="btn-primary cursor-pointer"
               >
                 {isGeneratingSections ? (
                   <>
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <Loader2 className="w-4 h-4 animate-spin" />
                     <span>{t('wizard.generating')}</span>
                   </>
                 ) : (
                   <>
-                    <Sparkles className="w-3.5 h-3.5" />
+                    <Sparkles className="w-4 h-4" />
                     <span>{t('wizard.btn_generate_chapter')}</span>
                   </>
                 )}
@@ -589,16 +648,12 @@ function ResponseWizardContent() {
 
           {/* Chapters Tabs if multiple */}
           {sections.length > 1 && (
-            <div className="flex flex-wrap gap-2">
+            <div className="tab-group !p-1.5 flex-wrap">
               {sections.map((sec, idx) => (
                 <button
                   key={sec.id}
                   onClick={() => setActiveSectionIdx(idx)}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
-                    activeSectionIdx === idx
-                      ? 'bg-amber-600 text-white shadow-subtle'
-                      : 'bg-white dark:bg-[#131823] text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white border border-slate-200 dark:border-[#1E2638]'
-                  }`}
+                  className={activeSectionIdx === idx ? 'tab-item-active !bg-hl !text-hl-contrast' : 'tab-item'}
                 >
                   {sec.title || `Chapitre ${idx + 1}`}
                 </button>
@@ -608,7 +663,7 @@ function ResponseWizardContent() {
 
           {/* WYSIWYG Editor */}
           {sections.length > 0 && sections[activeSectionIdx] ? (
-            <div className="rounded-xl overflow-hidden border border-slate-200 dark:border-[#1E2638] bg-white dark:bg-[#0C0F17] shadow-subtle">
+            <div className="card-modern overflow-hidden rounded-2xl">
               <TiptapEditor
                 projectId={project!.id}
                 section={sections[activeSectionIdx]}
@@ -618,10 +673,10 @@ function ResponseWizardContent() {
               />
             </div>
           ) : (
-            <div className="p-12 rounded-xl bg-white dark:bg-[#131823] border border-slate-200 dark:border-[#1E2638] text-center space-y-3">
-              <FileText className="w-8 h-8 text-slate-400 mx-auto" />
-              <p className="text-xs font-bold text-slate-700 dark:text-slate-300">{t('wizard.empty_sections_title')}</p>
-              <p className="text-[11px] text-slate-500">
+            <div className="card-modern p-12 text-center space-y-3 rounded-2xl">
+              <FileText className="w-10 h-10 text-slate-300 dark:text-zinc-600 mx-auto" />
+              <p className="text-[14px] font-semibold text-foreground font-heading">{t('wizard.empty_sections_title')}</p>
+              <p className="text-[12px] text-muted-foreground max-w-sm mx-auto">
                 {t('wizard.empty_sections_desc')}
               </p>
             </div>
@@ -630,15 +685,15 @@ function ResponseWizardContent() {
           <div className="flex items-center justify-between pt-2">
             <button
               onClick={() => setCurrentStep(2)}
-              className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-slate-100 dark:bg-[#1E2638] text-slate-700 dark:text-slate-300 text-xs font-semibold"
+              className="btn-secondary cursor-pointer"
             >
-              <ArrowLeft className="w-3.5 h-3.5" />
+              <ArrowLeft className="w-4 h-4" />
               <span>{t('wizard.btn_back_info')}</span>
             </button>
 
             <button
               onClick={() => setCurrentStep(4)}
-              className="flex items-center gap-2 px-5 py-2.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold font-heading shadow-subtle transition-all cursor-pointer"
+              className="btn-primary cursor-pointer"
             >
               <span>{t('wizard.btn_to_admin')}</span>
               <ArrowRight className="w-4 h-4" />
@@ -647,15 +702,15 @@ function ResponseWizardContent() {
         </div>
       )}
 
-      {/* --- STEP 4: ADMINISTRATIVE FORMS --- */}
+      {/* ═══ STEP 4: ADMINISTRATIVE FORMS ═══ */}
       {currentStep === 4 && (
-        <div className="p-6 sm:p-8 rounded-xl bg-white dark:bg-[#131823] border border-slate-200 dark:border-[#1E2638] space-y-6 shadow-subtle">
-          <div className="space-y-1">
-            <h2 className="text-base font-bold text-slate-900 dark:text-white font-heading flex items-center gap-2">
-              <FileSpreadsheet className="w-5 h-5 text-amber-500" />
+        <div className="card-modern p-6 sm:p-8 space-y-6 rounded-2xl animate-fade-in-up">
+          <div className="section-header">
+            <h2 className="section-title">
+              <FileSpreadsheet className="w-5 h-5 text-hl" />
               <span>{t('wizard.step4_title')}</span>
             </h2>
-            <p className="text-xs text-slate-600 dark:text-slate-400">
+            <p className="section-desc">
               {t('wizard.step4_desc')}
             </p>
           </div>
@@ -663,90 +718,90 @@ function ResponseWizardContent() {
           <div className="space-y-4">
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
               {/* Form 1: DC1 */}
-              <div className="p-4 rounded-lg bg-slate-50 dark:bg-[#0C0F17] border border-slate-200 dark:border-[#1E2638] space-y-2">
+              <div className="card-inset p-4 space-y-2 rounded-xl">
                 <div className="flex items-center justify-between">
-                  <span className="text-xs font-bold text-slate-900 dark:text-white font-heading">
+                  <span className="text-[13px] font-bold text-foreground font-heading">
                     {t('wizard.dc1_title')}
                   </span>
                   <input
                     type="checkbox"
                     checked={adminForms.dc1_required}
                     onChange={(e) => setAdminForms({ ...adminForms, dc1_required: e.target.checked })}
-                    className="rounded text-amber-500"
+                    className="w-4 h-4 rounded text-hl cursor-pointer"
                   />
                 </div>
-                <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                <p className="text-[11px] text-muted-foreground">
                   {t('wizard.dc1_desc')}
                 </p>
-                <span className="inline-block text-[10px] font-mono font-bold text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded">
+                <span className="badge-pill-emerald text-[9px]">
                   {t('wizard.dc1_badge')}
                 </span>
               </div>
 
               {/* Form 2: DC2 */}
-              <div className="p-4 rounded-lg bg-slate-50 dark:bg-[#0C0F17] border border-slate-200 dark:border-[#1E2638] space-y-2">
+              <div className="card-inset p-4 space-y-2 rounded-xl">
                 <div className="flex items-center justify-between">
-                  <span className="text-xs font-bold text-slate-900 dark:text-white font-heading">
+                  <span className="text-[13px] font-bold text-foreground font-heading">
                     {t('wizard.dc2_title')}
                   </span>
                   <input
                     type="checkbox"
                     checked={adminForms.dc2_required}
                     onChange={(e) => setAdminForms({ ...adminForms, dc2_required: e.target.checked })}
-                    className="rounded text-amber-500"
+                    className="w-4 h-4 rounded text-hl cursor-pointer"
                   />
                 </div>
-                <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                <p className="text-[11px] text-muted-foreground">
                   {t('wizard.dc2_desc')}
                 </p>
-                <span className="inline-block text-[10px] font-mono font-bold text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded">
+                <span className="badge-pill-emerald text-[9px]">
                   {t('wizard.dc2_badge')}
                 </span>
               </div>
 
               {/* Form 3: DUME */}
-              <div className="p-4 rounded-lg bg-slate-50 dark:bg-[#0C0F17] border border-slate-200 dark:border-[#1E2638] space-y-2">
+              <div className="card-inset p-4 space-y-2 rounded-xl">
                 <div className="flex items-center justify-between">
-                  <span className="text-xs font-bold text-slate-900 dark:text-white font-heading">
+                  <span className="text-[13px] font-bold text-foreground font-heading">
                     {t('wizard.dume_title')}
                   </span>
                   <input
                     type="checkbox"
                     checked={adminForms.dume_required}
                     onChange={(e) => setAdminForms({ ...adminForms, dume_required: e.target.checked })}
-                    className="rounded text-amber-500"
+                    className="w-4 h-4 rounded text-hl cursor-pointer"
                   />
                 </div>
-                <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                <p className="text-[11px] text-muted-foreground">
                   {t('wizard.dume_desc')}
                 </p>
-                <span className="inline-block text-[10px] font-mono text-slate-500 bg-slate-100 dark:bg-slate-800 px-2 py-0.5 rounded">
+                <span className="badge-pill-slate text-[9px]">
                   {t('wizard.dume_badge')}
                 </span>
               </div>
             </div>
 
-            <div className="p-4 rounded-lg bg-emerald-50 dark:bg-emerald-950/20 border border-emerald-300 dark:border-emerald-500/30 text-xs text-emerald-700 dark:text-emerald-300 flex items-center gap-2.5">
-              <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
+            <div className="p-4 rounded-xl bg-positive/8 border border-positive/20 text-[13px] text-positive flex items-center gap-2.5 font-medium">
+              <CheckCircle2 className="w-4 h-4 text-positive shrink-0" />
               <span>
                 {t('wizard.compliance_note')}
               </span>
             </div>
 
-            <div className="flex items-center justify-between pt-4 border-t border-slate-200 dark:border-[#1E2638]">
+            <div className="flex items-center justify-between pt-4 border-t border-line">
               <button
                 type="button"
                 onClick={() => setCurrentStep(3)}
-                className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-slate-100 dark:bg-[#1E2638] text-slate-700 dark:text-slate-300 text-xs font-semibold"
+                className="btn-secondary cursor-pointer"
               >
-                <ArrowLeft className="w-3.5 h-3.5" />
+                <ArrowLeft className="w-4 h-4" />
                 <span>{t('wizard.btn_back_drafting')}</span>
               </button>
 
               <button
                 type="button"
                 onClick={() => setCurrentStep(5)}
-                className="flex items-center gap-2 px-5 py-2.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold font-heading shadow-subtle transition-all cursor-pointer"
+                className="btn-primary cursor-pointer"
               >
                 <span>{t('wizard.btn_to_export')}</span>
                 <ArrowRight className="w-4 h-4" />
@@ -756,92 +811,73 @@ function ResponseWizardContent() {
         </div>
       )}
 
-      {/* --- STEP 5: EXPORT & FINALIZE --- */}
+      {/* ═══ STEP 5: EXPORT & FINALIZE ═══ */}
       {currentStep === 5 && (
-        <div className="p-6 sm:p-8 rounded-xl bg-white dark:bg-[#131823] border border-slate-200 dark:border-[#1E2638] space-y-6 shadow-subtle">
-          <div className="space-y-1">
-            <h2 className="text-base font-bold text-slate-900 dark:text-white font-heading flex items-center gap-2">
-              <Download className="w-5 h-5 text-amber-500" />
+        <div className="card-modern p-6 sm:p-8 space-y-6 rounded-2xl animate-fade-in-up">
+          <div className="section-header">
+            <h2 className="section-title">
+              <Download className="w-5 h-5 text-hl" />
               <span>{t('wizard.step5_title')}</span>
             </h2>
-            <p className="text-xs text-slate-600 dark:text-slate-400">
+            <p className="section-desc">
               {t('wizard.step5_desc')}
             </p>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             {/* Suggested Template Box */}
-            <div className="p-5 rounded-lg bg-slate-50 dark:bg-[#0C0F17] border border-slate-200 dark:border-[#1E2638] space-y-3">
+            <div className="card-inset p-5 space-y-3 rounded-xl">
               <div className="flex items-center justify-between">
-                <span className="text-xs font-bold text-slate-900 dark:text-white font-heading">
+                <span className="text-[13px] font-bold text-foreground font-heading">
                   {t('wizard.applied_template')}
                 </span>
-                <span className="text-[10px] font-mono font-bold text-amber-600 dark:text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20">
+                <span className="badge-pill text-[9px]">
                   {t('wizard.deduced_tag')}
                 </span>
               </div>
-              <p className="text-xs text-slate-800 dark:text-slate-300 font-semibold truncate">
+              <p className="text-[13px] text-foreground font-semibold truncate">
                 {suggestedTemplate?.title || t('wizard.default_template_name')}
               </p>
-              <p className="text-[11px] text-slate-500 dark:text-slate-400">
+              <p className="text-[12px] text-muted-foreground">
                 {suggestedTemplate?.reason || t('wizard.template_reason')}
               </p>
               <Link
                 href="/dashboard/branding"
-                className="text-[11px] text-amber-600 dark:text-amber-400 hover:underline inline-block font-semibold"
+                className="text-[12px] text-hl hover:underline inline-block font-semibold"
               >
                 {t('wizard.change_template_link')}
               </Link>
             </div>
 
-            {/* Language Selector */}
-            <div className="p-5 rounded-lg bg-slate-50 dark:bg-[#0C0F17] border border-slate-200 dark:border-[#1E2638] space-y-3">
-              <span className="text-xs font-bold text-slate-900 dark:text-white font-heading">
+            {/* Readonly output language */}
+            <div className="card-inset p-5 space-y-3 rounded-xl">
+              <span className="text-[13px] font-bold text-foreground font-heading">
                 {t('wizard.output_language')}
               </span>
-              <div className="grid grid-cols-3 gap-2">
-                {[
-                  { id: 'fr', label: '🇫🇷 Français' },
-                  { id: 'en', label: '🇬🇧 English' },
-                  { id: 'ar', label: '🇸🇦 العربية' },
-                ].map((lang) => (
-                  <button
-                    key={lang.id}
-                    type="button"
-                    onClick={() => setSelectedLanguage(lang.id as any)}
-                    className={`py-2 px-2 rounded-lg text-xs font-bold border transition-all cursor-pointer ${
-                      selectedLanguage === lang.id
-                        ? 'bg-amber-600 text-white border-amber-500'
-                        : 'bg-slate-200 dark:bg-[#1E2638] text-slate-700 dark:text-slate-400 border-transparent hover:text-slate-900 dark:hover:text-white'
-                    }`}
-                  >
-                    {lang.label}
-                  </button>
-                ))}
-              </div>
-              {selectedLanguage === 'ar' && (
-                <p className="text-[10px] text-amber-600 dark:text-amber-300">
-                  RTL activé automatiquement (OpenXML bidi)
-                </p>
-              )}
+              <p className="text-sm text-foreground font-semibold">
+                {{ fr: '🇫🇷 Français', en: '🇬🇧 English', ar: '🇸🇦 العربية' }[selectedLanguage]}
+              </p>
+              <p className="text-[11px] text-muted-foreground">
+                {t('wizard.help_output_language_readonly')}
+              </p>
             </div>
           </div>
 
           {exportSuccessMsg && (
-            <div className="p-3.5 rounded-lg bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-300 dark:border-emerald-500/40 text-emerald-700 dark:text-emerald-300 text-xs font-semibold flex items-center gap-2 animate-in fade-in">
-              <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
+            <div className="p-3.5 rounded-xl bg-positive/8 border border-positive/20 text-positive text-[13px] font-semibold flex items-center gap-2 animate-fade-in-up">
+              <CheckCircle2 className="w-4 h-4 text-positive shrink-0" />
               <span>{exportSuccessMsg}</span>
             </div>
           )}
 
           {/* Download Action Buttons */}
-          <div className="flex flex-wrap items-center justify-between gap-4 pt-4 border-t border-slate-200 dark:border-[#1E2638]">
+          <div className="flex flex-wrap items-center justify-between gap-4 pt-4 border-t border-line">
             <button
               type="button"
               onClick={() => setCurrentStep(4)}
-              className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-slate-100 dark:bg-[#1E2638] text-slate-700 dark:text-slate-300 text-xs font-semibold"
+              className="btn-secondary cursor-pointer"
             >
-              <ArrowLeft className="w-3.5 h-3.5" />
+              <ArrowLeft className="w-4 h-4" />
               <span>{t('wizard.btn_back_admin')}</span>
             </button>
 
@@ -850,7 +886,7 @@ function ResponseWizardContent() {
                 type="button"
                 onClick={handleDownloadWord}
                 disabled={isExporting}
-                className="flex items-center gap-2 px-5 py-2.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold font-heading shadow-subtle transition-all cursor-pointer disabled:opacity-50"
+                className="btn-primary cursor-pointer"
               >
                 {isExporting ? (
                   <>
@@ -867,7 +903,7 @@ function ResponseWizardContent() {
 
               <Link
                 href={`/projects/${project?.id}/export`}
-                className="px-4 py-2.5 rounded-lg bg-slate-100 dark:bg-[#1E2638] hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 text-xs font-bold transition-colors"
+                className="btn-secondary cursor-pointer"
               >
                 {t('wizard.advanced_export_link')}
               </Link>
@@ -883,8 +919,8 @@ export default function ResponseWizardPage() {
   const { t } = useTranslation();
   return (
     <Suspense fallback={
-      <div className="flex items-center justify-center min-h-[40vh] text-xs text-slate-400 gap-2">
-        <Loader2 className="w-4 h-4 animate-spin text-amber-500" />
+      <div className="flex items-center justify-center min-h-[40vh] text-[13px] text-muted-foreground gap-2.5 font-mono">
+        <Loader2 className="w-4 h-4 animate-spin text-hl" />
         <span>{t('dash.loading')}</span>
       </div>
     }>

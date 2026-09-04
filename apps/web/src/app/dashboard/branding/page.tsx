@@ -24,7 +24,7 @@ export default function BrandingAndTemplatesPage() {
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
   // Branding Customization Form
-  const [primaryColor, setPrimaryColor] = useState('#D97706');
+  const [primaryColor, setPrimaryColor] = useState('#1C6091');
   const [companyLogoUrl, setCompanyLogoUrl] = useState('');
   const [footerMention, setFooterMention] = useState('btpAO — Réponse certifiée et conforme aux règles de la commande publique');
   const [isSavingBranding, setIsSavingBranding] = useState(false);
@@ -77,53 +77,50 @@ export default function BrandingAndTemplatesPage() {
   }
 
   return (
-    <div className="space-y-6 max-w-5xl mx-auto pb-20">
-      {/* Top Banner */}
-      <div className="p-6 rounded-xl bg-white dark:bg-[#131823] border border-slate-200 dark:border-[#1E2638] shadow-subtle space-y-2">
-        <div className="flex items-center gap-2">
-          <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20">
-            {t('branding.badge')}
-          </span>
-        </div>
-        <h1 className="text-xl sm:text-2xl font-extrabold text-slate-900 dark:text-white font-heading">
+    <div className="page-container max-w-5xl mx-auto font-sans">
+      {/* ─── Top Banner ─── */}
+      <div className="card-elevated p-6 sm:p-7 space-y-2 rounded-2xl">
+        <span className="badge-pill text-[10px]">
+          <span className="w-1.5 h-1.5 rounded-full bg-hl"></span>
+          {t('branding.badge')}
+        </span>
+        <h1 className="text-xl sm:text-2xl font-extrabold text-foreground font-heading tracking-tight">
           {t('branding.title')}
         </h1>
-        <p className="text-xs text-slate-600 dark:text-slate-400">
+        <p className="section-desc">
           {t('branding.desc')}
         </p>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Left Col: Word Template Deduction & Upload */}
-        <div className="p-6 rounded-xl bg-white dark:bg-[#131823] border border-slate-200 dark:border-[#1E2638] space-y-5 shadow-subtle">
-          <div className="space-y-1">
-            <h2 className="text-sm font-bold text-slate-900 dark:text-white font-heading flex items-center gap-2">
-              <Award className="w-4 h-4 text-amber-500" />
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+        {/* ─── Left: Word Template ─── */}
+        <div className="card-modern p-6 space-y-5 rounded-2xl">
+          <div className="section-header">
+            <h2 className="section-title text-[15px]">
+              <Award className="w-4 h-4 text-hl" />
               <span>{t('branding.word_title')}</span>
             </h2>
-            <p className="text-xs text-slate-500 dark:text-slate-400">
-              {t('branding.word_desc')}
-            </p>
+            <p className="section-desc text-[12px]">{t('branding.word_desc')}</p>
           </div>
 
-          {/* Active Deduced Template Card */}
-          <div className="p-4 rounded-lg bg-slate-50 dark:bg-[#0C0F17] border border-slate-200 dark:border-[#1E2638] space-y-2">
+          {/* Active Template Card */}
+          <div className="card-inset p-4 space-y-1.5 rounded-xl">
             <div className="flex items-center justify-between">
-              <span className="text-xs font-bold text-slate-800 dark:text-slate-200">
+              <span className="text-[13px] font-semibold text-foreground">
                 {suggestedTemplate?.name || suggestedTemplate?.title || t('branding.default_model')}
               </span>
-              <span className="text-[10px] font-mono font-bold text-amber-600 dark:text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20">
+              <span className="badge-pill-slate text-[9px]">
                 {suggestedTemplate?.has_template ? t('branding.active_tag') : t('branding.default_tag')}
               </span>
             </div>
-            <p className="text-[11px] text-slate-500 dark:text-slate-400">
+            <p className="text-[12px] text-muted-foreground">
               {suggestedTemplate?.description || suggestedTemplate?.reason || 'Structure standard intégrant styles de titres, table des matières et en-têtes.'}
             </p>
           </div>
 
           {/* Upload New Template */}
-          <form onSubmit={handleUploadWordTemplate} className="space-y-3 pt-3 border-t border-slate-200 dark:border-[#1E2638]">
-            <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300">
+          <form onSubmit={handleUploadWordTemplate} className="space-y-3 pt-4 border-t border-line">
+            <label className="text-[13px] font-medium text-foreground block">
               {t('branding.replace_label')}
             </label>
             <input
@@ -131,45 +128,43 @@ export default function BrandingAndTemplatesPage() {
               required
               accept=".docx"
               onChange={(e) => setUploadFile(e.target.files?.[0] || null)}
-              className="w-full text-xs text-slate-500 file:mr-2 file:py-2 file:px-3 file:rounded-lg file:border-0 file:bg-amber-600 file:text-white file:text-xs file:font-semibold"
+              className="w-full text-[13px] text-muted-foreground file:mr-3 file:py-2 file:px-4 file:rounded-xl file:border-0 file:bg-hl file:text-hl-contrast file:text-[13px] file:font-semibold cursor-pointer file:cursor-pointer file:transition-colors file:hover:bg-hl-strong"
             />
-            <p className="text-[10px] text-slate-500">
+            <p className="text-[11px] text-muted-foreground">
               {t('branding.word_hint')}
             </p>
 
             <button
               type="submit"
               disabled={isUploading || !uploadFile}
-              className="w-full flex items-center justify-center gap-2 py-2.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold font-heading shadow-subtle transition-all disabled:opacity-50"
+              className="btn-secondary w-full cursor-pointer"
             >
-              {isUploading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <UploadCloud className="w-3.5 h-3.5" />}
+              {isUploading ? <Loader2 className="w-4 h-4 animate-spin" /> : <UploadCloud className="w-4 h-4 text-hl" />}
               <span>{t('branding.btn_upload_word')}</span>
             </button>
           </form>
 
           {successMsg && (
-            <div className="p-3 rounded-lg bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-300 dark:border-emerald-500/30 text-emerald-700 dark:text-emerald-300 text-xs font-semibold flex items-center gap-2">
-              <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
+            <div className="p-3.5 rounded-xl bg-positive/8 border border-positive/20 text-positive text-[13px] font-medium flex items-center gap-2.5 animate-fade-in-up">
+              <CheckCircle2 className="w-4 h-4 text-positive shrink-0" />
               <span>{successMsg}</span>
             </div>
           )}
         </div>
 
-        {/* Right Col: Graphic Branding Options */}
-        <div className="p-6 rounded-xl bg-white dark:bg-[#131823] border border-slate-200 dark:border-[#1E2638] space-y-5 shadow-subtle">
-          <div className="space-y-1">
-            <h2 className="text-sm font-bold text-slate-900 dark:text-white font-heading flex items-center gap-2">
-              <Palette className="w-4 h-4 text-amber-500" />
+        {/* ─── Right: Graphic Branding ─── */}
+        <div className="card-modern p-6 space-y-5 rounded-2xl">
+          <div className="section-header">
+            <h2 className="section-title text-[15px]">
+              <Palette className="w-4 h-4 text-hl" />
               <span>{t('branding.palette_title')}</span>
             </h2>
-            <p className="text-xs text-slate-500 dark:text-slate-400">
-              {t('branding.palette_desc')}
-            </p>
+            <p className="section-desc text-[12px]">{t('branding.palette_desc')}</p>
           </div>
 
-          <form onSubmit={handleSaveBranding} className="space-y-4">
-            <div className="space-y-1.5">
-              <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+          <form onSubmit={handleSaveBranding} className="space-y-5">
+            <div className="space-y-2">
+              <label className="text-[13px] font-medium text-foreground">
                 {t('branding.accent_label')}
               </label>
               <div className="flex items-center gap-3">
@@ -177,45 +172,55 @@ export default function BrandingAndTemplatesPage() {
                   type="color"
                   value={primaryColor}
                   onChange={(e) => setPrimaryColor(e.target.value)}
-                  className="w-10 h-10 rounded-lg border border-slate-300 dark:border-[#1E2638] bg-transparent cursor-pointer"
+                  className="w-10 h-10 rounded-lg border border-line bg-transparent cursor-pointer"
                 />
-                <input
-                  type="text"
-                  value={primaryColor}
-                  onChange={(e) => setPrimaryColor(e.target.value)}
-                  className="w-32 px-3 py-2 rounded-lg bg-slate-50 dark:bg-[#0C0F17] border border-slate-300 dark:border-[#1E2638] text-xs text-slate-900 dark:text-white font-mono"
-                />
+                <span className="font-mono text-[13px] text-muted-foreground uppercase bg-sunken px-3 py-1.5 rounded-lg border border-line">
+                  {primaryColor}
+                </span>
               </div>
             </div>
 
-            <div className="space-y-1.5">
-              <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+            <div className="space-y-2">
+              <label className="text-[13px] font-medium text-foreground">
+                {t('branding.logo_label')}
+              </label>
+              <input
+                type="text"
+                value={companyLogoUrl}
+                onChange={(e) => setCompanyLogoUrl(e.target.value)}
+                placeholder="https://mon-entreprise-btp.fr/logo.png"
+                className="input-field"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-[13px] font-medium text-foreground">
                 {t('branding.footer_label')}
               </label>
               <textarea
-                rows={2}
                 value={footerMention}
                 onChange={(e) => setFooterMention(e.target.value)}
-                className="w-full px-3 py-2 rounded-lg bg-slate-50 dark:bg-[#0C0F17] border border-slate-300 dark:border-[#1E2638] text-xs text-slate-900 dark:text-white focus:outline-none focus:border-amber-500"
+                rows={2}
+                className="input-field resize-none"
               />
             </div>
 
             <button
               type="submit"
               disabled={isSavingBranding}
-              className="w-full flex items-center justify-center gap-2 py-2.5 rounded-lg bg-slate-100 dark:bg-[#1E2638] hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-800 dark:text-white text-xs font-bold font-heading transition-colors"
+              className="btn-primary w-full cursor-pointer"
             >
-              {isSavingBranding ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
-              <span>{t('branding.btn_save_options')}</span>
+              {isSavingBranding ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+              <span>{t('branding.btn_save_style')}</span>
             </button>
-
-            {brandingSaved && (
-              <div className="p-3 rounded-lg bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-300 dark:border-emerald-500/30 text-emerald-700 dark:text-emerald-300 text-xs font-semibold flex items-center gap-2">
-                <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
-                <span>Options graphiques enregistrées !</span>
-              </div>
-            )}
           </form>
+
+          {brandingSaved && (
+            <div className="p-3.5 rounded-xl bg-positive/8 border border-positive/20 text-positive text-[13px] font-medium flex items-center gap-2.5 animate-fade-in-up">
+              <CheckCircle2 className="w-4 h-4 text-positive shrink-0" />
+              <span>{t('branding.saved_confirm')}</span>
+            </div>
+          )}
         </div>
       </div>
     </div>

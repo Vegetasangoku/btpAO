@@ -12,7 +12,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 from html.parser import HTMLParser
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.db import AsyncSessionLocal
 from app.models.entities import CompanyAsset, CompanyBootstrapRun, TenantReferenceUrl
+from app.services.billing_service import billing_service, infer_provider_id_from_model_string
 from app.services.embedding_service import embedding_service
 from app.services.web_search_service import web_search_service
 
@@ -70,9 +71,30 @@ class CompanyBootstrapService:
         pass
 
     async def fetch_page_content(self, url: str) -> Optional[Dict[str, str]]:
-        """Fetches and cleans text from a public web page."""
+        """Fetches and cleans text from a public web page. Thin backward-compatible
+        wrapper around fetch_page_content_verbose (03/09) for the one caller that only
+        ever needed the content, never the failure reason (bootstrap_company_profile
+        below, a best-effort background scan across up to 8 URLs where a per-URL
+        reason would have nowhere to surface)."""
+        data, _error = await self.fetch_page_content_verbose(url)
+        return data
+
+    async def fetch_page_content_verbose(self, url: str) -> Tuple[Optional[Dict[str, str]], Optional[str]]:
+        """
+        Same fetch as fetch_page_content, but also returns a short, human-readable
+        reason for a failure (03/09, demande client explicite : "qu'on sache quand un
+        site repond pas ausi" -- jusqu'ici la cause reelle (timeout, code HTTP, contenu
+        vide...) n'etait journalisee que cote serveur, invisible du client, qui ne
+        voyait qu'un badge "Erreur" muet). Utilise par add_reference_url /
+        refresh_reference_url (company_bootstrap.py) pour persister le motif dans
+        tenant_reference_urls.last_fetch_error et l'afficher dans l'interface.
+        Retourne (donnees, None) en cas de succes, (None, motif) en cas d'echec -- le
+        motif est toujours une phrase courte sure a afficher telle quelle (jamais une
+        trace d'exception brute qui pourrait etre illisible ou reveler des details
+        internes).
+        """
         if not url or not url.startswith(("http://", "https://")):
-            return None
+            return None, "URL invalide (doit commencer par http:// ou https://)."
         headers = {
             "User-Agent": "Mozilla/5.0 (compatible; btpAO-BootstrapBot/1.0; +https://btpao.fr)",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -87,10 +109,29 @@ class CompanyBootstrapService:
                     title = parser.get_title() or url
                     text = parser.get_text()
                     if len(text) > 40:
-                        return {"url": url, "title": title, "text": text[:6000]}
+                        return {"url": url, "title": title, "text": text[:6000]}, None
+                    return None, (
+                        "Le site a repondu mais la page semble vide une fois nettoyee "
+                        "(souvent un site qui necessite JavaScript pour afficher son contenu)."
+                    )
+                if resp.status_code in (401, 403):
+                    return None, f"Acces refuse par le site (code {resp.status_code}) probablement une protection anti-robots."
+                if resp.status_code == 404:
+                    return None, "Page introuvable sur ce site (erreur 404)."
+                if resp.status_code == 429:
+                    return None, "Le site a temporairement bloque la requete (trop de sollicitations, code 429)."
+                if resp.status_code >= 500:
+                    return None, f"Le site rencontre une erreur interne (code {resp.status_code})."
+                return None, f"Le site a repondu avec un code inattendu ({resp.status_code})."
+        except httpx.TimeoutException:
+            logger.warning(f"[CompanyBootstrap] Timeout fetching {url}")
+            return None, "Le site n'a pas repondu dans le delai imparti (10 secondes)."
+        except httpx.ConnectError as exc:
+            logger.warning(f"[CompanyBootstrap] Connection error fetching {url}: {exc}")
+            return None, "Impossible de se connecter a ce site (domaine introuvable ou serveur injoignable)."
         except Exception as exc:
             logger.warning(f"[CompanyBootstrap] Failed to fetch {url}: {exc}")
-        return None
+            return None, f"Erreur technique lors de la recuperation de la page ({type(exc).__name__})."
 
     async def bootstrap_company_profile(
         self,
@@ -192,6 +233,8 @@ class CompanyBootstrapService:
 
             # 5. Extract structured assets via LLM (or deterministic parser if offline)
             extracted_assets = await self._extract_profile_data(
+                db=db,
+                tenant_id=t_uuid,
                 company_name=company_name,
                 siret=siret,
                 collected_pages=collected_pages,
@@ -199,6 +242,7 @@ class CompanyBootstrapService:
 
             # 6. Save extracted assets into database as unvalidated company_assets
             created_assets = []
+            await embedding_service.sync_platform_key(db)
             for item in extracted_assets:
                 asset_id = uuid.uuid4()
                 desc = item.get("description", "").strip()
@@ -258,6 +302,8 @@ class CompanyBootstrapService:
 
     async def _extract_profile_data(
         self,
+        db: AsyncSession,
+        tenant_id: uuid.UUID,
         company_name: str,
         siret: Optional[str],
         collected_pages: List[Dict[str, Any]],
@@ -293,30 +339,52 @@ class CompanyBootstrapService:
             "Extrais les fiches d'informations vérifiées (Présentation, Qualifications/Certifications, Moyens matériels, Références de chantiers, Engagements RSE)."
         )
 
-        try:
-            import litellm
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ]
-            response = await litellm.acompletion(
-                model=settings.LITELLM_MODEL or "gpt-4o-mini",
-                messages=messages,
-                temperature=0.0,
-                max_tokens=2000,
-            )
-            raw_content = response.choices[0].message.content.strip()
-            # Extract JSON block
-            if "```json" in raw_content:
-                raw_content = raw_content.split("```json")[1].split("```")[0].strip()
-            elif "```" in raw_content:
-                raw_content = raw_content.split("```")[1].split("```")[0].strip()
+        # 02/09 : plafond de cout LLM mensuel reel -- verifie avant l'appel LLM ; en cas de
+        # depassement, saute directement vers le repli deterministe existant ci-dessous (meme
+        # comportement que "LLM indisponible"), sans jamais lever d'exception dans cette
+        # tache de fond.
+        cap_exceeded, _cap, _spend = await billing_service.is_cost_cap_exceeded(tenant_id, db)
+        if not cap_exceeded:
+            try:
+                import litellm
+                messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ]
+                response = await litellm.acompletion(
+                    model=settings.LITELLM_MODEL or "gpt-4o-mini",
+                    messages=messages,
+                    temperature=0.0,
+                    max_tokens=2000,
+                )
 
-            parsed = json.loads(raw_content)
-            if isinstance(parsed, list):
-                return parsed
-        except Exception as e:
-            logger.warning(f"[CompanyBootstrap] LLM extraction fallback: {e}")
+                # 02/09 : journal de consommation LLM -- absent jusqu'ici sur ce point d'appel.
+                _usage = getattr(response, "usage", None)
+                await billing_service.log_llm_usage(
+                    db=db,
+                    tenant_id=tenant_id,
+                    project_id=None,
+                    provider_id=infer_provider_id_from_model_string(settings.LITELLM_MODEL or "gpt-4o-mini"),
+                    model_string=settings.LITELLM_MODEL or "gpt-4o-mini",
+                    prompt_tokens=getattr(_usage, "prompt_tokens", None) if _usage else None,
+                    completion_tokens=getattr(_usage, "completion_tokens", None) if _usage else None,
+                    total_tokens=getattr(_usage, "total_tokens", None) if _usage else None,
+                )
+
+                raw_content = response.choices[0].message.content.strip()
+                # Extract JSON block
+                if "```json" in raw_content:
+                    raw_content = raw_content.split("```json")[1].split("```")[0].strip()
+                elif "```" in raw_content:
+                    raw_content = raw_content.split("```")[1].split("```")[0].strip()
+
+                parsed = json.loads(raw_content)
+                if isinstance(parsed, list):
+                    return parsed
+            except Exception as e:
+                logger.warning(f"[CompanyBootstrap] LLM extraction fallback: {e}")
+        else:
+            logger.warning("[CompanyBootstrap] Plafond de cout LLM mensuel atteint -- repli deterministe sans appel LLM.")
 
         # Fallback deterministic extraction from text if LLM unavailable
         results = []

@@ -60,6 +60,7 @@ async def _gather_context(
 
     # Fetch Project RAG Chunks via Cosine Distance ranking
     from app.services.embedding_service import embedding_service
+    await embedding_service.sync_platform_key(db)
     query_vector = embedding_service.generate_embedding(project.title) if embedding_service else None
     rag_chunks = []
     try:

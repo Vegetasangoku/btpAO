@@ -33,10 +33,15 @@ from sqlalchemy.pool import NullPool
 
 ASYNC_DATABASE_URL = get_async_database_url()
 
+# NOTE (27/08): le pooler Supabase Supavisor (port 6543, mode transaction) ne supporte
+# pas les prepared statements cote serveur a travers des connexions poolees -- asyncpg les
+# met en cache par defaut (statement_cache_size=100), ce qui casse en mode transaction.
+# Correctif documente par Supabase : desactiver le cache cote client (statement_cache_size=0).
 engine = create_async_engine(
     ASYNC_DATABASE_URL,
     echo=False,
     poolclass=NullPool,
+    connect_args={"statement_cache_size": 0},
 )
 
 AsyncSessionLocal = async_sessionmaker(

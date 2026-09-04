@@ -14,7 +14,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 from html.parser import HTMLParser
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import httpx
 
 logger = logging.getLogger(__name__)
@@ -66,7 +66,7 @@ from app.core.config import settings
 from app.core.db import get_db
 from app.core.security import CurrentTenantUser, get_current_tenant_user
 from app.core.storage import storage_service
-from app.models.entities import CompanyAsset, ExportJob, ExportTemplate, Project
+from app.models.entities import CompanyAsset, ExportJob, ExportTemplate, KnowledgeVector, Project
 from app.models.schemas import (
     CompanyAssetCreate,
     CompanyAssetOut,
@@ -75,6 +75,7 @@ from app.models.schemas import (
     KnowledgeWebSourceInput,
 )
 from app.services.billing_service import billing_service
+from app.services.chunking_service import chunking_service
 from app.services.embedding_service import embedding_service
 from app.services.ocr_service import OCRService
 
@@ -82,6 +83,97 @@ router = APIRouter(prefix="/knowledge", tags=["Knowledge Base & Assets"])
 ocr_service = OCRService()
 
 MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB
+
+
+def extract_text_from_upload(filename: str, file_bytes: bytes) -> Tuple[str, str, Optional[str]]:
+    """
+    Extraction textuelle mutualisee entre l'upload direct (ci-dessous) et le script
+    de backfill de re-indexation (scripts/backfill_knowledge_vectors.py) : OCR pour
+    PDF/image, parseur python-docx pour DOCX, decodage direct pour texte brut.
+    Ne leve jamais d'exception : tout echec est capture et renvoye comme
+    status_state="failed" avec le message d'erreur, exactement comme le comportement
+    historique de l'endpoint d'upload. (30/08)
+    """
+    filename_lower = filename.lower()
+    extracted_text = ""
+    status_state = "indexed"
+    error_msg = None
+    try:
+        if filename_lower.endswith(".pdf"):
+            parsed = ocr_service.extract_text_and_tables(file_bytes, filename)
+            extracted_text = parsed.get("full_text", "")
+            if not extracted_text and parsed.get("pages"):
+                extracted_text = "\n\n".join(p.get("text", "") for p in parsed["pages"])
+        elif filename_lower.endswith(".docx"):
+            try:
+                import docx
+                doc = docx.Document(io.BytesIO(file_bytes))
+                paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
+                tables_text = []
+                for table in doc.tables:
+                    for row in table.rows:
+                        row_cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
+                        if row_cells:
+                            tables_text.append(" | ".join(row_cells))
+                extracted_text = "\n\n".join(paragraphs + tables_text)
+            except Exception:
+                extracted_text = f"[Document Word {filename}]"
+        elif filename_lower.endswith((".txt", ".md", ".csv", ".json")):
+            extracted_text = file_bytes.decode("utf-8", errors="replace")
+        elif filename_lower.endswith((".png", ".jpg", ".jpeg", ".tiff")):
+            parsed = ocr_service.extract_text_and_tables(file_bytes, filename)
+            extracted_text = parsed.get("full_text", "")
+        else:
+            extracted_text = f"Document technique {filename}"
+    except Exception as e:
+        status_state = "failed"
+        error_msg = f"Erreur d'extraction textuelle / OCR : {str(e)}"
+        extracted_text = f"Fichier {filename} (non analyse)"
+    return extracted_text, status_state, error_msg
+
+
+def chunk_and_embed_asset_text(
+    tenant_id_uuid,
+    asset_id,
+    category: str,
+    title: str,
+    full_text: str,
+) -> List[KnowledgeVector]:
+    """
+    Decoupe le texte COMPLET (aucun plafond de longueur, contrairement a l'ancien
+    extracted_text[:4000]) en fragments semantiques via chunking_service (~1200
+    caracteres/fragment, meme logique que pour les DCE), puis calcule un embedding
+    par fragment. Ne persiste rien elle-meme : l'appelant fait db.add() puis commit
+    dans sa propre transaction (permet un rollback atomique avec le CompanyAsset
+    parent en cas d'echec). Retourne [] si le texte est vide -- jamais d'exception
+    remontee a l'appelant (generate_embedding() retourne toujours un vecteur, y
+    compris un repli deterministe en cas d'echec LLM). (30/08)
+    """
+    if not full_text or not full_text.strip():
+        return []
+    pages = [{"page_number": 1, "text": full_text}]
+    chunks = chunking_service.chunk_document_pages(pages)
+    if not chunks:
+        return []
+    vectors = embedding_service.generate_batch_embeddings([c["content"] for c in chunks])
+    rows: List[KnowledgeVector] = []
+    for c, vec in zip(chunks, vectors):
+        rows.append(KnowledgeVector(
+            id=uuid.uuid4(),
+            tenant_id=tenant_id_uuid,
+            asset_id=asset_id,
+            category=category,
+            content=c["content"],
+            embedding=vec,
+            metadata_json={
+                "asset_title": title,
+                "chunk_index": c["chunk_index"],
+                "section_title": c.get("section_title"),
+                "char_count": len(c["content"]),
+            },
+            created_at=datetime.now(timezone.utc),
+        ))
+    return rows
 
 
 @router.get("/assets", response_model=List[CompanyAssetOut])
@@ -245,52 +337,39 @@ async def upload_knowledge_document(
 
     display_title = title.strip() if title and title.strip() else file.filename.rsplit(".", 1)[0].replace("_", " ")
 
-    # 5. Extract text (OCR if PDF/image, docx parser if DOCX, text otherwise)
-    extracted_text = ""
-    status_state = "indexed"
-    error_msg = None
-
-    try:
-        if filename_lower.endswith(".pdf"):
-            parsed = ocr_service.extract_text_and_tables(file_bytes, file.filename)
-            extracted_text = parsed.get("full_text", "")
-            if not extracted_text and parsed.get("pages"):
-                extracted_text = "\n\n".join(p.get("text", "") for p in parsed["pages"])
-        elif filename_lower.endswith(".docx"):
-            try:
-                import docx
-                doc = docx.Document(io.BytesIO(file_bytes))
-                paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
-                tables_text = []
-                for table in doc.tables:
-                    for row in table.rows:
-                        row_cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
-                        if row_cells:
-                            tables_text.append(" | ".join(row_cells))
-                extracted_text = "\n\n".join(paragraphs + tables_text)
-            except Exception as e:
-                extracted_text = f"[Document Word {file.filename}]"
-        elif filename_lower.endswith((".txt", ".md", ".csv", ".json")):
-            extracted_text = file_bytes.decode("utf-8", errors="replace")
-        elif filename_lower.endswith((".png", ".jpg", ".jpeg", ".tiff")):
-            parsed = ocr_service.extract_text_and_tables(file_bytes, file.filename)
-            extracted_text = parsed.get("full_text", "")
-        else:
-            extracted_text = f"Document technique {file.filename}"
-    except Exception as e:
-        status_state = "failed"
-        error_msg = f"Erreur d'extraction textuelle / OCR : {str(e)}"
-        extracted_text = f"Fichier {file.filename} (non analysé)"
+    # 5. Extract text (OCR if PDF/image, docx parser if DOCX, text otherwise) --
+    # logique mutualisee avec le backfill via extract_text_from_upload() (30/08)
+    extracted_text, status_state, error_msg = extract_text_from_upload(file.filename, file_bytes)
 
     word_count = len(extracted_text.split()) if extracted_text else 0
 
-    # 6. Generate Vector Embedding
+    # 6. Generate Vector Embedding (sur les 4000 premiers caracteres -- conserve pour
+    # compat ascendante sur CompanyAsset.embedding, encore lu ailleurs en secours)
     embedding_vector = None
     if extracted_text and status_state == "indexed":
+        await embedding_service.sync_platform_key(db)
         try:
             embedding_vector = embedding_service.generate_embedding(extracted_text[:4000])
         except Exception:
             embedding_vector = None
+
+    # 6bis. Indexation par fragments (chunking) sur le texte COMPLET -- corrige le
+    # plafond 4000c ci-dessus qui ne rendait recherchable que les ~2 premieres pages
+    # de tout document, quelle que soit sa longueur reelle. La recherche RAG reelle
+    # (tasks.py) interroge desormais knowledge_vectors plutot que
+    # CompanyAsset.embedding directement. (30/08)
+    knowledge_vector_rows: List[KnowledgeVector] = []
+    if extracted_text and status_state == "indexed":
+        try:
+            knowledge_vector_rows = chunk_and_embed_asset_text(
+                tenant_id_uuid=t_uuid,
+                asset_id=asset_id,
+                category=inferred_category,
+                title=display_title,
+                full_text=extracted_text,
+            )
+        except Exception as chunk_exc:
+            logger.warning("[knowledge.py] Chunking/embedding notice for asset %s: %s", asset_id, chunk_exc)
 
     metadata = {
         "source_type": "file",
@@ -323,6 +402,8 @@ async def upload_knowledge_document(
         updated_at=now,
     )
     db.add(new_asset)
+    for kv_row in knowledge_vector_rows:
+        db.add(kv_row)
     await db.flush()
     await db.refresh(new_asset)
 
@@ -417,6 +498,7 @@ async def add_knowledge_web_source(
 
     # 4. Generate Embedding
     try:
+        await embedding_service.sync_platform_key(db)
         embedding_vector = embedding_service.generate_embedding(clean_text[:4000])
     except Exception:
         embedding_vector = None
@@ -555,6 +637,7 @@ async def create_company_asset(
     embedding_vector = None
     if payload.description:
         try:
+            await embedding_service.sync_platform_key(db)
             embedding_vector = embedding_service.generate_embedding(payload.description[:4000])
         except Exception:
             embedding_vector = None
@@ -617,6 +700,7 @@ async def search_knowledge(
     # Generate query embedding
     query_vector = None
     try:
+        await embedding_service.sync_platform_key(db)
         query_vector = embedding_service.generate_embedding(query[:2000])
     except Exception as e:
         query_vector = None
@@ -880,4 +964,107 @@ async def get_suggested_template(
         "id": None,
         "created_at": None,
     }
+
+
+@router.get("/assets/{asset_id}/download")
+async def download_knowledge_asset(
+    asset_id: uuid.UUID,
+    inline: bool = False,
+    current_user: CurrentTenantUser = Depends(get_current_tenant_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Télécharge ou affiche le fichier original d'un document de savoir-faire.
+    Strictement isolé par tenant_id.
+    """
+    t_uuid = uuid.UUID(current_user.tenant_id)
+    stmt = select(CompanyAsset).where(
+        CompanyAsset.id == asset_id,
+        CompanyAsset.tenant_id == t_uuid,
+    )
+    res = await db.execute(stmt)
+    asset = res.scalar_one_or_none()
+    if not asset:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document introuvable")
+
+    meta = asset.metadata_json or {}
+    filename = meta.get("file_name") or f"{asset.title}.pdf"
+
+    # 1. Download file bytes from storage_service if s3_url exists
+    if asset.s3_url:
+        try:
+            file_bytes = storage_service.download_file(tenant_id=current_user.tenant_id, s3_key=asset.s3_url)
+            content_type = meta.get("content_type")
+            if not content_type:
+                fn_lower = filename.lower()
+                if fn_lower.endswith(".pdf"):
+                    content_type = "application/pdf"
+                elif fn_lower.endswith(".docx"):
+                    content_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                elif fn_lower.endswith(".xlsx"):
+                    content_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                elif fn_lower.endswith(".png"):
+                    content_type = "image/png"
+                elif fn_lower.endswith((".jpg", ".jpeg")):
+                    content_type = "image/jpeg"
+                else:
+                    content_type = "application/octet-stream"
+
+            disposition = "inline" if inline else "attachment"
+            return Response(
+                content=file_bytes,
+                media_type=content_type,
+                headers={
+                    "Content-Disposition": f'{disposition}; filename="{filename}"',
+                    "Cache-Control": "private, max-age=3600",
+                },
+            )
+        except Exception as exc:
+            logger.warning(f"Erreur téléchargement storage_service pour {asset.s3_url}: {exc}")
+
+    # 2. Fallback to description text if available
+    if asset.description:
+        disposition = "inline" if inline else "attachment"
+        return Response(
+            content=asset.description.encode("utf-8"),
+            media_type="text/plain; charset=utf-8",
+            headers={
+                "Content-Disposition": f'{disposition}; filename="{asset.title}.txt"',
+                "Cache-Control": "private, max-age=3600",
+            },
+        )
+
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Fichier binaire introuvable sur le stockage")
+
+
+@router.get("/template/word/download")
+async def download_word_template(
+    current_user: CurrentTenantUser = Depends(get_current_tenant_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Télécharge le modèle Word par défaut de l'entreprise.
+    """
+    t_uuid = uuid.UUID(current_user.tenant_id)
+    stmt = select(ExportTemplate).where(
+        ExportTemplate.tenant_id == t_uuid,
+        ExportTemplate.is_default == True,
+    )
+    res = await db.execute(stmt)
+    template = res.scalar_one_or_none()
+    if not template or not template.s3_docx_key:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Aucun modèle Word officiel enregistré")
+
+    try:
+        file_bytes = storage_service.download_file(tenant_id=current_user.tenant_id, s3_key=template.s3_docx_key)
+        return Response(
+            content=file_bytes,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers={
+                "Content-Disposition": f'attachment; filename="{template.name or "template_officiel.docx"}"',
+                "Cache-Control": "private, max-age=3600",
+            },
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Fichier modèle introuvable : {exc}")
 

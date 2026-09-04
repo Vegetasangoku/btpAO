@@ -21,6 +21,8 @@ import {
   TeamInvitation,
   SuggestedTemplate,
   GanttTask,
+  OrganigrammeNode,
+  ProjectCountryState,
 } from './types';
 
 
@@ -169,6 +171,18 @@ export const api = {
 
   getProfile: () => fetcher<UserProfile>('/auth/me'),
   getTenant: () => fetcher<Tenant>('/auth/tenant'),
+
+  // Pays du marche applique au dossier (04/09) : lecture, detection sur les pieces du DCE,
+  // et correction manuelle (country_code null = repli explicite sur le pays du tenant).
+  getProjectCountry: (projectId: string) =>
+    fetcher<ProjectCountryState>(`/projects/${projectId}/country`),
+  detectProjectCountry: (projectId: string) =>
+    fetcher<ProjectCountryState>(`/projects/${projectId}/country/detect`, { method: 'POST' }),
+  setProjectCountry: (projectId: string, countryCode: string | null) =>
+    fetcher<ProjectCountryState>(`/projects/${projectId}/country`, {
+      method: 'PATCH',
+      body: JSON.stringify({ country_code: countryCode }),
+    }),
   requestPasswordReset: (email: string) =>
     fetcher<{ success: boolean; message: string; reset_url_dev?: string }>('/auth/forgot-password', {
       method: 'POST',
@@ -301,6 +315,16 @@ export const api = {
   // Interactive Gantt tasks (Batch 11, cahier des charges majeur)
   listGanttTasks: (projectId: string) =>
     fetcher<GanttTask[]>(`/visuals/gantt-tasks/${projectId}`),
+  checkGanttLearning: (projectId: string) =>
+    fetcher<{
+      learning_opportunity: boolean;
+      learning_proposal?: {
+        section_type: string;
+        summary: string;
+        suggested_content: string;
+        diff_percentage: number;
+      } | null;
+    }>(`/visuals/gantt-tasks/${projectId}/learning-check`),
   createGanttTask: (
     projectId: string,
     payload: {
@@ -342,6 +366,53 @@ export const api = {
     fetcher<{ s3_key: string; url: string }>('/visuals/organigramme', {
       method: 'POST',
       body: JSON.stringify({ project_id: projectId, title, nodes }),
+    }),
+
+  // Interactive organigramme nodes (03/09, boucle d'apprentissage "schemas/tableaux")
+  listOrganigrammeNodes: (projectId: string) =>
+    fetcher<OrganigrammeNode[]>(`/visuals/organigramme-nodes/${projectId}`),
+  checkOrganigrammeLearning: (projectId: string) =>
+    fetcher<{
+      learning_opportunity: boolean;
+      learning_proposal?: {
+        section_type: string;
+        summary: string;
+        suggested_content: string;
+        diff_percentage: number;
+      } | null;
+    }>(`/visuals/organigramme-nodes/${projectId}/learning-check`),
+  createOrganigrammeNode: (
+    projectId: string,
+    payload: {
+      nom: string;
+      role: string;
+      experience_ans?: number;
+      presence_hebdo_pct?: number;
+      qualif?: string | null;
+    }
+  ) =>
+    fetcher<OrganigrammeNode>(`/visuals/organigramme-nodes/${projectId}`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  updateOrganigrammeNode: (
+    projectId: string,
+    nodeId: string,
+    payload: Partial<{
+      nom: string;
+      role: string;
+      experience_ans: number;
+      presence_hebdo_pct: number;
+      qualif: string | null;
+    }>
+  ) =>
+    fetcher<OrganigrammeNode>(`/visuals/organigramme-nodes/${projectId}/${nodeId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    }),
+  deleteOrganigrammeNode: (projectId: string, nodeId: string) =>
+    fetcher<{ success: boolean }>(`/visuals/organigramme-nodes/${projectId}/${nodeId}`, {
+      method: 'DELETE',
     }),
 
   // Export Word / PDF (unified helper used by export page). Correctif tâche #66
@@ -766,7 +837,7 @@ export const api = {
       body: JSON.stringify(payload),
     }),
   getReferenceUrls: () =>
-    fetcher<Array<{ id: string; url: string; label?: string; added_at: string; status: string; last_fetched_at?: string }>>('/company/reference-urls'),
+    fetcher<Array<{ id: string; url: string; label?: string; added_at: string; status: string; last_fetched_at?: string; last_fetch_error?: string | null }>>('/company/reference-urls'),
   addReferenceUrl: (payload: { url: string; label?: string }) =>
     fetcher<{ id: string; url: string; label?: string; status: string }>('/company/reference-urls', {
       method: 'POST',
@@ -777,7 +848,7 @@ export const api = {
       method: 'DELETE',
     }),
   refreshReferenceUrl: (urlId: string) =>
-    fetcher<{ success: boolean; message: string; title?: string; status?: string }>(`/company/reference-urls/${urlId}/refresh`, {
+    fetcher<{ success: boolean; message: string; title?: string; status?: string; error?: string | null }>(`/company/reference-urls/${urlId}/refresh`, {
       method: 'POST',
     }),
 

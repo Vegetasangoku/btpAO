@@ -10,6 +10,7 @@ Validates:
 import uuid
 import psycopg2
 import pytest
+from pathlib import Path
 from fastapi.testclient import TestClient
 from jose import jwt
 from app.core.config import settings
@@ -45,7 +46,8 @@ def setup_auth_signup_test_data():
             );
         """)
 
-        with open('/Users/charbelakl/Desktop/reponse au ao /supabase/migrations/00011_fix_auth_signup_trigger_and_default_owner_role.sql', 'r') as f:
+        migration_path = Path(__file__).resolve().parents[3] / "supabase" / "migrations" / "00011_fix_auth_signup_trigger_and_default_owner_role.sql"
+        with open(migration_path, 'r') as f:
             cur.execute(f.read())
 
         yield

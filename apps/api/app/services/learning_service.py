@@ -57,6 +57,132 @@ class LearningService:
 
         return is_significant, diff_pct, summary[:250]
 
+    @staticmethod
+    def calculate_gantt_diff_significance(
+        baseline_phases: List[Dict[str, Any]],
+        current_tasks: List[Dict[str, Any]],
+        threshold_pct: float = 15.0,
+    ) -> tuple[bool, float, str]:
+        """
+        Structural equivalent of calculate_diff_significance for the interactive
+        Gantt (03/09, demande client -- la boucle d'apprentissage doit aussi couvrir
+        les plannings, pas seulement le texte). Compare les project_gantt_tasks
+        actuels au plan initial encore intact dans
+        ProjectDecision.form_data['phasage_travaux'] -- les deux sont deliberement
+        gardes separes depuis la migration 00026, ce qui permet cette comparaison sans
+        snapshot dedie. Volontairement base sur des metriques globales (nombre de
+        phases, duree totale) plutot qu'un appariement phase-par-phase par nom : un
+        rapprochement par nom serait fragile face a un simple renommage ou
+        reordonnancement, qui n'indiquent pas en soi un enseignement a capitaliser.
+        """
+        if not baseline_phases or not current_tasks:
+            return False, 0.0, ""
+
+        baseline_count = len(baseline_phases)
+        current_count = len(current_tasks)
+        baseline_days = sum(int(p.get("duree_semaines") or 4) for p in baseline_phases) * 7
+        if baseline_days <= 0:
+            return False, 0.0, ""
+
+        starts = [t["start_date"] for t in current_tasks]
+        ends = [t["end_date"] for t in current_tasks]
+        current_days = max((max(ends) - min(starts)).days, 1)
+
+        diff_pct = round(abs(current_days - baseline_days) / baseline_days * 100, 1)
+        count_changed = baseline_count != current_count
+        is_significant = count_changed or diff_pct >= threshold_pct
+
+        if not is_significant:
+            return False, diff_pct, ""
+
+        direction = "allongee" if current_days > baseline_days else "raccourcie"
+        parts = []
+        if count_changed:
+            parts.append(f"{current_count} phases au lieu de {baseline_count} initialement proposees")
+        if diff_pct >= 1:
+            parts.append(f"duree totale {direction} de {diff_pct}% ({current_days}j vs {baseline_days}j initialement)")
+        summary = "Planning ajuste par rapport a la proposition initiale : " + ", ".join(parts) + "."
+
+        return True, diff_pct, summary[:250]
+
+    @staticmethod
+    def calculate_organigramme_diff_significance(
+        baseline_cadres: List[Dict[str, Any]],
+        current_nodes: List[Dict[str, Any]],
+        threshold_pct: float = 15.0,
+    ) -> tuple[bool, float, str]:
+        """
+        Structural equivalent of calculate_gantt_diff_significance for the interactive
+        organigramme (03/09, demande client -- la boucle d'apprentissage par
+        corrections doit aussi couvrir les schemas d'encadrement, pas seulement le
+        texte et le planning). Compare les project_organigramme_nodes actuels a
+        l'equipe initiale encore intacte dans
+        ProjectDecision.form_data['equipe_cadres'] -- les deux sont deliberement
+        gardes separes depuis la migration 00036, ce qui permet cette comparaison
+        sans snapshot dedie. Un intervenant est considere "conserve" quand son (nom,
+        role) exact se retrouve tel quel des deux cotes -- un simple changement de
+        role a poste constant (promotion, reaffectation) ou un renommage compte donc
+        comme un changement reel, mais reordonner deux intervenants sans rien changer
+        d'autre ne declenche PAS de proposition (comparaison par ensemble, pas par
+        position -- contrairement au Gantt ou l'ordre porte une info de sequence
+        metier, ici l'ordre des sous-cadres n'a pas de sens temporel a proteger).
+        """
+        if not baseline_cadres or not current_nodes:
+            return False, 0.0, ""
+
+        baseline_count = len(baseline_cadres)
+        current_count = len(current_nodes)
+
+        def _key(c):
+            return (str(c.get("nom") or "").strip().lower(), str(c.get("role") or "").strip().lower())
+
+        baseline_by_key = {_key(c): c for c in baseline_cadres}
+        current_by_key = {_key(c): c for c in current_nodes}
+
+        added_keys = set(current_by_key) - set(baseline_by_key)
+        removed_keys = set(baseline_by_key) - set(current_by_key)
+        common_keys = set(baseline_by_key) & set(current_by_key)
+
+        # Parmi les intervenants presents des deux cotes (meme nom+role), une
+        # correction d'experience ou de presence hebdomadaire est elle aussi un
+        # enseignement reel (ex : le client corrige un conducteur "100% present" en
+        # realite present a mi-temps) -- pas seulement les ajouts/retraits/renommages
+        # geres ci-dessus. Seuil de presence volontairement large (20 points) pour
+        # ignorer les arrondis mineurs sans intention de correction.
+        modified_keys = []
+        for k in common_keys:
+            b, c = baseline_by_key[k], current_by_key[k]
+            b_presence = int(b.get("presence_hebdo_pct") if b.get("presence_hebdo_pct") is not None else 100)
+            c_presence = int(c.get("presence_hebdo_pct") if c.get("presence_hebdo_pct") is not None else 100)
+            b_exp = int(b.get("experience_ans") if b.get("experience_ans") is not None else 10)
+            c_exp = int(c.get("experience_ans") if c.get("experience_ans") is not None else 10)
+            if abs(c_presence - b_presence) >= 20 or c_exp != b_exp:
+                modified_keys.append(k)
+
+        changed_count = len(added_keys) + len(removed_keys) + len(modified_keys)
+        diff_pct = round(changed_count / max(baseline_count, 1) * 100, 1)
+        count_changed = baseline_count != current_count
+        is_significant = count_changed or diff_pct >= threshold_pct
+
+        if not is_significant:
+            return False, diff_pct, ""
+
+        parts = []
+        if count_changed:
+            parts.append(f"{current_count} intervenant(s) au lieu de {baseline_count} initialement proposes")
+        if added_keys:
+            names = ", ".join(f"{current_by_key[k].get('nom')} ({current_by_key[k].get('role')})" for k in list(added_keys)[:3])
+            parts.append(f"ajoute(s) : {names}")
+        if removed_keys:
+            names = ", ".join(f"{baseline_by_key[k].get('nom')} ({baseline_by_key[k].get('role')})" for k in list(removed_keys)[:3])
+            parts.append(f"retire(s) : {names}")
+        if modified_keys:
+            names = ", ".join(f"{current_by_key[k].get('nom')}" for k in list(modified_keys)[:3])
+            parts.append(f"experience/presence corrigee(s) pour : {names}")
+        summary = "Organigramme ajuste par rapport a la proposition initiale : " + "; ".join(parts) + "."
+
+        return True, diff_pct, summary[:250]
+
     async def aggregate_prefill_knowledge(
         self,
         db: AsyncSession,

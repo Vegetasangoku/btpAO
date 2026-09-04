@@ -30,16 +30,9 @@ import {
   Cpu,
   FileCheck,
 } from 'lucide-react';
-import { api } from '@/lib/api';
-import { Project, SuggestedTemplate, GoNoGoAnalysis, GeneratedSection } from '@/lib/types';
-
-interface ExportResult {
-  docx_url?: string;
-  pdf_url?: string;
-  filename?: string;
-  file_size_kb?: number;
-  sections_count?: number;
-}
+import { api, fetchAuthenticatedBlobUrl } from '@/lib/api';
+import { useTranslation } from '@/components/i18n-provider';
+import { Project, SuggestedTemplate, GoNoGoAnalysis, GeneratedSection, ExportJob } from '@/lib/types';
 
 const MANDATORY_SECTIONS = [
   { key: 'moyens_humains', title: '1. Moyens Humains & Encadrement Chantier' },
@@ -52,6 +45,7 @@ const MANDATORY_SECTIONS = [
 export default function ExportPage() {
   const params = useParams();
   const projectId = params.id as string;
+  const { t } = useTranslation();
 
   // Project & Context Data
   const [project, setProject] = useState<Project | null>(null);
@@ -61,20 +55,31 @@ export default function ExportPage() {
   const [calculatingGoNoGo, setCalculatingGoNoGo] = useState(false);
 
   // Standard Export States
+  const apiBase = (process.env.NEXT_PUBLIC_API_URL || '').replace(/\/$/, '');
   const [exporting, setExporting] = useState<'docx' | 'pdf' | null>(null);
-  const [result, setResult] = useState<ExportResult | null>(null);
+  const [result, setResult] = useState<ExportJob | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [includeVisuals, setIncludeVisuals] = useState(true);
   const [includeCoverPage, setIncludeCoverPage] = useState(true);
-  const [selectedTemplate, setSelectedTemplate] = useState('suggested_history');
+  const [downloadingResult, setDownloadingResult] = useState(false);
 
   // Suggested Template State
   const [suggestedTemplate, setSuggestedTemplate] = useState<SuggestedTemplate | null>(null);
   const [loadingTemplate, setLoadingTemplate] = useState(true);
 
   // MEA / International Regional Export State
-  const [meaCountry, setMeaCountry] = useState<'SA' | 'QA' | 'AE' | 'LB' | 'FR'>('SA');
+  const [meaCountry, setMeaCountry] = useState<'SA' | 'QA' | 'AE' | 'LB'>('SA');
   const [meaLanguage, setMeaLanguage] = useState<'fr' | 'en' | 'ar'>('fr');
+
+  // 30/08 : pré-sélectionne la langue du dossier international sur celle déjà choisie
+  // pour ce projet (output_language) -- réponse directe à la confusion "Word / PDF /
+  // international, on comprend rien" : au moins la langue n'a plus besoin d'être
+  // redevinée dans ce 2e formulaire séparé.
+  useEffect(() => {
+    if (project?.output_language === 'ar' || project?.output_language === 'en') {
+      setMeaLanguage(project.output_language);
+    }
+  }, [project?.output_language]);
   const [exportingMea, setExportingMea] = useState(false);
   const [meaResult, setMeaResult] = useState<{ success: boolean; filename: string; docx_url?: string } | null>(null);
   const [meaError, setMeaError] = useState<string | null>(null);
@@ -101,11 +106,6 @@ export default function ExportPage() {
         }
         if (tmplRes.status === 'fulfilled' && tmplRes.value) {
           setSuggestedTemplate(tmplRes.value);
-          if (tmplRes.value.has_template) {
-            setSelectedTemplate('suggested_history');
-          } else {
-            setSelectedTemplate('standard_btp');
-          }
         }
       } catch (err) {
         console.error('Erreur chargement export page:', err);
@@ -127,7 +127,7 @@ export default function ExportPage() {
       const res = await api.runGoNoGo(projectId);
       setGonogo(res);
     } catch (err: any) {
-      setError(err?.message || "Erreur lors du calcul de la matrice Go/No-Go.");
+      setError(err?.message || t('projects.export.error_gonogo'));
     } finally {
       setCalculatingGoNoGo(false);
     }
@@ -138,16 +138,58 @@ export default function ExportPage() {
     setError(null);
     setResult(null);
     try {
-      const data = await api.exportProject(projectId, {
+      const job = await api.exportProject(projectId, {
         format,
         include_visuals: includeVisuals,
-        template: selectedTemplate === 'suggested_history' ? 'standard_btp' : selectedTemplate,
+        include_cover_page: includeCoverPage,
       });
-      setResult(data);
+      // /export/compile ne fait que déclencher la tâche Celery et répond immédiatement
+      // avec status "processing" -- le .docx/.pdf n'existe pas encore à ce stade
+      // (correctif tâche #66, 02/09 : avant ce correctif, le frontend affichait cette
+      // réponse "processing" telle quelle comme si l'export était déjà terminé, avec des
+      // champs qui de toute façon ne correspondaient à rien de ce que le backend renvoie
+      // réellement). On interroge maintenant /export/job/{id} jusqu'à ce que le worker
+      // ait fini (ou échoué).
+      let attempts = 0;
+      let finalJob: ExportJob = job;
+      while (finalJob.status !== 'completed' && finalJob.status !== 'failed' && attempts < 30) {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        finalJob = await api.getExportJob(job.id);
+        attempts += 1;
+      }
+      setResult(finalJob);
+      if (finalJob.status === 'failed') {
+        setError(finalJob.error_message || t('projects.export.error_export'));
+      }
     } catch (err: any) {
-      setError(err?.message || "Erreur lors de l'export. Vérifiez que les sections nécessaires ont été rédigées.");
+      setError(err?.message || t('projects.export.error_export'));
     } finally {
       setExporting(null);
+    }
+  }
+
+  async function handleDownloadResult() {
+    if (!result?.s3_docx_url) return;
+    setDownloadingResult(true);
+    try {
+      // Le endpoint /export/download/{id} exige un Bearer token (get_current_tenant_user) --
+      // une simple balise <a href> ne peut pas le transporter, donc un lien direct
+      // échouerait systématiquement en 401. Même correctif que gantt-preview.tsx /
+      // organigramme-preview.tsx : on récupère le fichier en tant que blob authentifié
+      // avant de déclencher le téléchargement.
+      const blobUrl = await fetchAuthenticatedBlobUrl(`${apiBase}${result.s3_docx_url}`);
+      const ext = result.format === 'pdf' && result.s3_pdf_url ? 'pdf' : 'docx';
+      const a = document.createElement('a');
+      a.href = blobUrl;
+      a.download = `Memoire_Technique_${projectId}.${ext}`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+    } catch (err: any) {
+      setError(err?.message || t('projects.export.error_export'));
+    } finally {
+      setDownloadingResult(false);
     }
   }
 
@@ -161,7 +203,7 @@ export default function ExportPage() {
       const res = await api.exportMeaDossier(projectId, meaCountry, meaLanguage);
       setMeaResult(res);
     } catch (err: any) {
-      setMeaError(err?.message || "Erreur lors de l'export du dossier MEA.");
+      setMeaError(err?.message || t('projects.export.error_mea'));
     } finally {
       setExportingMea(false);
     }
@@ -178,53 +220,52 @@ export default function ExportPage() {
   const isNoGo = gonogo?.recommendation === 'NO-GO';
 
   return (
-    <div className="space-y-8 pb-20 max-w-5xl mx-auto">
+    <div className="space-y-8 pb-20 max-w-5xl mx-auto font-sans">
       {/* Breadcrumb Navigation */}
-      <div className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
-        <Link href="/projects" className="hover:text-amber-600 dark:hover:text-amber-400 transition-colors flex items-center gap-1">
-          <ArrowLeft className="w-3.5 h-3.5" /> Projets
+      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+        <Link href="/projects" className="hover:text-hl transition-colors flex items-center gap-1">
+          <ArrowLeft className="w-3.5 h-3.5" /> {t('projects.export.breadcrumb_projects')}
         </Link>
-        <ChevronRight className="w-3 h-3 text-slate-400 dark:text-slate-600" />
-        <Link href={`/projects/${projectId}`} className="hover:text-amber-600 dark:hover:text-amber-400 transition-colors truncate max-w-[200px]">
-          {project?.title || 'Dossier Projet'}
+        <ChevronRight className="w-3 h-3 opacity-40" />
+        <Link href={`/projects/${projectId}`} className="hover:text-hl transition-colors truncate max-w-[200px]">
+          {project?.title || t('projects.export.default_title')}
         </Link>
-        <ChevronRight className="w-3 h-3 text-slate-400 dark:text-slate-600" />
-        <span className="text-amber-600 dark:text-amber-400 font-semibold">Export & Livrables</span>
+        <ChevronRight className="w-3 h-3 opacity-40" />
+        <span className="text-hl font-semibold">{t('projects.export.breadcrumb_current')}</span>
       </div>
 
       {/* Hero Header Card */}
-      <div className="relative rounded-3xl p-6 sm:p-8 overflow-hidden bg-white dark:bg-gradient-to-br dark:from-[#0F1422] dark:via-[#131B2E] dark:to-amber-950/30 border border-slate-200 dark:border-amber-500/20 shadow-md dark:shadow-2xl transition-colors">
-        <div className="absolute -right-16 -bottom-16 w-72 h-72 bg-amber-500/10 rounded-full blur-3xl pointer-events-none" />
+      <div className="relative rounded-2xl p-6 sm:p-8 overflow-hidden bg-card border border-line shadow-xs transition-colors">
         <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-6">
           <div className="space-y-2.5">
             <div className="flex flex-wrap items-center gap-2">
-              <span className="text-[10px] font-extrabold uppercase tracking-widest px-2.5 py-0.5 rounded-full bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30">
-                Phase Finale • Livrables Prêts à Déposer
+              <span className="badge-pill">
+                {t('projects.export.phase_badge')}
               </span>
-              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700">
+              <span className="text-[10px] font-mono px-2.5 py-0.5 rounded-full bg-sunken text-slate-600 dark:text-zinc-300 border border-line">
                 {project?.reference_code || 'REF-AO'}
               </span>
             </div>
 
-            <h1 className="text-2xl sm:text-3xl font-black text-slate-900 dark:text-white tracking-tight">
-              Centre de Compilation & Export Officiel
+            <h1 className="text-2xl sm:text-3xl font-bold text-foreground tracking-tight font-heading">
+              {t('projects.export.hero_title')}
             </h1>
 
-            <div className="flex flex-wrap gap-4 sm:gap-6 text-xs text-slate-600 dark:text-slate-400 pt-1">
+            <div className="flex flex-wrap gap-4 sm:gap-6 text-xs text-muted-foreground pt-1">
               <div className="flex items-center gap-1.5">
-                <Building2 className="w-3.5 h-3.5 text-amber-500" />
-                <span>Client : <strong className="text-slate-900 dark:text-slate-200">{project?.client_name || 'Maître d’Ouvrage'}</strong></span>
+                <Building2 className="w-3.5 h-3.5 text-hl" />
+                <span>{t('projects.export.client_label', { name: '' })}<strong className="text-slate-900 dark:text-zinc-200">{project?.client_name || t('projects.export.client_fallback')}</strong></span>
               </div>
               {project?.budget_estimate && (
                 <div className="flex items-center gap-1.5">
-                  <Banknote className="w-3.5 h-3.5 text-emerald-500" />
-                  <span>Budget : <strong className="text-slate-900 dark:text-slate-200 font-mono">{project.budget_estimate.toLocaleString('fr-FR')} € HT</strong></span>
+                  <Banknote className="w-3.5 h-3.5 text-positive" />
+                  <span>{t('projects.export.budget_prefix')}<strong className="text-slate-900 dark:text-zinc-200 font-mono">{project.budget_estimate.toLocaleString('fr-FR')}</strong> {t('projects.export.budget_suffix')}</span>
                 </div>
               )}
               {project?.submission_deadline && (
                 <div className="flex items-center gap-1.5">
-                  <Calendar className="w-3.5 h-3.5 text-sky-500" />
-                  <span>Date limite : <strong className="text-slate-900 dark:text-slate-200">{new Date(project.submission_deadline).toLocaleDateString('fr-FR')}</strong></span>
+                  <Calendar className="w-3.5 h-3.5 text-hl" />
+                  <span>{t('projects.export.deadline_label', { date: '' })}<strong className="text-slate-900 dark:text-zinc-200">{new Date(project.submission_deadline).toLocaleDateString('fr-FR')}</strong></span>
                 </div>
               )}
             </div>
@@ -233,9 +274,9 @@ export default function ExportPage() {
           <div className="flex items-center gap-3">
             <Link
               href={`/projects/${projectId}/editor`}
-              className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-slate-100 dark:bg-slate-800/80 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 text-xs font-bold border border-slate-200 dark:border-slate-700 transition-colors shadow-sm"
+              className="btn-secondary"
             >
-              <span>Ouvrir l’Éditeur IA</span>
+              <span>{t('projects.export.open_editor')}</span>
               <ExternalLink className="w-3.5 h-3.5" />
             </Link>
           </div>
@@ -245,15 +286,15 @@ export default function ExportPage() {
       {/* Grid: Go/No-Go Decision + Sections Status */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Card 1 & 2: Go/No-Go Decision Matrix (2 Cols) */}
-        <div className="lg:col-span-2 rounded-3xl bg-white dark:bg-[#0F1422] border border-slate-200 dark:border-[#1E293F] p-6 space-y-5 shadow-sm dark:shadow-xl transition-colors">
+        <div className="lg:col-span-2 rounded-2xl bg-card border border-line p-6 space-y-5 shadow-xs transition-colors">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2.5">
-              <div className="w-9 h-9 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-600 dark:text-amber-400 flex items-center justify-center">
+              <div className="w-9 h-9 rounded-xl bg-hl/10 border border-hl/20 text-hl flex items-center justify-center">
                 <TrendingUp className="w-5 h-5" />
               </div>
               <div>
-                <h2 className="text-sm font-bold text-slate-900 dark:text-white">Matrice Décisionnelle Go / No-Go</h2>
-                <p className="text-[11px] text-slate-500 dark:text-slate-400">Évaluation stratégique de faisabilité et d'adéquation au DCE</p>
+                <h2 className="text-sm font-bold text-foreground font-heading">{t('projects.export.gonogo_title')}</h2>
+                <p className="text-[11px] text-muted-foreground">{t('projects.export.gonogo_subtitle')}</p>
               </div>
             </div>
 
@@ -261,112 +302,112 @@ export default function ExportPage() {
               type="button"
               onClick={handleRunGoNoGo}
               disabled={calculatingGoNoGo}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 text-[11px] font-bold border border-slate-200 dark:border-slate-700 transition-colors disabled:opacity-50"
+              className="btn-secondary !py-1.5 !px-3 !text-xs cursor-pointer"
             >
-              <RefreshCw className={`w-3 h-3 ${calculatingGoNoGo ? 'animate-spin text-amber-500' : ''}`} />
-              <span>{gonogo ? 'Recalculer' : 'Calculer le score'}</span>
+              <RefreshCw className={`w-3 h-3 ${calculatingGoNoGo ? 'animate-spin text-hl' : ''}`} />
+              <span>{gonogo ? t('projects.export.gonogo_recalc') : t('projects.export.gonogo_calc')}</span>
             </button>
           </div>
 
           {gonogo ? (
             <div className="space-y-4">
-              <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-950/80 border border-slate-200 dark:border-slate-800 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+              <div className="p-4 rounded-xl bg-sunken border border-line flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
                 <div className="space-y-1">
                   <div className="flex items-center gap-2">
                     <span
-                      className={`text-xs font-black uppercase tracking-wider px-3 py-1 rounded-full border ${
+                      className={`text-xs font-bold uppercase tracking-wider px-3 py-1 rounded-full border ${
                         isGo
-                          ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/40'
+                          ? 'bg-positive/15 text-positive border-positive/40'
                           : isReserves
-                          ? 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/40'
-                          : 'bg-rose-500/15 text-rose-700 dark:text-rose-300 border-rose-500/40'
+                          ? 'bg-hl/15 text-hl border-hl/40'
+                          : 'bg-danger/15 text-danger border-danger/40'
                       }`}
                     >
                       {gonogo.recommendation === 'GO'
-                        ? '✅ DÉCISION : GO CONFIRMÉ'
+                        ? t('projects.export.gonogo_go')
                         : isReserves
-                        ? '⚠️ DÉCISION : GO SOUS RÉSERVES'
-                        : '🛑 DÉCISION : NO-GO RECOMMANDÉ'}
+                        ? t('projects.export.gonogo_reserves')
+                        : t('projects.export.gonogo_nogo')}
                     </span>
                     <span className="text-xs font-mono font-bold text-slate-800 dark:text-white">
-                      Score global : {score}/100
+                      {t('projects.export.gonogo_score_label', { score: String(score) })}
                     </span>
                   </div>
-                  <p className="text-xs text-slate-600 dark:text-slate-300 pt-1 leading-relaxed">{gonogo.summary}</p>
+                  <p className="text-xs text-slate-600 dark:text-zinc-300 pt-1 leading-relaxed">{gonogo.summary}</p>
                 </div>
 
                 {/* Score Circular / Progress Badge */}
-                <div className="shrink-0 flex flex-col items-center justify-center p-3 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-center min-w-[90px] shadow-sm">
-                  <span className={`text-2xl font-black font-mono ${
-                    (score || 0) >= 70 ? 'text-emerald-500' : (score || 0) >= 50 ? 'text-amber-500' : 'text-rose-500'
+                <div className="shrink-0 flex flex-col items-center justify-center p-3 rounded-xl bg-card border border-line text-center min-w-[90px] shadow-xs">
+                  <span className={`text-2xl font-bold font-mono ${
+                    (score || 0) >= 70 ? 'text-positive' : (score || 0) >= 50 ? 'text-hl' : 'text-danger'
                   }`}>
                     {score}%
                   </span>
-                  <span className="text-[10px] text-slate-400 uppercase font-bold tracking-wider">Indice IA</span>
+                  <span className="text-[10px] text-muted-foreground uppercase font-bold tracking-wider">{t('projects.export.ai_index')}</span>
                 </div>
               </div>
 
               {/* Factors Highlights */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                <div className="p-3.5 rounded-xl bg-slate-50/80 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800 flex items-start gap-2.5">
+                <div className="p-3.5 rounded-xl bg-sunken border border-line flex items-start gap-2.5">
                   {gonogo.mandatory_criteria_met ? (
-                    <Check className="w-4 h-4 text-emerald-500 shrink-0 mt-0.5" />
+                    <Check className="w-4 h-4 text-positive shrink-0 mt-0.5" />
                   ) : (
-                    <XCircle className="w-4 h-4 text-rose-500 shrink-0 mt-0.5" />
+                    <XCircle className="w-4 h-4 text-danger shrink-0 mt-0.5" />
                   )}
                   <div>
-                    <p className="font-bold text-slate-900 dark:text-white">Critères éliminatoires</p>
-                    <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                      {gonogo.mandatory_criteria_met ? '100% des critères minimaux DCE validés' : 'Des critères obligatoires non satisfaits'}
+                    <p className="font-bold text-foreground">{t('projects.export.mandatory_criteria')}</p>
+                    <p className="text-[11px] text-muted-foreground">
+                      {gonogo.mandatory_criteria_met ? t('projects.export.mandatory_criteria_ok') : t('projects.export.mandatory_criteria_ko')}
                     </p>
                   </div>
                 </div>
 
-                <div className="p-3.5 rounded-xl bg-slate-50/80 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800 flex items-start gap-2.5">
-                  <ShieldCheck className="w-4 h-4 text-sky-500 shrink-0 mt-0.5" />
+                <div className="p-3.5 rounded-xl bg-sunken border border-line flex items-start gap-2.5">
+                  <ShieldCheck className="w-4 h-4 text-hl shrink-0 mt-0.5" />
                   <div>
-                    <p className="font-bold text-slate-900 dark:text-white">Conformité Entreprise</p>
-                    <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                    <p className="font-bold text-foreground">{t('projects.export.compliance')}</p>
+                    <p className="text-[11px] text-muted-foreground">
                       {gonogo.blocking_issues && gonogo.blocking_issues.length > 0
-                        ? `${gonogo.blocking_issues.length} points de vigilance détectés`
-                        : 'Aucun point de blocage réglementaire'}
+                        ? t('projects.export.compliance_issues', { count: String(gonogo.blocking_issues.length) })
+                        : t('projects.export.compliance_ok')}
                     </p>
                   </div>
                 </div>
               </div>
             </div>
           ) : (
-            <div className="p-6 rounded-2xl bg-slate-50 dark:bg-slate-950/50 border border-dashed border-slate-200 dark:border-slate-800 text-center space-y-3">
-              <Sparkles className="w-8 h-8 text-amber-500/60 mx-auto animate-pulse" />
+            <div className="p-6 rounded-xl bg-slate-50/50 dark:bg-raised/50 border border-dashed border-line text-center space-y-3">
+              <Sparkles className="w-8 h-8 text-hl mx-auto animate-pulse" />
               <div>
-                <p className="text-xs font-bold text-slate-900 dark:text-white">Analyse Go/No-Go non encore calculée</p>
-                <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
-                  Évaluez l'opportunité de répondre à ce marché en croisant les exigences du DCE avec vos moyens disponibles.
+                <p className="text-xs font-bold text-foreground">{t('projects.export.gonogo_empty_title')}</p>
+                <p className="text-[11px] text-muted-foreground mt-0.5">
+                  {t('projects.export.gonogo_empty_desc')}
                 </p>
               </div>
               <button
                 type="button"
                 onClick={handleRunGoNoGo}
                 disabled={calculatingGoNoGo}
-                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-extrabold shadow-lg shadow-amber-500/20 transition-all disabled:opacity-50 cursor-pointer"
+                className="btn-primary cursor-pointer"
               >
                 {calculatingGoNoGo ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-                <span>Calculer l'analyse Go / No-Go</span>
+                <span>{t('projects.export.gonogo_empty_btn')}</span>
               </button>
             </div>
           )}
         </div>
 
         {/* Card 3: Sections & Readiness Summary (1 Col) */}
-        <div className="rounded-3xl bg-white dark:bg-[#0F1422] border border-slate-200 dark:border-[#1E293F] p-6 space-y-4 shadow-sm dark:shadow-xl flex flex-col justify-between transition-colors">
+        <div className="rounded-2xl bg-card border border-line p-6 space-y-4 shadow-xs flex flex-col justify-between transition-colors">
           <div className="space-y-3">
             <div className="flex items-center justify-between">
-              <h2 className="text-sm font-bold text-slate-900 dark:text-white flex items-center gap-2">
-                <FileCheck className="w-4 h-4 text-emerald-500" />
-                <span>État des Sections</span>
+              <h2 className="text-sm font-bold text-foreground flex items-center gap-2 font-heading">
+                <FileCheck className="w-4 h-4 text-positive" />
+                <span>{t('projects.export.sections_status_title')}</span>
               </h2>
-              <span className="text-xs font-mono font-bold px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
-                {validatedSectionsCount} / 5 Prêtes
+              <span className="text-xs font-mono font-bold px-2 py-0.5 rounded-full bg-positive/10 text-positive border border-positive/20">
+                {t('projects.export.sections_ready_count', { n: String(validatedSectionsCount) })}
               </span>
             </div>
 
@@ -377,18 +418,18 @@ export default function ExportPage() {
                 return (
                   <div
                     key={sec.key}
-                    className="flex items-center justify-between p-2.5 rounded-xl bg-slate-50 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800 text-xs"
+                    className="flex items-center justify-between p-2.5 rounded-xl bg-sunken border border-line text-xs"
                   >
-                    <span className="text-slate-700 dark:text-slate-300 font-medium truncate text-[11px] max-w-[190px]">
+                    <span className="text-foreground font-medium truncate text-[11px] max-w-[190px]">
                       {sec.title}
                     </span>
                     {isReady ? (
-                      <span className="flex items-center gap-1 text-[10px] font-bold text-emerald-600 dark:text-emerald-400 shrink-0">
-                        <CheckCircle2 className="w-3.5 h-3.5" /> Prêt
+                      <span className="flex items-center gap-1 text-[10px] font-bold text-positive shrink-0">
+                        <CheckCircle2 className="w-3.5 h-3.5" /> {t('projects.export.section_ready')}
                       </span>
                     ) : (
-                      <span className="flex items-center gap-1 text-[10px] font-bold text-slate-400 shrink-0">
-                        <Clock className="w-3 h-3" /> À valider
+                      <span className="flex items-center gap-1 text-[10px] font-bold text-muted-foreground shrink-0">
+                        <Clock className="w-3 h-3" /> {t('projects.export.section_pending')}
                       </span>
                     )}
                   </div>
@@ -399,125 +440,93 @@ export default function ExportPage() {
 
           <Link
             href={`/projects/${projectId}/editor`}
-            className="w-full text-center py-2.5 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-amber-600 dark:text-amber-400 text-xs font-bold border border-slate-200 dark:border-slate-700 transition-colors block"
+            className="w-full text-center py-2.5 rounded-xl bg-sunken hover:bg-line/40 text-hl text-xs font-bold border border-line transition-colors block"
           >
-            Compléter les chapitres dans l'Éditeur →
+            {t('projects.export.complete_in_editor')}
           </Link>
         </div>
       </div>
 
       {/* SECTION: TEMPLATE SELECTION & SOVEREIGN EXPORT */}
-      <div className="rounded-3xl bg-white dark:bg-[#0F1422] border border-slate-200 dark:border-[#1E293F] p-6 sm:p-8 space-y-6 shadow-sm dark:shadow-2xl transition-colors">
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 dark:border-slate-800 pb-4">
+      <div className="rounded-2xl bg-card border border-line p-6 sm:p-8 space-y-6 shadow-xs transition-colors">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line pb-4">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-600 dark:text-amber-400 flex items-center justify-center font-bold">
+            <div className="w-10 h-10 rounded-xl bg-hl/10 border border-hl/20 text-hl flex items-center justify-center font-bold">
               <FileText className="w-5 h-5" />
             </div>
             <div>
-              <h2 className="text-base font-bold text-slate-900 dark:text-white">Génération Word (.docx) & PDF Haute Définition</h2>
-              <p className="text-xs text-slate-500 dark:text-slate-400">
-                Sélectionnez le gabarit de charte graphique et compilez l'ensemble du mémoire technique.
+              <h2 className="text-base font-bold text-foreground font-heading">{t('projects.export.template_section_title')}</h2>
+              <p className="text-xs text-muted-foreground">
+                {t('projects.export.template_section_subtitle')}
               </p>
             </div>
           </div>
-          <span className="text-[11px] font-mono text-slate-500 dark:text-slate-400 px-3 py-1 rounded-full bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
-            Jinja2 / docxtpl & LibreOffice 7.x
+          <span className="text-[11px] font-mono text-muted-foreground px-3 py-1 rounded-full bg-sunken border border-line">
+            python-docx &amp; LibreOffice (PDF)
           </span>
         </div>
 
         {/* Suggested Template Box */}
         {loadingTemplate ? (
-          <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800 text-center text-xs text-slate-500 flex items-center justify-center gap-2">
-            <Loader2 className="w-4 h-4 animate-spin text-amber-500" />
-            <span>Analyse de l'historique de votre entreprise...</span>
+          <div className="p-4 rounded-xl bg-sunken border border-line text-center text-xs text-muted-foreground flex items-center justify-center gap-2">
+            <Loader2 className="w-4 h-4 animate-spin text-hl" />
+            <span>{t('projects.export.template_loading')}</span>
           </div>
         ) : suggestedTemplate?.has_template ? (
-          <div className="p-4 rounded-2xl bg-amber-50/60 dark:bg-gradient-to-r dark:from-amber-950/40 dark:via-slate-900/90 dark:to-slate-950 border border-amber-200 dark:border-amber-500/30 space-y-2">
+          <div className="p-4 rounded-xl bg-hl/8 border border-hl/20 space-y-2">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2">
-                <Sparkles className="w-4 h-4 text-amber-600 dark:text-amber-400 animate-pulse" />
-                <span className="text-xs font-bold text-slate-900 dark:text-white">Modèle Graphique Déduit :</span>
-                <span className="text-xs font-bold px-2.5 py-0.5 rounded-full bg-amber-500/20 text-amber-800 dark:text-amber-300 border border-amber-500/40 font-mono">
+                <Sparkles className="w-4 h-4 text-hl animate-pulse" />
+                <span className="text-xs font-bold text-foreground">{t('projects.export.template_suggested_label')}</span>
+                <span className="badge-pill font-mono">
                   {suggestedTemplate.name}
                 </span>
               </div>
-              <span className="text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider">
-                {suggestedTemplate.source_type === 'export_template' ? 'Gabarit Officiel Entreprise' : 'Historique des mémoires'}
+              <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider">
+                {suggestedTemplate.source_type === 'export_template' ? t('projects.export.template_source_official') : t('projects.export.template_source_history')}
               </span>
             </div>
-            <p className="text-xs text-slate-700 dark:text-slate-300">{suggestedTemplate.description}</p>
+            <p className="text-xs text-foreground">{suggestedTemplate.description}</p>
           </div>
         ) : null}
 
-        {/* Template Choice Grid */}
-        <div className="space-y-3">
-          <label className="block text-xs font-bold text-slate-800 dark:text-slate-200">Choisir le gabarit de mise en page :</label>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            {suggestedTemplate?.has_template && (
-              <button
-                type="button"
-                onClick={() => setSelectedTemplate('suggested_history')}
-                className={`p-4 rounded-2xl text-left border transition-all cursor-pointer ${
-                  selectedTemplate === 'suggested_history'
-                    ? 'border-amber-500 bg-amber-500/10 text-amber-800 dark:text-amber-300 shadow-md ring-1 ring-amber-500/50'
-                    : 'border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/40 text-slate-600 dark:text-slate-400 hover:border-slate-300 dark:hover:border-slate-700'
-                }`}
-              >
-                <div className="flex items-center gap-1.5">
-                  <Sparkles className="w-3.5 h-3.5 text-amber-500" />
-                  <p className="text-xs font-bold text-slate-900 dark:text-white">Modèle Déduit Entreprise</p>
-                </div>
-                <p className="text-[11px] mt-1 text-slate-500 dark:text-slate-400 line-clamp-2">{suggestedTemplate.name}</p>
-              </button>
-            )}
-
-            {[
-              { id: 'standard_btp', label: 'Standard BTP Gros Œuvre', desc: 'Charte neutre professionnelle pour marchés publics & privés' },
-              { id: 'hqe_certified', label: 'HQE / Bâtiment Durable', desc: 'Mise en avant prioritaire des critères RSE, carbone & SOGED' },
-              { id: 'compact_summary', label: 'Synthèse Exécutive Compacte', desc: 'Format allégé 15-25 pages avec fiches résumées par lot' },
-            ].map((t) => (
-              <button
-                key={t.id}
-                type="button"
-                onClick={() => setSelectedTemplate(t.id)}
-                className={`p-4 rounded-2xl text-left border transition-all cursor-pointer ${
-                  selectedTemplate === t.id
-                    ? 'border-amber-500 bg-amber-500/10 text-amber-800 dark:text-amber-300 shadow-md ring-1 ring-amber-500/50'
-                    : 'border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/40 text-slate-600 dark:text-slate-400 hover:border-slate-300 dark:hover:border-slate-700'
-                }`}
-              >
-                <p className="text-xs font-bold text-slate-900 dark:text-white">{t.label}</p>
-                <p className="text-[11px] mt-1 text-slate-500 dark:text-slate-400">{t.desc}</p>
-              </button>
-            ))}
-          </div>
-        </div>
+        {/* La "grille de styles" précédemment ici (Standard/HQE/Synthèse) a été retirée le
+            02/09 (tâche #66) : le backend (compile_technical_memo) ne lisait jamais le champ
+            `template` envoyé -- il n'a jamais existé côté schéma (ExportDocumentRequest), donc
+            Pydantic le supprimait silencieusement. Le document utilise toujours l'unique
+            template Word actif du client (ExportTemplate.is_default, affiché ci-dessus quand
+            il existe) : il n'y a jamais eu de choix réel à faire ici. */}
+        {!suggestedTemplate?.has_template && !loadingTemplate && (
+          <p className="text-xs text-muted-foreground">
+            {t('projects.export.template_none_note')}
+          </p>
+        )}
 
         {/* Options Toggles */}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <div className="flex items-center justify-between p-4 rounded-2xl bg-slate-50 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800">
+          <div className="flex items-center justify-between p-4 rounded-xl bg-sunken border border-line">
             <div>
-              <p className="text-xs font-bold text-slate-900 dark:text-slate-200">Injecter les graphiques HD (Gantt & Organigramme)</p>
-              <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">Rendu vectoriel 300 DPI dans le corps du document</p>
+              <p className="text-xs font-bold text-slate-900 dark:text-zinc-200">{t('projects.export.toggle_visuals_label')}</p>
+              <p className="text-[11px] text-muted-foreground mt-0.5">{t('projects.export.toggle_visuals_desc')}</p>
             </div>
             <button
               type="button"
               onClick={() => setIncludeVisuals(!includeVisuals)}
-              className={`w-11 h-6 rounded-full relative transition-colors cursor-pointer ${includeVisuals ? 'bg-amber-500' : 'bg-slate-300 dark:bg-slate-700'}`}
+              className={`w-11 h-6 rounded-full relative transition-colors cursor-pointer ${includeVisuals ? 'bg-hl' : 'bg-slate-300 dark:bg-slate-700'}`}
             >
               <span className={`absolute top-1 w-4 h-4 rounded-full bg-white shadow transition-transform ${includeVisuals ? 'translate-x-6' : 'translate-x-1'}`} />
             </button>
           </div>
 
-          <div className="flex items-center justify-between p-4 rounded-2xl bg-slate-50 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800">
+          <div className="flex items-center justify-between p-4 rounded-xl bg-sunken border border-line">
             <div>
-              <p className="text-xs font-bold text-slate-900 dark:text-slate-200">Page de garde & Sommaire automatique</p>
-              <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">En-tête réglementaire, logo entreprise et pagination</p>
+              <p className="text-xs font-bold text-slate-900 dark:text-zinc-200">{t('projects.export.toggle_cover_label')}</p>
+              <p className="text-[11px] text-muted-foreground mt-0.5">{t('projects.export.toggle_cover_desc')}</p>
             </div>
             <button
               type="button"
               onClick={() => setIncludeCoverPage(!includeCoverPage)}
-              className={`w-11 h-6 rounded-full relative transition-colors cursor-pointer ${includeCoverPage ? 'bg-amber-500' : 'bg-slate-300 dark:bg-slate-700'}`}
+              className={`w-11 h-6 rounded-full relative transition-colors cursor-pointer ${includeCoverPage ? 'bg-hl' : 'bg-slate-300 dark:bg-slate-700'}`}
             >
               <span className={`absolute top-1 w-4 h-4 rounded-full bg-white shadow transition-transform ${includeCoverPage ? 'translate-x-6' : 'translate-x-1'}`} />
             </button>
@@ -531,22 +540,22 @@ export default function ExportPage() {
             type="button"
             onClick={() => handleExport('docx')}
             disabled={!!exporting}
-            className="group relative overflow-hidden flex flex-col items-center gap-3 p-6 rounded-2xl bg-amber-500 hover:bg-amber-400 dark:bg-gradient-to-br dark:from-amber-500/20 dark:via-slate-900 dark:to-slate-950 border border-amber-600 dark:border-amber-500/40 hover:dark:border-amber-400 transition-all disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer shadow-lg shadow-amber-500/20"
+            className="group relative overflow-hidden flex flex-col items-center gap-3 p-6 rounded-2xl bg-hl hover:bg-hl-strong text-hl-contrast transition-all disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer shadow-xs"
           >
-            <div className="w-12 h-12 rounded-2xl bg-white/20 dark:bg-amber-500/20 border border-white/30 dark:border-amber-500/30 flex items-center justify-center group-hover:scale-110 transition-transform">
+            <div className="w-12 h-12 rounded-xl bg-white/15 border border-white/25 flex items-center justify-center group-hover:scale-105 transition-transform">
               {exporting === 'docx' ? (
-                <Loader2 className="w-6 h-6 text-slate-950 dark:text-amber-400 animate-spin" />
+                <Loader2 className="w-6 h-6 text-white animate-spin" />
               ) : (
-                <FileText className="w-6 h-6 text-slate-950 dark:text-amber-400" />
+                <FileText className="w-6 h-6 text-white" />
               )}
             </div>
             <div className="text-center">
-              <p className="text-sm font-black text-slate-950 dark:text-white">Générer le Mémoire Word (.docx)</p>
-              <p className="text-xs text-slate-800 dark:text-slate-400 mt-0.5">Document entièrement éditable avec styles officiels</p>
+              <p className="text-sm font-bold text-white">{t('projects.export.docx_title')}</p>
+              <p className="text-xs text-white/80 mt-0.5">{t('projects.export.docx_desc')}</p>
             </div>
             {exporting === 'docx' && (
-              <p className="text-xs text-slate-950 dark:text-amber-400 flex items-center gap-1.5 font-bold">
-                <Clock className="w-3.5 h-3.5 animate-spin" /> Compilation docxtpl en cours (≈5-12 sec)…
+              <p className="text-xs text-white flex items-center gap-1.5 font-bold">
+                <Clock className="w-3.5 h-3.5 animate-spin" /> {t('projects.export.docx_loading')}
               </p>
             )}
           </button>
@@ -556,139 +565,159 @@ export default function ExportPage() {
             type="button"
             onClick={() => handleExport('pdf')}
             disabled={!!exporting}
-            className="group relative overflow-hidden flex flex-col items-center gap-3 p-6 rounded-2xl bg-slate-900 hover:bg-slate-800 dark:bg-gradient-to-br dark:from-slate-800/60 dark:via-slate-900 dark:to-slate-950 border border-slate-700 hover:border-slate-500 transition-all disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer shadow-lg"
+            className="group relative overflow-hidden flex flex-col items-center gap-3 p-6 rounded-2xl bg-card hover:bg-sunken text-foreground border border-line transition-all disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer shadow-xs"
           >
-            <div className="w-12 h-12 rounded-2xl bg-slate-800 border border-slate-700 flex items-center justify-center group-hover:scale-110 transition-transform">
+            <div className="w-12 h-12 rounded-xl bg-slate-100 dark:bg-card border border-line flex items-center justify-center group-hover:scale-105 transition-transform">
               {exporting === 'pdf' ? (
-                <Loader2 className="w-6 h-6 text-slate-300 animate-spin" />
+                <Loader2 className="w-6 h-6 text-hl animate-spin" />
               ) : (
-                <FileDown className="w-6 h-6 text-slate-300" />
+                <FileDown className="w-6 h-6 text-hl" />
               )}
             </div>
             <div className="text-center">
-              <p className="text-sm font-bold text-white">Générer le Mémoire PDF Officiel</p>
-              <p className="text-xs text-slate-400 mt-0.5">Rendu vectoriel LibreOffice — Prêt pour dépôt</p>
+              <p className="text-sm font-bold text-foreground">{t('projects.export.pdf_title')}</p>
+              <p className="text-xs text-muted-foreground mt-0.5">{t('projects.export.pdf_desc')}</p>
             </div>
             {exporting === 'pdf' && (
-              <p className="text-xs text-slate-300 flex items-center gap-1.5 font-medium">
-                <Clock className="w-3.5 h-3.5 animate-spin" /> Rendu headless PDF en cours (≈15-25 sec)…
+              <p className="text-xs text-muted-foreground flex items-center gap-1.5 font-medium">
+                <Clock className="w-3.5 h-3.5 animate-spin" /> {t('projects.export.pdf_loading')}
               </p>
             )}
           </button>
         </div>
 
-        {/* Error Notification */}
-        {error && (
-          <div className="flex items-start gap-3 p-4 rounded-2xl bg-rose-500/10 border border-rose-500/30 text-rose-700 dark:text-rose-300 text-xs">
-            <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-rose-500" />
-            <div>
-              <p className="font-bold">Erreur de compilation</p>
-              <p className="text-[11px] text-rose-600 dark:text-rose-200 mt-0.5">{error}</p>
-            </div>
-          </div>
-        )}
-
-        {/* Success Result Download Card */}
-        {result && (
-          <div className="p-6 rounded-2xl bg-emerald-50 dark:bg-gradient-to-r dark:from-emerald-950/40 dark:via-slate-900 dark:to-slate-950 border border-emerald-300 dark:border-emerald-500/40 space-y-4 animate-in fade-in">
-            <div className="flex items-center gap-2 text-emerald-800 dark:text-emerald-300">
-              <CheckCircle2 className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />
-              <p className="text-sm font-bold">Votre livrable a été compilé avec succès !</p>
-            </div>
-
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs">
-              {result.filename && (
-                <div className="p-3 rounded-xl bg-white dark:bg-slate-900/90 border border-slate-200 dark:border-slate-800">
-                  <p className="text-slate-500 dark:text-slate-400">Nom du fichier</p>
-                  <p className="text-slate-900 dark:text-slate-200 font-semibold mt-0.5 truncate font-mono text-[11px]">{result.filename}</p>
-                </div>
-              )}
-              {result.file_size_kb && (
-                <div className="p-3 rounded-xl bg-white dark:bg-slate-900/90 border border-slate-200 dark:border-slate-800">
-                  <p className="text-slate-500 dark:text-slate-400">Taille du livrable</p>
-                  <p className="text-slate-900 dark:text-slate-200 font-semibold font-mono mt-0.5">{result.file_size_kb} Ko</p>
-                </div>
-              )}
-              {result.sections_count && (
-                <div className="p-3 rounded-xl bg-white dark:bg-slate-900/90 border border-slate-200 dark:border-slate-800">
-                  <p className="text-slate-500 dark:text-slate-400">Sections intégrées</p>
-                  <p className="text-slate-900 dark:text-slate-200 font-semibold font-mono mt-0.5">{result.sections_count} / 5</p>
-                </div>
-              )}
-            </div>
-
-            <div className="flex flex-wrap gap-3 pt-1">
-              {result.docx_url && (
-                <a
-                  href={result.docx_url}
-                  download
-                  className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-black transition-all shadow-lg shadow-amber-500/20"
-                >
-                  <Download className="w-4 h-4" />
-                  <span>Télécharger le Word (.docx)</span>
-                </a>
-              )}
-              {result.pdf_url && (
-                <a
-                  href={result.pdf_url}
-                  download
-                  className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold transition-all border border-slate-700"
-                >
-                  <Download className="w-4 h-4" />
-                  <span>Télécharger le PDF</span>
-                </a>
-              )}
-            </div>
-          </div>
-        )}
+        <p className="text-[11px] text-muted-foreground flex items-center gap-1.5">
+          <Globe className="w-3.5 h-3.5 shrink-0" />
+          {t('projects.export.pointer_to_mea')}
+        </p>
       </div>
 
+      {/* Error Notification */}
+      {error && (
+        <div className="flex items-start gap-3 p-4 rounded-xl bg-danger/10 border border-danger/30 text-danger text-xs">
+          <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-danger" />
+          <div>
+            <p className="font-bold">{t('projects.export.error_title')}</p>
+            <p className="text-[11px] text-danger mt-0.5">{error}</p>
+          </div>
+        </div>
+      )}
+
+      {/* Success / Progress / Failure Result Card (correctif tâche #66, 02/09 : les champs
+          lus ici ne correspondaient auparavant à rien de ce que le backend renvoie réellement,
+          voir api.ts::exportProject) */}
+      {result && (
+        <div className={`p-6 rounded-2xl border space-y-4 animate-in fade-in ${
+          result.status === 'failed'
+            ? 'bg-danger/10 border-danger/30'
+            : 'bg-positive/10 border-positive/30'
+        }`}>
+          {result.status === 'completed' ? (
+            <div className="flex items-center gap-2 text-positive font-heading">
+              <CheckCircle2 className="w-5 h-5 text-positive" />
+              <p className="text-sm font-bold">{t('projects.export.result_success')}</p>
+            </div>
+          ) : result.status === 'failed' ? (
+            <div className="flex items-center gap-2 text-danger font-heading">
+              <AlertTriangle className="w-5 h-5 text-danger" />
+              <p className="text-sm font-bold">{t('projects.export.result_failed')}</p>
+            </div>
+          ) : (
+            <div className="flex items-center gap-2 text-positive font-heading">
+              <Loader2 className="w-5 h-5 text-positive animate-spin" />
+              <p className="text-sm font-bold">{t('projects.export.result_generating')}</p>
+            </div>
+          )}
+
+          {result.status === 'completed' && (
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs">
+              <div className="p-3 rounded-xl bg-card border border-line">
+                <p className="text-muted-foreground">{t('projects.export.result_format')}</p>
+                <p className="text-slate-900 dark:text-zinc-200 font-semibold mt-0.5 font-mono text-[11px] uppercase">
+                  {result.format === 'pdf' && result.s3_pdf_url ? 'PDF' : 'DOCX'}
+                </p>
+              </div>
+              {result.file_size_bytes > 0 && (
+                <div className="p-3 rounded-xl bg-card border border-line">
+                  <p className="text-muted-foreground">{t('projects.export.result_size')}</p>
+                  <p className="text-slate-900 dark:text-zinc-200 font-semibold font-mono mt-0.5">{Math.round(result.file_size_bytes / 1024)} {t('projects.export.result_size_unit')}</p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {result.status === 'completed' && result.format === 'pdf' && !result.s3_pdf_url && (
+            <p className="text-[11px] text-corten">{result.error_message || t('projects.export.pdf_fallback_note')}</p>
+          )}
+          {result.status === 'failed' && result.error_message && (
+            <p className="text-[11px] text-danger">{result.error_message}</p>
+          )}
+
+          {result.status === 'completed' && (
+            <div className="flex flex-wrap gap-3 pt-1">
+              <button
+                type="button"
+                onClick={handleDownloadResult}
+                disabled={downloadingResult}
+                className="btn-primary cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                {downloadingResult ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+                <span>{result.format === 'pdf' && result.s3_pdf_url ? t('projects.export.download_pdf') : t('projects.export.download_docx')}</span>
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* SECTION: MEA & INTERNATIONAL REGIONAL EXPORT */}
-      <div className="rounded-3xl bg-white dark:bg-[#0F1422] border border-slate-200 dark:border-[#1E293F] p-6 sm:p-8 space-y-6 shadow-sm dark:shadow-2xl transition-colors">
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 dark:border-slate-800 pb-4">
+      <div className="card-modern p-6 sm:p-8 space-y-5">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200/60 dark:border-zinc-800/40 pb-4">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-2xl bg-sky-500/10 border border-sky-500/30 text-sky-600 dark:text-sky-400 flex items-center justify-center font-bold">
+            <div className="w-10 h-10 rounded-xl bg-hl/10 border border-hl/20 text-hl flex items-center justify-center font-bold">
               <Globe className="w-5 h-5" />
             </div>
             <div>
-              <h2 className="text-base font-bold text-slate-900 dark:text-white">Export Régional International (Moyen-Orient & Golfe)</h2>
-              <p className="text-xs text-slate-500 dark:text-slate-400">
-                Générez des mémoires adaptés aux juridictions et normes du CCG (Arabie Saoudite, Qatar, EAU, Liban) avec support natif de l'arabe RTL.
+              <h2 className="text-[15px] font-bold text-foreground font-heading">{t('projects.export.mea_title')}</h2>
+              <p className="text-[12px] text-muted-foreground">
+                {t('projects.export.mea_subtitle')}
               </p>
             </div>
           </div>
-          <span className="text-[11px] font-mono text-sky-600 dark:text-sky-400 px-3 py-1 rounded-full bg-sky-500/10 border border-sky-500/20">
-            OpenXML w:bidi & w:rtl
+          <span className="badge-pill text-[10px] bg-hl/10 text-hl border border-hl/20">
+            {t('projects.export.mea_rtl_badge')}
           </span>
         </div>
+
+        <p className="text-[12px] text-muted-foreground">
+          {t('projects.export.mea_replaces_note')}
+        </p>
 
         <form onSubmit={handleMeaExport} className="space-y-4">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
-              <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1.5">Juridiction & Normes Régionales</label>
+              <label className="block text-[12px] font-semibold uppercase tracking-wider text-muted-foreground mb-1.5">{t('projects.export.mea_country_label')}</label>
               <select
                 value={meaCountry}
                 onChange={(e: any) => setMeaCountry(e.target.value)}
-                className="w-full px-4 py-2.5 rounded-xl bg-slate-50 dark:bg-slate-950/80 border border-slate-200 dark:border-slate-800 text-slate-900 dark:text-white text-xs focus:border-amber-500 focus:outline-none"
+                className="input-field cursor-pointer"
               >
-                <option value="SA">🇸🇦 Arabie Saoudite (SBC / SASO / Vision 2030)</option>
-                <option value="QA">🇶🇦 Qatar (QCS 2018 / Ashghal)</option>
-                <option value="AE">🇦🇪 Émirats Arabes Unis (Abu Dhabi / Dubai Code)</option>
-                <option value="LB">🇱🇧 Liban (CDR / Libnor)</option>
-                <option value="FR">🇫🇷 France (CCAG Travaux / DTU / Eurocodes)</option>
+                <option value="SA">{t('projects.export.mea_country_sa')}</option>
+                <option value="QA">{t('projects.export.mea_country_qa')}</option>
+                <option value="AE">{t('projects.export.mea_country_ae')}</option>
+                <option value="LB">{t('projects.export.mea_country_lb')}</option>
               </select>
             </div>
 
             <div>
-              <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1.5">Langue du Mémoire Technique</label>
+              <label className="block text-[12px] font-semibold uppercase tracking-wider text-muted-foreground mb-1.5">{t('projects.export.mea_lang_label')}</label>
               <select
                 value={meaLanguage}
                 onChange={(e: any) => setMeaLanguage(e.target.value)}
-                className="w-full px-4 py-2.5 rounded-xl bg-slate-50 dark:bg-slate-950/80 border border-slate-200 dark:border-slate-800 text-slate-900 dark:text-white text-xs focus:border-amber-500 focus:outline-none"
+                className="input-field cursor-pointer"
               >
-                <option value="fr">🇫🇷 Français (Format standard européen)</option>
-                <option value="en">🇬🇧 Anglais (FIDIC International standard)</option>
-                <option value="ar">🇸🇦 Arabe (العربية — Format bidi RTL natif)</option>
+                <option value="fr">{t('projects.export.mea_lang_fr')}</option>
+                <option value="en">{t('projects.export.mea_lang_en')}</option>
+                <option value="ar">{t('projects.export.mea_lang_ar')}</option>
               </select>
             </div>
           </div>
@@ -697,35 +726,24 @@ export default function ExportPage() {
             <button
               type="submit"
               disabled={exportingMea}
-              className="flex items-center gap-2 px-6 py-3 rounded-xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-bold transition-all shadow-lg shadow-sky-900/30 disabled:opacity-50 cursor-pointer"
+              className="btn-primary"
             >
               {exportingMea ? <Loader2 className="w-4 h-4 animate-spin" /> : <Globe className="w-4 h-4" />}
-              <span>Générer le Dossier International</span>
+              <span>{t('projects.export.mea_submit')}</span>
             </button>
           </div>
         </form>
 
         {meaError && (
-          <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-600 dark:text-rose-300 text-xs">
+          <div className="p-3.5 rounded-lg bg-danger/8 border border-danger/20 text-danger text-[12px]">
             {meaError}
           </div>
         )}
 
         {meaResult && (
-          <div className="p-4 rounded-xl bg-emerald-50 dark:bg-emerald-500/10 border border-emerald-300 dark:border-emerald-500/30 text-emerald-800 dark:text-emerald-300 text-xs flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <CheckCircle2 className="w-4 h-4 text-emerald-500" />
-              <span>Dossier {meaResult.filename} généré avec succès.</span>
-            </div>
-            {meaResult.docx_url && (
-              <a
-                href={meaResult.docx_url}
-                download
-                className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold"
-              >
-                Télécharger
-              </a>
-            )}
+          <div className="p-4 rounded-xl bg-positive/10 border border-positive/30 text-positive text-xs flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 text-positive shrink-0" />
+            <span>{t('projects.export.mea_result_success', { filename: meaResult.filename })}</span>
           </div>
         )}
       </div>

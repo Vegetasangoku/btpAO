@@ -29,9 +29,34 @@ export async function middleware(request: NextRequest) {
     }
   );
 
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  // 30/08 (bug signalé : clic sur "Infrastructure" en /admin -> renvoyé vers /login) :
+  // `supabase.auth.getUser()` fait un aller-retour réseau réel vers le serveur Auth Supabase à
+  // CHAQUE navigation protégée (contrairement à getSession(), getUser() revalide le JWT côté
+  // serveur au lieu de faire confiance au cookie local -- c'est volontaire et recommandé pour du
+  // code middleware). Ce projet a déjà démontré des latences/erreurs réseau réelles vers son
+  // instance Supabase (cf. /admin/infrastructure : SELECT 1 jusqu'à ~1900ms mesurés). Un unique
+  // hoquet réseau transitoire sur CET appel précis suffisait auparavant à traiter à tort un
+  // utilisateur pourtant authentifié comme non connecté, et donc à le rediriger vers /login. Un
+  // seul retry immédiat absorbe la quasi-totalité de ces échecs transitoires, sans coût
+  // perceptible sur le chemin normal (déjà authentifié : aucun retry déclenché).
+  async function resolveUser() {
+    try {
+      const { data, error } = await supabase.auth.getUser();
+      if (data?.user) return data.user;
+      if (!error) return null;
+    } catch {
+      // Échec réseau dès la 1ère tentative : on retente une fois ci-dessous plutôt que
+      // de conclure immédiatement à une session absente.
+    }
+    try {
+      const { data } = await supabase.auth.getUser();
+      return data?.user ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  const user = await resolveUser();
 
   let effectiveUser = user;
 

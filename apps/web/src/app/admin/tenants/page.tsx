@@ -19,37 +19,48 @@ import {
 } from 'lucide-react';
 import { api } from '@/lib/api';
 import { Tenant } from '@/lib/types';
+import { useTranslation } from '@/components/i18n-provider';
+import { DismissibleNotice } from '@/components/ui/dismissible-notice';
 
 export default function AdminTenantsListPage() {
+  const { t } = useTranslation();
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [planFilter, setPlanFilter] = useState<string>('all');
 
-  useEffect(() => {
-    async function loadTenants() {
-      setLoading(true);
-      try {
-        const data = await api.getTenants();
-        setTenants(data || []);
-      } catch (err) {
-        console.error('Erreur chargement tenants:', err);
-      } finally {
-        setLoading(false);
-      }
+  async function loadTenants() {
+    setLoading(true);
+    setLoadError(null);
+    try {
+      const data = await api.getTenants();
+      setTenants(data || []);
+    } catch (err: any) {
+      // Ne jamais afficher silencieusement "aucune entreprise" quand c'est en
+      // réalité l'appel réseau qui a échoué (base de données lente/injoignable) :
+      // on distingue explicitement un vrai vide d'un échec de chargement.
+      console.error('Erreur chargement tenants:', err);
+      setTenants([]);
+      setLoadError(String(err?.message || err));
+    } finally {
+      setLoading(false);
     }
+  }
+
+  useEffect(() => {
     loadTenants();
   }, []);
 
   async function handleQuickDelete(e: React.MouseEvent, tenant: Tenant) {
     e.preventDefault();
     e.stopPropagation();
-    if (!confirm(`Supprimer définitivement l'entreprise "${tenant.name}" et toutes ses données (RGPD) ?`)) return;
+    if (!confirm(t('admin.tenants_list.confirm_delete', { name: tenant.name }))) return;
     try {
       await api.deleteTenant(tenant.id);
       setTenants((prev) => prev.filter((t) => t.id !== tenant.id));
     } catch (err: any) {
-      alert('Erreur lors de la suppression : ' + (err?.message || err));
+      alert(t('admin.tenants_list.delete_error', { error: String(err?.message || err) }));
     }
   }
 
@@ -65,166 +76,198 @@ export default function AdminTenantsListPage() {
   const totalDCE = tenants.reduce((acc, t) => acc + (t.used_this_month || 0), 0);
 
   return (
-    <div className="space-y-8 pb-20 max-w-6xl mx-auto">
-      {/* Top Header */}
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <div className="flex items-center gap-2 mb-1.5">
-            <span className="text-[10px] font-extrabold uppercase tracking-widest px-2.5 py-0.5 rounded-full bg-rose-500/20 text-rose-300 border border-rose-500/30">
-              Super Administration • Multi-Tenants
-            </span>
-          </div>
-          <h1 className="text-2xl sm:text-3xl font-black text-white tracking-tight">
-            Entreprises Clientes & Espaces Tenants
+    <div className="space-y-6 pb-16">
+      {/* ─── En-tête ─────────────────────────────────────────────────────── */}
+      <div className="flex flex-wrap items-end justify-between gap-4">
+        <div className="min-w-0">
+          <p className="eyebrow-mono">{t('admin.tenants_list.badge')}</p>
+          <h1 className="mt-2 text-[22px] sm:text-[26px] font-bold text-foreground font-heading tracking-tight leading-tight">
+            {t('admin.tenants_list.heading')}
           </h1>
-          <p className="text-xs text-slate-400 mt-0.5">
-            Supervisez les 69 comptes d'entreprises BTP, configurez les modèles IA dédiés et gérez les quotas.
+          <p className="mt-1 text-[12.5px] text-[hsl(var(--muted-foreground))]">
+            {t('admin.tenants_list.subtitle', { count: String(tenants.length) })}
           </p>
         </div>
 
-        <Link
-          href="/admin"
-          className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-rose-600 to-rose-500 hover:from-rose-500 hover:to-rose-400 text-white text-xs font-black shadow-lg shadow-rose-950/40 transition-all cursor-pointer"
-        >
-          <Plus className="w-4 h-4" />
-          <span>Créer une Entreprise</span>
+        <Link href="/admin?create=1" className="btn-primary shrink-0">
+          <Plus className="w-3.5 h-3.5" strokeWidth={1.5} />
+          <span>{t('admin.tenants_list.btn_create')}</span>
         </Link>
       </div>
 
-      {/* KPI Stats Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-        <div className="p-5 rounded-2xl bg-[#0F1422] border border-[#1E293F] space-y-1 shadow-lg">
-          <div className="flex items-center justify-between text-slate-400 text-xs">
-            <span>Comptes Entreprises</span>
-            <Building2 className="w-4 h-4 text-rose-400" />
+      {/* ─── Chiffres de tête ────────────────────────────────────────────── */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 border-y border-[hsl(var(--border))]">
+        {[
+          {
+            label: t('admin.tenants_list.kpi_accounts'),
+            value: String(tenants.length),
+            hint: t('admin.tenants_list.kpi_accounts_note'),
+          },
+          {
+            label: t('admin.tenants_list.kpi_volume'),
+            value: t('admin.tenants_list.kpi_volume_value', { count: String(totalDCE) }),
+            hint: t('admin.tenants_list.kpi_volume_note'),
+          },
+          {
+            label: t('admin.tenants_list.kpi_routing'),
+            value: t('admin.tenants_list.kpi_routing_value'),
+            hint: t('admin.tenants_list.kpi_routing_note'),
+          },
+        ].map((stat, i) => (
+          <div
+            key={stat.label}
+            className={`py-4 px-4 ${i > 0 ? 'sm:border-s border-[hsl(var(--border))]' : ''} ${i === 0 ? 'sm:ps-0' : ''}`}
+          >
+            <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-[hsl(var(--muted-foreground))]">
+              {stat.label}
+            </p>
+            <p className="mt-1.5 font-mono text-[22px] leading-none tabular-nums text-foreground truncate">
+              {stat.value}
+            </p>
+            <p className="mt-1.5 text-[11.5px] text-[hsl(var(--muted-foreground))]">{stat.hint}</p>
           </div>
-          <p className="text-2xl font-black text-white font-mono">{tenants.length}</p>
-          <p className="text-[11px] text-emerald-400 font-semibold">100% étanches sous Postgres RLS</p>
-        </div>
-
-        <div className="p-5 rounded-2xl bg-[#0F1422] border border-[#1E293F] space-y-1 shadow-lg">
-          <div className="flex items-center justify-between text-slate-400 text-xs">
-            <span>Volume DCE Consommé</span>
-            <Activity className="w-4 h-4 text-amber-400" />
-          </div>
-          <p className="text-2xl font-black text-white font-mono">{totalDCE} DCE</p>
-          <p className="text-[11px] text-slate-400">Total ce mois-ci sur la plateforme</p>
-        </div>
-
-        <div className="p-5 rounded-2xl bg-[#0F1422] border border-[#1E293F] space-y-1 shadow-lg">
-          <div className="flex items-center justify-between text-slate-400 text-xs">
-            <span>Routage IA Actif</span>
-            <Sparkles className="w-4 h-4 text-sky-400" />
-          </div>
-          <p className="text-sm font-bold text-white mt-1">Tier Équilibré (Claude Sonnet 5)</p>
-          <p className="text-[11px] text-slate-400">Hébergement certifié et RGPD</p>
-        </div>
+        ))}
       </div>
 
-      {/* Search & Filter Bar */}
-      <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 p-3 rounded-2xl bg-[#0F1422] border border-[#1E293F]">
-        <div className="relative flex-1">
-          <Search className="w-4 h-4 text-slate-500 absolute left-3.5 top-1/2 -translate-y-1/2" />
-          <input
-            type="text"
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            placeholder="Rechercher une entreprise par nom, SIRET ou e-mail..."
-            className="w-full pl-10 pr-4 py-2 rounded-xl bg-slate-950/80 border border-slate-800 text-xs text-white placeholder:text-slate-500 focus:border-rose-500 focus:outline-none"
-          />
-        </div>
+      {/* ─── Filtres ─────────────────────────────────────────────────────── */}
+      <div className="flex flex-col sm:flex-row sm:items-end gap-4">
+        <label className="flex-1 min-w-0">
+          <span className="block font-mono text-[10px] uppercase tracking-[0.14em] text-[hsl(var(--muted-foreground))] mb-1.5">
+            {t('admin.tenants_list.search_placeholder')}
+          </span>
+          <div className="relative">
+            <Search
+              className="w-3.5 h-3.5 text-[hsl(var(--muted-foreground))] absolute start-0 top-1/2 -translate-y-1/2"
+              strokeWidth={1.5}
+            />
+            <input
+              type="search"
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              className="w-full ps-6 pe-2 py-1.5 bg-transparent border-b border-[hsl(var(--input))] focus:border-hl text-[13px] text-foreground outline-none transition-colors duration-150"
+            />
+          </div>
+        </label>
 
-        <div className="flex items-center gap-2">
-          <span className="text-[11px] text-slate-400 whitespace-nowrap pl-1 font-bold">Plan :</span>
+        <label className="sm:w-56">
+          <span className="block font-mono text-[10px] uppercase tracking-[0.14em] text-[hsl(var(--muted-foreground))] mb-1.5">
+            {t('admin.tenants_list.plan_label')}
+          </span>
           <select
             value={planFilter}
             onChange={(e) => setPlanFilter(e.target.value)}
-            className="px-3 py-2 rounded-xl bg-slate-950/80 border border-slate-800 text-xs text-white focus:border-rose-500 focus:outline-none"
+            className="w-full py-1.5 bg-transparent border-b border-[hsl(var(--input))] focus:border-hl text-[13px] text-foreground outline-none cursor-pointer transition-colors duration-150"
           >
-            <option value="all">Tous les plans ({tenants.length})</option>
-            <option value="enterprise">Enterprise</option>
-            <option value="pro">Pro</option>
-            <option value="starter">Starter</option>
+            <option value="all">{t('admin.tenants_list.plan_all', { count: String(tenants.length) })}</option>
+            <option value="enterprise">Grand compte</option>
+            <option value="pro">Entreprise générale</option>
+            <option value="starter">PME &amp; artisan</option>
           </select>
-        </div>
+        </label>
       </div>
 
-      {/* Tenants Cards Grid */}
+      {loadError && (
+        <div className="space-y-2">
+          <DismissibleNotice
+            variant="error"
+            message={t('admin.tenants_list.load_error_title')}
+            detail={loadError}
+            onDismiss={() => setLoadError(null)}
+          />
+          <button
+            type="button"
+            onClick={loadTenants}
+            className="text-[12.5px] font-semibold text-hl hover:underline cursor-pointer"
+          >
+            {t('admin.tenants_list.load_error_retry')}
+          </button>
+        </div>
+      )}
+
+      {/* ─── Liste ───────────────────────────────────────────────────────────
+          Un tableau, pas une pile de cartes : on gère des dizaines de comptes et la
+          question posée devant cet écran est comparative — qui est sur quel forfait,
+          qui n'a pas de SIRET, qui vient d'arriver. */}
       {loading ? (
-        <div className="p-20 text-center space-y-3">
-          <Loader2 className="w-8 h-8 text-rose-500 animate-spin mx-auto" />
-          <p className="text-xs text-slate-400">Chargement de la liste des entreprises...</p>
+        <div className="py-16 flex items-center justify-center gap-2 text-[12.5px] text-[hsl(var(--muted-foreground))]">
+          <Loader2 className="w-4 h-4 animate-spin" strokeWidth={1.5} />
+          <span>{t('admin.tenants_list.loading')}</span>
         </div>
       ) : filteredTenants.length === 0 ? (
-        <div className="p-16 rounded-3xl bg-[#0F1422]/60 border border-dashed border-[#1E293F] text-center space-y-4">
-          <Building2 className="w-12 h-12 text-slate-600 mx-auto" />
-          <div className="space-y-1">
-            <h3 className="text-sm font-bold text-white">Aucune entreprise trouvée</h3>
-            <p className="text-xs text-slate-500">Modifiez vos critères de recherche ou ajoutez une nouvelle entreprise.</p>
-          </div>
+        <div className="border border-dashed border-[hsl(var(--hairline))] rounded-[5px] px-6 py-12 text-center">
+          <p className="text-[13px] font-semibold text-foreground">{t('admin.tenants_list.empty_title')}</p>
+          <p className="mt-1 text-[12px] text-[hsl(var(--muted-foreground))] max-w-md mx-auto leading-relaxed">
+            {t('admin.tenants_list.empty_body')}
+          </p>
+          <Link href="/admin?create=1" className="mt-4 inline-block text-[12.5px] text-hl hover:underline">
+            {t('admin.tenants_list.btn_create')}
+          </Link>
         </div>
       ) : (
-        <div className="grid grid-cols-1 gap-3">
-          {filteredTenants.map((t) => (
-            <div
-              key={t.id}
-              className="p-5 rounded-2xl bg-[#0F1422] border border-[#1E293F] hover:border-rose-500/50 flex items-center justify-between transition-all group shadow-md"
-            >
-              <Link
-                href={`/admin/tenants/${t.id}`}
-                className="flex items-center gap-4 flex-1 min-w-0"
-              >
-                <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-slate-800 to-slate-700 text-rose-300 font-black text-sm flex items-center justify-center border border-slate-700 group-hover:scale-105 transition-transform shrink-0 shadow-inner">
-                  {t.name.substring(0, 2).toUpperCase()}
-                </div>
-                <div className="truncate space-y-0.5">
-                  <div className="flex items-center gap-2">
-                    <h3 className="text-sm font-bold text-white group-hover:text-rose-300 transition-colors truncate">
-                      {t.name}
-                    </h3>
-                    <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-slate-800 text-slate-400 border border-slate-700">
-                      {t.country_code || 'FR'}
+        <div className="overflow-x-auto">
+          <table className="data-table min-w-[860px]">
+            <thead>
+              <tr>
+                <th>{t('admin.tenants_list.col_company')}</th>
+                <th>{t('admin.tenants_list.col_country')}</th>
+                <th>{t('admin.tenants_list.col_plan')}</th>
+                <th>{t('admin.tenants_list.col_siret')}</th>
+                <th>{t('admin.tenants_list.col_created')}</th>
+                <th aria-label={t('admin.tenants_list.col_actions')} />
+              </tr>
+            </thead>
+            <tbody>
+              {filteredTenants.map((tenant) => (
+                <tr key={tenant.id} className="group">
+                  <td>
+                    <Link
+                      href={`/admin/tenants/${tenant.id}`}
+                      className="font-medium text-foreground hover:text-hl dark:hover:text-hl transition-colors duration-150"
+                    >
+                      {tenant.name}
+                    </Link>
+                    <div className="font-mono text-[11px] text-[hsl(var(--muted-foreground))] truncate max-w-[280px]">
+                      {tenant.contact_email || t('admin.tenants_list.no_email')}
+                    </div>
+                  </td>
+                  <td className="font-mono text-[11.5px] text-[hsl(var(--muted-foreground))]">
+                    {tenant.country_code || 'FR'}
+                  </td>
+                  <td>
+                    <span className={tenant.plan === 'enterprise' ? 'badge-pill-primary' : 'badge-pill'}>
+                      {tenant.plan || 'starter'}
                     </span>
-                  </div>
-                  <p className="text-xs text-slate-400 font-mono truncate">
-                    SIRET : {t.siret || 'Non renseigné'} • {t.contact_email || 'Sans e-mail de contact'}
-                  </p>
-                </div>
-              </Link>
-
-              <div className="flex items-center gap-3 shrink-0 ml-4">
-                <span className={`text-[10px] font-bold px-3 py-1 rounded-full uppercase border ${
-                  t.plan === 'enterprise'
-                    ? 'bg-amber-500/10 text-amber-300 border-amber-500/30'
-                    : t.plan === 'pro'
-                    ? 'bg-sky-500/10 text-sky-300 border-sky-500/30'
-                    : 'bg-slate-800 text-slate-300 border-slate-700'
-                }`}>
-                  Plan {t.plan}
-                </span>
-
-                <span className="text-xs text-slate-400 font-mono hidden md:inline">
-                  {t.used_this_month || 0} / {t.monthly_limit || 15} DCE
-                </span>
-
-                <button
-                  type="button"
-                  onClick={(e) => handleQuickDelete(e, t)}
-                  title="Supprimer définitivement ce compte (RGPD)"
-                  className="p-2 rounded-xl text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 transition-colors cursor-pointer"
-                >
-                  <Trash2 className="w-4 h-4" />
-                </button>
-
-                <Link
-                  href={`/admin/tenants/${t.id}`}
-                  className="p-2 rounded-xl text-slate-600 group-hover:text-rose-400 group-hover:translate-x-0.5 transition-all"
-                >
-                  <ChevronRight className="w-5 h-5" />
-                </Link>
-              </div>
-            </div>
-          ))}
+                  </td>
+                  <td className="font-mono text-[11.5px] text-[hsl(var(--muted-foreground))]">
+                    {tenant.siret || t('admin.tenants_list.no_siret')}
+                  </td>
+                  <td className="font-mono text-[11.5px] tabular-nums text-[hsl(var(--muted-foreground))]">
+                    {tenant.created_at
+                      ? new Date(tenant.created_at).toLocaleDateString('fr-FR')
+                      : '—'}
+                  </td>
+                  <td className="text-end whitespace-nowrap">
+                    {/* Actions secondaires révélées au survol : le tableau reste lisible. */}
+                    <button
+                      type="button"
+                      onClick={(e) => handleQuickDelete(e, tenant)}
+                      title={t('admin.tenants_list.delete_title')}
+                      className="opacity-0 group-hover:opacity-100 focus:opacity-100 p-1.5 rounded-[4px] text-[hsl(var(--muted-foreground))] hover:text-danger dark:hover:text-danger transition-opacity duration-150 cursor-pointer"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
+                    </button>
+                    <Link
+                      href={`/admin/tenants/${tenant.id}`}
+                      className="ms-1 inline-flex p-1.5 rounded-[4px] text-[hsl(var(--muted-foreground))] hover:text-foreground transition-colors duration-150"
+                      aria-label={t('admin.tenants_list.col_actions')}
+                    >
+                      <ChevronRight className="w-4 h-4" strokeWidth={1.5} />
+                    </Link>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
     </div>

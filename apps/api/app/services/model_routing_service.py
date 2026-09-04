@@ -377,7 +377,20 @@ class ModelRoutingService:
             res = await db.execute(stmt)
             ps = res.scalar_one_or_none()
             settings_dict = (ps.settings if ps and ps.settings else {}) or {}
-            providers = settings_dict.get("custom_providers") or DEFAULT_CUSTOM_PROVIDERS
+            # 03/09 (nuit) : lisait auparavant le tableau brut "custom_providers" tel quel --
+            # un fournisseur intégré (anthropic/openai/mistral) dont la clé n'a jamais été
+            # collée dans l'UI admin, mais qui DISPOSE d'une vraie clé via variable
+            # d'environnement (cf. get_custom_providers ci-dessus, qui fait déjà ce repli pour
+            # l'affichage admin), avait donc "api_key": "" ici et n'était jamais retenu comme
+            # secours -- alors même que ce fournisseur fonctionne réellement (cf. /health).
+            # Cause concrète observée ce soir : Gemini (seul fournisseur avec une clé "officielle"
+            # en base) en 503 UNAVAILABLE (surcharge Google), et Anthropic -- qui a une vraie clé
+            # via ANTHROPIC_API_KEY -- jamais proposé en repli malgré sa disponibilité réelle. On
+            # réutilise donc le même calcul enrichi que get_custom_providers, clés en clair
+            # (mask_keys=False), pour qu'un fournisseur réellement disponible serve enfin de repli.
+            providers = await ModelRoutingService.get_custom_providers(db, mask_keys=False)
+            if not providers:
+                providers = settings_dict.get("custom_providers") or DEFAULT_CUSTOM_PROVIDERS
 
             def _usable(prov: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 if not prov.get("enabled", True):

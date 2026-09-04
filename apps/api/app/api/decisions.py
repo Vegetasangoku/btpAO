@@ -91,12 +91,14 @@ async def save_project_decisions(
         decision.form_data = form_dict
         decision.updated_at = now
     else:
+        # 29/08 (fin de journée) : `created_at` retiré -- cette colonne n'existe pas dans la
+        # vraie table (voir la note dans entities.py::ProjectDecision), passer ce kwarg lève
+        # une TypeError SQLAlchemy ("invalid keyword argument").
         decision = ProjectDecision(
             id=uuid.uuid4(),
             tenant_id=t_uuid,
             project_id=p_uuid,
             form_data=form_dict,
-            created_at=now,
             updated_at=now,
         )
         db.add(decision)

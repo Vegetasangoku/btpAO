@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
@@ -38,6 +38,14 @@ router = APIRouter(prefix="/company", tags=["Company Profile Bootstrap & Referen
 # autorisées par tenant et par mois. Première version simple et non liée à un plan spécifique --
 # facilement déplaçable vers subscription_plans si un palier par plan est nécessaire plus tard.
 COMPANY_CHAT_WEB_SEARCH_MONTHLY_CAP = 50
+
+# Garde-fou anti-derive de cout (03/09, demande client explicite) : nombre max de sites de
+# reference qu'un tenant peut configurer AU TOTAL (tous statuts confondus). Ces sites sont
+# desormais injectes comme source RAG a CHAQUE generation de section (voir tasks.py), donc
+# leur nombre borne directement un cout recurrent -- contrairement au quota ci-dessus qui ne
+# borne que l'assistant de chat ponctuel. Volontairement bas : un tenant type n'a besoin que
+# du site de l'acheteur public vise + 1-2 sources professionnelles de reference.
+MAX_TENANT_REFERENCE_URLS = 3
 
 
 class CompanyAskPayload(BaseModel):
@@ -237,6 +245,7 @@ async def validate_company_asset(
     # Recompute embedding if description was updated
     if payload.description is not None and embedding_service:
         try:
+            await embedding_service.sync_platform_key(db)
             asset.embedding = embedding_service.generate_embedding(
                 f"{asset.title}\n{asset.description}"[:2000]
             )
@@ -296,6 +305,8 @@ async def list_reference_urls(
             added_at=u.added_at,
             last_fetched_at=u.last_fetched_at,
             status=u.status,
+            content_title=u.content_title,
+            last_fetch_error=u.last_fetch_error,
         )
         for u in urls
     ]
@@ -321,6 +332,20 @@ async def add_reference_url(
             detail="URL invalide. Veuillez fournir une URL commençant par http:// ou https://.",
         )
 
+    count_stmt = select(func.count()).select_from(TenantReferenceUrl).where(
+        TenantReferenceUrl.tenant_id == t_uuid,
+    )
+    existing_count = (await db.execute(count_stmt)).scalar_one()
+    if existing_count >= MAX_TENANT_REFERENCE_URLS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Limite de {MAX_TENANT_REFERENCE_URLS} sites de référence atteinte. "
+                "Supprimez-en un avant d'en ajouter un nouveau (garde-fou de coût : chaque "
+                "site est relu à chaque génération de section)."
+            ),
+        )
+
     ref_url = TenantReferenceUrl(
         id=uuid.uuid4(),
         tenant_id=t_uuid,
@@ -330,6 +355,28 @@ async def add_reference_url(
         added_at=datetime.now(timezone.utc),
         status="active",
     )
+
+    # Recuperation immediate du contenu (03/09) : sans ce fetch, une URL fraichement ajoutee
+    # restait invisible de la generation jusqu'a un clic manuel sur "Actualiser" -- jamais
+    # fait en pratique. Echec de fetch = statut "broken" mais l'URL reste enregistree
+    # (l'utilisateur peut reessayer via "Actualiser" une fois le site accessible).
+    from app.services.company_bootstrap_service import company_bootstrap_service
+    try:
+        page_data, fetch_error = await company_bootstrap_service.fetch_page_content_verbose(url)
+    except Exception as fetch_exc:
+        logger.warning("[company_bootstrap.py] fetch_page_content_verbose failed on add for %s: %s", url, fetch_exc)
+        page_data, fetch_error = None, f"Erreur technique inattendue ({type(fetch_exc).__name__})."
+
+    if page_data:
+        ref_url.content_title = page_data.get("title")
+        ref_url.content_excerpt = page_data.get("text")
+        ref_url.last_fetched_at = datetime.now(timezone.utc)
+        ref_url.status = "active"
+        ref_url.last_fetch_error = None
+    else:
+        ref_url.status = "broken"
+        ref_url.last_fetch_error = fetch_error
+
     db.add(ref_url)
     await db.commit()
 
@@ -342,6 +389,8 @@ async def add_reference_url(
         added_at=ref_url.added_at,
         last_fetched_at=ref_url.last_fetched_at,
         status=ref_url.status,
+        content_title=ref_url.content_title,
+        last_fetch_error=ref_url.last_fetch_error,
     )
 
 
@@ -398,17 +447,26 @@ async def refresh_reference_url(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="URL de référence introuvable ou accès refusé")
 
     from app.services.company_bootstrap_service import company_bootstrap_service
-    page_data = await company_bootstrap_service.fetch_page_content(ref_url.url)
+    page_data, fetch_error = await company_bootstrap_service.fetch_page_content_verbose(ref_url.url)
 
     if page_data:
         ref_url.last_fetched_at = datetime.now(timezone.utc)
         ref_url.status = "active"
+        ref_url.content_title = page_data.get("title")
+        ref_url.content_excerpt = page_data.get("text")
+        ref_url.last_fetch_error = None
         await db.commit()
         return {"success": True, "message": f"URL '{ref_url.url}' actualisée avec succès.", "title": page_data["title"]}
     else:
         ref_url.status = "broken"
+        ref_url.last_fetch_error = fetch_error
         await db.commit()
-        return {"success": False, "message": f"Impossible de joindre l'URL '{ref_url.url}'.", "status": "broken"}
+        return {
+            "success": False,
+            "message": f"Impossible de joindre l'URL '{ref_url.url}'.",
+            "status": "broken",
+            "error": fetch_error,
+        }
 
 
 @router.post("/ask", response_model=CompanyAskResponse)
@@ -435,6 +493,10 @@ async def ask_company_assistant(
     if not clean_question:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="La question ne peut pas être vide.")
 
+    # 02/09 : plafond de cout LLM mensuel reel (protection de marge, parametrable par
+    # forfait/tenant) -- verifie avant toute recherche (corpus/web) et tout appel LLM.
+    await billing_service.check_and_enforce_cost_cap(current_user.tenant_id, db=db)
+
     source_mode = payload.source_mode.strip().lower()
     if source_mode not in ("corpus", "web", "corpus_web"):
         source_mode = "corpus"
@@ -449,6 +511,7 @@ async def ask_company_assistant(
 
     # 1. Corpus : recherche vectorielle sur les CompanyAsset validés et non-obsolètes du tenant.
     if want_corpus:
+        await embedding_service.sync_platform_key(db)
         query_vector = embedding_service.generate_embedding(clean_question[:2000]) if embedding_service else None
 
         asset_rows = []
@@ -615,6 +678,19 @@ async def ask_company_assistant(
 
             completion = await asyncio.to_thread(litellm.completion, **kwargs)
             answer = completion.choices[0].message.content or ""
+
+            # 02/09 : journal de consommation LLM -- absent jusqu'ici sur ce point d'appel.
+            _usage = getattr(completion, "usage", None)
+            await billing_service.log_llm_usage(
+                db=db,
+                tenant_id=t_uuid,
+                project_id=None,
+                provider_id=credentials.get("provider_id"),
+                model_string=selected_model_string,
+                prompt_tokens=getattr(_usage, "prompt_tokens", None) if _usage else None,
+                completion_tokens=getattr(_usage, "completion_tokens", None) if _usage else None,
+                total_tokens=getattr(_usage, "total_tokens", None) if _usage else None,
+            )
         except Exception as llm_exc:
             logger.warning("[company_bootstrap.py] LLM synthesis failed: %s", llm_exc)
             answer = (

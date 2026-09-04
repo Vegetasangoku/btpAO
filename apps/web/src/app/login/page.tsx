@@ -1,211 +1,148 @@
 'use client';
 
-import React, { useState, Suspense } from 'react';
-import { useRouter, useSearchParams } from 'next/navigation';
+import React, { Suspense, useState } from 'react';
 import Link from 'next/link';
-import {
-  HardHat,
-  Lock,
-  Mail,
-  ArrowRight,
-  ShieldCheck,
-  AlertCircle,
-  CheckCircle2,
-  Building,
-} from 'lucide-react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { supabase } from '@/lib/supabase/client';
+import { useTranslation } from '@/components/i18n-provider';
+import { AuthShell, Field, inputClass, primaryButtonClass } from '@/components/auth/auth-shell';
 
 function LoginForm() {
+  const { t } = useTranslation();
   const router = useRouter();
   const searchParams = useSearchParams();
-  const redirectUrl = searchParams.get('redirect') || '/dashboard';
+  const redirect = searchParams.get('redirect');
 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [magicLink, setMagicLink] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [successMsg, setSuccessMsg] = useState<string | null>(null);
-  const [useMagicLink, setUseMagicLink] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
-  async function handleLogin(e: React.FormEvent) {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
-    setErrorMsg(null);
-    setSuccessMsg(null);
-
+    setError(null);
+    setNotice(null);
     try {
-      if (useMagicLink) {
-        const { error } = await supabase.auth.signInWithOtp({
-          email,
-          options: {
-            emailRedirectTo: `${window.location.origin}/dashboard`,
-          },
+      if (magicLink) {
+        const { error: otpError } = await supabase.auth.signInWithOtp({
+          email: email.trim(),
+          options: { emailRedirectTo: `${window.location.origin}${redirect || '/dashboard'}` },
         });
-        if (error) throw error;
-        setSuccessMsg('Un lien de connexion sécurisé vous a été envoyé par e-mail.');
+        if (otpError) throw otpError;
+        setNotice(t('auth.login.success_magic_link'));
       } else {
-        const { data, error } = await supabase.auth.signInWithPassword({
-          email,
+        const { data, error: pwdError } = await supabase.auth.signInWithPassword({
+          email: email.trim(),
           password,
         });
-
-        if (error) throw error;
-
-        if (data.user) {
-          const role = (data.user.app_metadata?.role as string) || (data.user.user_metadata?.role as string);
-          if (role === 'super_admin' || data.user.email === 'charbelakl@gmail.com') {
-            router.push('/admin');
-          } else {
-            router.push(redirectUrl);
-          }
+        if (pwdError) throw pwdError;
+        if (data.session) {
+          router.push(redirect || '/dashboard');
         }
       }
     } catch (err: any) {
-      setErrorMsg(err.message || 'Erreur lors de la connexion. Veuillez vérifier vos identifiants.');
+      setError(err?.message || t('auth.login.error_generic'));
     } finally {
       setLoading(false);
     }
-  }
+  };
 
   return (
-    <div className="bg-slate-900/90 border border-slate-800 py-8 px-6 sm:px-10 rounded-3xl shadow-2xl space-y-6">
-      {errorMsg && (
-        <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs flex items-start gap-2">
-          <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-          <span>{errorMsg}</span>
-        </div>
-      )}
+    <AuthShell
+      eyebrow={t('home.brand.sector')}
+      title={t('home.login.title')}
+      intro={t('home.login.intro')}
+      footer={
+        <p className="text-[12.5px] text-muted-foreground">
+          {t('home.login.no_account')}{' '}
+          <Link href="/register" className="text-corten font-medium hover:underline">
+            {t('auth.login.create_account_link')}
+          </Link>
+        </p>
+      }
+    >
+      <form onSubmit={handleSubmit} className="space-y-5">
+        <Field label={t('auth.login.label_email')}>
+          <input
+            type="email"
+            required
+            autoComplete="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            placeholder={t('auth.login.placeholder_email')}
+            className={inputClass}
+          />
+        </Field>
 
-      {successMsg && (
-        <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs flex items-start gap-2">
-          <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
-          <span>{successMsg}</span>
-        </div>
-      )}
-
-      <form onSubmit={handleLogin} className="space-y-4">
-        <div>
-          <label className="block text-xs font-bold text-slate-300 mb-1.5">
-            Adresse e-mail professionnelle
-          </label>
-          <div className="relative">
-            <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-500">
-              <Mail className="w-4 h-4" />
-            </div>
-            <input
-              type="email"
-              required
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="contact@votre-entreprise.fr"
-              className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-slate-950/80 border border-slate-800 focus:border-sky-500 text-white text-xs placeholder:text-slate-600 focus:outline-none transition-colors"
-            />
-          </div>
-        </div>
-
-        {!useMagicLink && (
-          <div>
-            <div className="flex items-center justify-between mb-1.5">
-              <label className="block text-xs font-bold text-slate-300">
-                Mot de passe
-              </label>
-              <Link
-                href="/forgot-password"
-                className="text-[11px] font-medium text-sky-400 hover:text-sky-300 transition-colors"
-              >
-                Mot de passe oublié ?
+        {!magicLink && (
+          <Field
+            label={t('auth.login.label_password')}
+            hint={
+              <Link href="/forgot-password" className="text-[11px] text-muted-foreground hover:text-foreground transition-colors duration-100">
+                {t('auth.login.forgot_password_link')}
               </Link>
-            </div>
-
+            }
+          >
             <div className="relative">
-              <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-500">
-                <Lock className="w-4 h-4" />
-              </div>
               <input
-                type="password"
+                type={showPassword ? 'text' : 'password'}
                 required
+                autoComplete="current-password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                placeholder="••••••••••••"
-                className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-slate-950/80 border border-slate-800 focus:border-sky-500 text-white text-xs placeholder:text-slate-600 focus:outline-none transition-colors"
+                placeholder={t('auth.login.placeholder_password')}
+                className={inputClass + ' pe-16'}
               />
+              <button
+                type="button"
+                onClick={() => setShowPassword((v) => !v)}
+                className="absolute end-0 top-1.5 text-[10.5px] font-mono uppercase tracking-wider text-muted-foreground hover:text-foreground transition-colors duration-100"
+              >
+                {showPassword ? t('home.login.hide') : t('home.login.show')}
+              </button>
             </div>
-          </div>
+          </Field>
         )}
 
-        <button
-          type="submit"
-          disabled={loading}
-          className="w-full flex items-center justify-center gap-2 py-3 px-4 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs shadow-glow hover:shadow-sky-500/40 transition-all disabled:opacity-50"
-        >
-          {loading ? (
-            <span>Connexion en cours...</span>
-          ) : (
-            <>
-              <span>{useMagicLink ? 'Recevoir le lien par e-mail' : 'Se connecter'}</span>
-              <ArrowRight className="w-4 h-4" />
-            </>
-          )}
-        </button>
-      </form>
+        {error && (
+          <p className="text-[12.5px] text-danger border-s-2 border-danger ps-3 py-1">{error}</p>
+        )}
+        {notice && (
+          <p className="text-[12.5px] text-positive border-s-2 border-positive ps-3 py-1">{notice}</p>
+        )}
 
-      <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between text-xs text-slate-400">
+        <button type="submit" disabled={loading} className={primaryButtonClass}>
+          {loading
+            ? t('auth.login.connecting')
+            : magicLink
+              ? t('auth.login.btn_magic_link')
+              : t('auth.login.btn_login')}
+        </button>
+
         <button
           type="button"
-          onClick={() => setUseMagicLink(!useMagicLink)}
-          className="text-sky-400 hover:text-sky-300 transition-colors"
+          onClick={() => {
+            setMagicLink((v) => !v);
+            setError(null);
+            setNotice(null);
+          }}
+          className="w-full text-center text-[12px] text-muted-foreground hover:text-foreground transition-colors duration-100"
         >
-          {useMagicLink ? 'Connexion avec mot de passe' : 'Connexion par lien e-mail'}
+          {magicLink ? t('auth.login.toggle_to_password') : t('auth.login.toggle_to_magic')}
         </button>
-
-        <Link href="/register" className="text-slate-300 hover:text-white font-semibold">
-          Créer un compte
-        </Link>
-      </div>
-    </div>
+      </form>
+    </AuthShell>
   );
 }
 
 export default function LoginPage() {
   return (
-    <div className="min-h-screen bg-slate-950 flex flex-col justify-center py-12 sm:px-6 lg:px-8 relative overflow-hidden">
-      {/* Background Ambience */}
-      <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[800px] h-[400px] bg-sky-500/10 blur-[120px] pointer-events-none rounded-full" />
-      <div className="absolute bottom-0 right-1/4 w-[400px] h-[300px] bg-emerald-500/10 blur-[100px] pointer-events-none rounded-full" />
-
-      <div className="sm:mx-auto sm:w-full sm:max-w-md relative z-10 text-center space-y-3">
-        {/* Brand Icon */}
-        <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-gradient-to-tr from-sky-500 to-emerald-500 shadow-glow mb-1">
-          <HardHat className="w-8 h-8 text-white" />
-        </div>
-
-        {/* Top Badge */}
-        <div>
-          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-sky-500/10 border border-sky-500/30 text-sky-300 text-xs font-semibold">
-            <Building className="w-3.5 h-3.5" />
-            Plateforme Réponse aux Marchés Publics
-          </span>
-        </div>
-
-        <h1 className="text-2xl sm:text-3xl font-black text-white tracking-tight">
-          Connexion à btp<span className="text-sky-400">AO</span>
-        </h1>
-        <p className="text-xs sm:text-sm text-slate-400 max-w-sm mx-auto">
-          Analysez vos dossiers et générez vos mémoires techniques et plannings en quelques clics.
-        </p>
-      </div>
-
-      <div className="mt-8 sm:mx-auto sm:w-full sm:max-w-md relative z-10 px-4">
-        <Suspense fallback={<div className="p-8 text-center text-slate-500 text-xs">Chargement...</div>}>
-          <LoginForm />
-        </Suspense>
-
-        {/* Footer Security Badge */}
-        <div className="mt-8 text-center flex items-center justify-center gap-2 text-xs text-slate-500">
-          <ShieldCheck className="w-4 h-4 text-emerald-400" />
-          <span>Données chiffrées & hébergement sécurisé conforme RGPD</span>
-        </div>
-      </div>
-    </div>
+    <Suspense fallback={null}>
+      <LoginForm />
+    </Suspense>
   );
 }

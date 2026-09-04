@@ -3,6 +3,16 @@
 # Usage : ./dev-start.sh   (ou : npm run dev:all)
 # Peut être relancé sans risque : chaque étape détecte si elle tourne déjà.
 set -uo pipefail
+# 29/08 : active le contrôle de tâches ("set -m") pour que chaque commande lancée
+# en fond ("&") reçoive son PROPRE groupe de processus, distinct de celui du
+# terminal qui lance ce script. Sans ça (comportement par défaut d'un script
+# bash non-interactif), un Ctrl-C ou la fermeture du terminal envoie son signal
+# à TOUT le groupe de processus -- script + celery + uvicorn + web compris --
+# ce qui explique le symptôme observé en pratique (les 3 process tombant
+# ensemble, parfois sans même logger un arrêt propre). nohup + disown restent
+# en plus comme filets de sécurité supplémentaires (ignorent SIGHUP même si le
+# process restait par hasard dans le même groupe).
+set -m
 cd "$(dirname "$0")"
 
 LOG_DIR="logs"
@@ -52,9 +62,28 @@ if pgrep -f "celery -A app.core.celery_app worker" >/dev/null 2>&1; then
   echo "[celery] déjà lancé"
 else
   echo "[celery] démarrage du worker..."
-  (cd apps/api && nohup python3 -m celery -A app.core.celery_app worker --loglevel=info > "../../$LOG_DIR/celery.log" 2>&1 &)
+  # 29/08 (suite) : --pool=solo -- le pool prefork (fork() de sous-processus) provoque un
+  # SIGSEGV quasi immédiat sur macOS dès qu'une tâche touche une bibliothèque native
+  # (OCR / embeddings) dans le worker forké -- classe de bug connue "fork-unsafe" sur macOS.
+  # solo = un seul process, aucun fork -- élimine la cause -- suffisant en dev/local (débit non
+  # critique ici). À revisiter (ex: pool=threads, ou prefork sur Linux) si le débit devient un besoin réel.
+  (cd apps/api && OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES nohup python3 -m celery -A app.core.celery_app worker --loglevel=info --pool=solo < /dev/null > "../../$LOG_DIR/celery.log" 2>&1 & disown)
   sleep 1
   pgrep -f "celery -A app.core.celery_app worker" >/dev/null 2>&1 && echo "[celery] ✅ lancé — logs : $LOG_DIR/celery.log" || echo "[celery] ⚠️  n'a peut-être pas démarré — voir $LOG_DIR/celery.log"
+fi
+
+# ── 3 bis. Celery Beat (planificateur) ────────────────────────────────
+# Sans Beat, la synchronisation nocturne du catalogue de modèles LLM (4h00) et la purge
+# RGPD (3h00) ne s'exécutent jamais en local. L'API rattrape la synchronisation du
+# catalogue au démarrage si elle date de plus de 24 h (voir app/main.py), mais la purge
+# RGPD, elle, n'a pas de filet : Beat doit tourner.
+if pgrep -f "celery -A app.core.celery_app beat" >/dev/null 2>&1; then
+  echo "[beat]   déjà lancé"
+else
+  echo "[beat]   démarrage du planificateur..."
+  (cd apps/api && nohup python3 -m celery -A app.core.celery_app beat --loglevel=info < /dev/null > "../../$LOG_DIR/beat.log" 2>&1 & disown)
+  sleep 1
+  pgrep -f "celery -A app.core.celery_app beat" >/dev/null 2>&1 && echo "[beat]   ✅ lancé — logs : $LOG_DIR/beat.log" || echo "[beat]   ⚠️  n'a peut-être pas démarré — voir $LOG_DIR/beat.log"
 fi
 
 # ── 4. Backend API (uvicorn) ─────────────────────────────────────────
@@ -62,7 +91,7 @@ if curl -s -m 2 http://localhost:8000/health >/dev/null 2>&1; then
   echo "[api]    déjà lancé sur :8000"
 else
   echo "[api]    démarrage d'uvicorn..."
-  (cd apps/api && nohup python3 -m uvicorn app.main:app --reload --port 8000 > "../../$LOG_DIR/api.log" 2>&1 &)
+  (cd apps/api && nohup python3 -m uvicorn app.main:app --reload --port 8000 < /dev/null > "../../$LOG_DIR/api.log" 2>&1 & disown)
   sleep 2
   echo "[api]    lancé — logs : $LOG_DIR/api.log"
 fi
@@ -72,7 +101,7 @@ if curl -s -m 2 http://localhost:3000 >/dev/null 2>&1; then
   echo "[web]    déjà lancé sur :3000"
 else
   echo "[web]    démarrage de Next.js..."
-  (nohup npm --prefix apps/web run dev > "$LOG_DIR/web.log" 2>&1 &)
+  (nohup npm --prefix apps/web run dev < /dev/null > "$LOG_DIR/web.log" 2>&1 & disown)
   sleep 1
   echo "[web]    lancé — logs : $LOG_DIR/web.log"
 fi

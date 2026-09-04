@@ -8,6 +8,7 @@ Confirms that:
 import uuid
 import psycopg2
 import pytest
+from pathlib import Path
 from httpx import ASGITransport, AsyncClient
 from jose import jwt
 
@@ -41,7 +42,12 @@ def setup_invitation_test_db():
             );
         """)
 
-        with open('/Users/charbelakl/Desktop/reponse au ao /supabase/migrations/00012_fix_invitation_signup_race_and_deduplication.sql', 'r') as f:
+        migration_11 = Path(__file__).resolve().parents[3] / "supabase" / "migrations" / "00011_fix_auth_signup_trigger_and_default_owner_role.sql"
+        with open(migration_11, 'r') as f:
+            cur.execute(f.read())
+
+        migration_path = Path(__file__).resolve().parents[3] / "supabase" / "migrations" / "00015_fix_invitation_signup_race_and_deduplication.sql"
+        with open(migration_path, 'r') as f:
             cur.execute(f.read())
 
         yield
@@ -98,8 +104,8 @@ async def test_invitation_accepted_then_signup_no_duplicate_tenant():
     )
     cur.execute(
         """
-        INSERT INTO public.users (id, tenant_id, email, role, full_name, created_at, updated_at)
-        VALUES (%s, %s, %s, %s, %s, now(), now());
+        INSERT INTO public.users (id, tenant_id, email, role, full_name, status, created_at, updated_at)
+        VALUES (%s, %s, %s, %s, %s, 'active', now(), now());
         """,
         (owner_user_id, owner_tenant_id, f"owner-{owner_tenant_id[:6]}@test-invitation-btp.fr", "owner", "Owner Admin"),
     )
@@ -197,8 +203,8 @@ async def test_invitation_signup_first_then_automatic_tenant_binding():
     )
     cur.execute(
         """
-        INSERT INTO public.users (id, tenant_id, email, role, full_name, created_at, updated_at)
-        VALUES (%s, %s, %s, %s, %s, now(), now());
+        INSERT INTO public.users (id, tenant_id, email, role, full_name, status, created_at, updated_at)
+        VALUES (%s, %s, %s, %s, %s, 'active', now(), now());
         """,
         (owner_user_id, owner_tenant_id, f"owner-{owner_tenant_id[:6]}@test-invitation-btp.fr", "owner", "Owner Admin"),
     )

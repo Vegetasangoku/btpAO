@@ -16,12 +16,14 @@ import {
   ChevronDown,
 } from 'lucide-react';
 import { supabase } from '@/lib/supabase/client';
+import { useTranslation } from '@/components/i18n-provider';
 
 export function Header() {
   const router = useRouter();
+  const { t } = useTranslation();
   const [user, setUser] = useState<any>(null);
-  const [companyName, setCompanyName] = useState<string>('Entreprise BTP');
-  const [role, setRole] = useState<string>('Conducteur Principal');
+  const [companyName, setCompanyName] = useState<string>(t('layout.header.default_company'));
+  const [role, setRole] = useState<string>(t('layout.header.default_role_1'));
   const [showDropdown, setShowDropdown] = useState(false);
 
   useEffect(() => {
@@ -30,8 +32,8 @@ export function Header() {
         setUser(data.user);
         const meta = data.user.user_metadata || {};
         const appMeta = data.user.app_metadata || {};
-        setCompanyName(meta.company_name || appMeta.company_name || 'Entreprise BTP');
-        setRole(meta.role || appMeta.role || 'Conducteur BTP');
+        setCompanyName(meta.company_name || appMeta.company_name || t('layout.header.default_company'));
+        setRole(meta.role || appMeta.role || t('layout.header.default_role_2'));
       }
     });
 
@@ -40,8 +42,8 @@ export function Header() {
         setUser(session.user);
         const meta = session.user.user_metadata || {};
         const appMeta = session.user.app_metadata || {};
-        setCompanyName(meta.company_name || appMeta.company_name || 'Entreprise BTP');
-        setRole(meta.role || appMeta.role || 'Conducteur BTP');
+        setCompanyName(meta.company_name || appMeta.company_name || t('layout.header.default_company'));
+        setRole(meta.role || appMeta.role || t('layout.header.default_role_2'));
       } else {
         setUser(null);
       }
@@ -63,35 +65,55 @@ export function Header() {
     ? user.email.substring(0, 2).toUpperCase()
     : 'BTP';
 
+  const isSuperAdmin = (user?.email || '').toLowerCase() === 'charbelakl@gmail.com' || role === 'platform_admin' || role === 'super_admin';
+
   return (
-    <header className="h-16 border-b border-slate-200 dark:border-[#1E2638] bg-white/80 dark:bg-[#0C0F17]/80 backdrop-blur-xl px-6 flex items-center justify-between sticky top-0 z-20 transition-colors duration-200">
-      {/* Search & Global Context */}
-      <div className="flex items-center gap-4 flex-1 max-w-md">
-        <div className="relative w-full">
-          <Search className="w-4 h-4 text-slate-400 dark:text-slate-500 absolute left-3.5 top-1/2 -translate-y-1/2" />
+    <header className="h-14 border-b border-slate-200/70 dark:border-zinc-800/50 bg-white/80 dark:bg-[hsl(225,20%,5%)]/80 backdrop-blur-xl px-5 flex items-center justify-between sticky top-0 z-20 transition-colors duration-200">
+      {/* Search */}
+      <div className="flex items-center gap-3 flex-1 max-w-lg">
+        <div className="relative w-full group">
+          <Search className="w-4 h-4 text-muted-foreground group-focus-within:text-hl absolute left-3.5 top-1/2 -translate-y-1/2 transition-colors duration-200" />
           <input
             type="text"
-            placeholder="Rechercher un AO, CCTP, RC ou critère..."
-            className="w-full bg-slate-100/90 dark:bg-[#121622] border border-slate-200 dark:border-[#1E2638] rounded-xl pl-10 pr-4 py-2 text-xs text-slate-900 dark:text-slate-200 placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none focus:border-amber-500 transition-colors"
+            placeholder={t('layout.header.search_placeholder')}
+            className="input-field-with-icon !py-2 !rounded-lg !bg-slate-100/60 dark:!bg-raised !border-slate-200/80 dark:!border-line !text-[13px]"
           />
+          <kbd className="absolute right-3 top-1/2 -translate-y-1/2 hidden sm:inline-flex items-center px-1.5 py-0.5 text-[9px] font-mono font-semibold text-muted-foreground bg-slate-200/50 dark:bg-card rounded border border-slate-300/50 dark:border-line">
+            ⌘K
+          </kbd>
         </div>
       </div>
 
       {/* Right Controls */}
       <div className="flex items-center gap-3">
+        {/* Super Admin Quick Switcher */}
+        {isSuperAdmin && (
+          <Link
+            href="/admin"
+            className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-hl hover:bg-hl-strong text-hl-contrast text-[11px] font-semibold transition-all shadow-xs"
+          >
+            <ShieldCheck className="w-3.5 h-3.5" />
+            <span>Super Admin</span>
+          </Link>
+        )}
+
         {/* Security badge */}
-        <div className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-700 dark:text-emerald-400 text-xs font-bold">
-          <ShieldCheck className="w-3.5 h-3.5" />
-          <span>Espace Sécurisé</span>
+        <div className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-sunken border border-line text-slate-600 dark:text-zinc-300 text-[11px] font-medium">
+          <span className="relative flex h-1.5 w-1.5">
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-positive opacity-75"></span>
+            <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-positive"></span>
+          </span>
+          <ShieldCheck className="w-3 h-3 text-hl" />
+          <span>{t('layout.header.secure_space')}</span>
         </div>
 
         {/* Quick New Project Button */}
         <Link
           href="/dashboard/wizard"
-          className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-black shadow-sm shadow-amber-500/20 transition-all cursor-pointer"
+          className="btn-secondary !py-1.5 !px-3 !text-xs"
         >
-          <Plus className="w-3.5 h-3.5" />
-          <span>Nouvel AO</span>
+          <Plus className="w-3.5 h-3.5 text-hl" />
+          <span className="hidden sm:inline">{t('layout.header.new_tender')}</span>
         </Link>
 
         {/* User Profile / Auth Action */}
@@ -99,82 +121,103 @@ export function Header() {
           <div className="relative">
             <button
               onClick={() => setShowDropdown(!showDropdown)}
-              className="flex items-center gap-2.5 pl-3 border-l border-slate-200 dark:border-slate-800 hover:opacity-85 transition-opacity cursor-pointer"
+              className="flex items-center gap-2.5 pl-3 border-l border-slate-200/60 dark:border-line hover:opacity-90 transition-opacity cursor-pointer"
             >
-              <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-amber-500 to-amber-600 flex items-center justify-center font-black text-xs text-slate-950 shadow-sm ring-1 ring-white/20">
+              <div className="w-8 h-8 rounded-xl bg-hl text-hl-contrast flex items-center justify-center font-mono font-bold text-[12px] shadow-xs">
                 {initials}
               </div>
-              <div className="hidden md:block text-left">
-                <p className="text-xs font-bold text-slate-900 dark:text-slate-200 leading-tight truncate max-w-[140px]">
+              <div className="hidden md:block text-left min-w-0">
+                <p className="text-[13px] font-semibold text-slate-800 dark:text-zinc-200 leading-none truncate max-w-[140px]">
                   {user.email}
                 </p>
-                <p className="text-[10px] font-semibold text-amber-600 dark:text-amber-400 truncate max-w-[140px]">{companyName}</p>
+                <p className="text-[11px] text-hl truncate max-w-[140px] mt-0.5 font-medium">{isSuperAdmin ? 'Super Admin BTP' : companyName}</p>
               </div>
               <ChevronDown className="w-3.5 h-3.5 text-slate-400 hidden md:block" />
             </button>
 
             {/* Dropdown Menu */}
             {showDropdown && (
-              <div className="absolute right-0 mt-2 w-60 rounded-2xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-[#1E2638] shadow-2xl p-2 z-50 space-y-1 animate-in fade-in">
-                <div className="p-2.5 border-b border-slate-100 dark:border-slate-800">
-                  <p className="text-xs font-bold text-slate-900 dark:text-white truncate">{companyName}</p>
-                  <p className="text-[10px] text-slate-500 dark:text-slate-400 truncate">{user.email}</p>
-                  <span className="inline-block mt-1.5 text-[9px] font-bold px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-500/30">
-                    Plan Entreprise BTP • Actif
-                  </span>
+              <div className="absolute right-0 mt-2 w-64 card-drafted !shadow-floating p-1.5 z-50 space-y-0.5 animate-scale-in">
+                <div className="p-3 border-b border-line mb-1">
+                  <p className="text-[13px] font-semibold text-foreground truncate">{companyName}</p>
+                  <p className="text-[11px] text-muted-foreground truncate mt-0.5 font-mono">{user.email}</p>
+                  {isSuperAdmin ? (
+                    <span className="badge-pill mt-2 text-[9px] font-bold">
+                      <ShieldCheck className="w-3 h-3 text-hl mr-1 inline" />
+                      Super Administrateur Plateforme
+                    </span>
+                  ) : (
+                    <span className="badge-pill mt-2 text-[9px]">
+                      <span className="h-1 w-1 rounded-full bg-hl"></span>
+                      {t('layout.header.plan_active')}
+                    </span>
+                  )}
                 </div>
+
+                {isSuperAdmin && (
+                  <Link
+                    href="/admin"
+                    onClick={() => setShowDropdown(false)}
+                    className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] font-bold text-foreground hover:bg-slate-100 dark:hover:bg-raised transition-colors"
+                  >
+                    <ShieldCheck className="w-4 h-4 text-hl" />
+                    <span>Panneau Super Admin</span>
+                  </Link>
+                )}
 
                 <Link
                   href="/dashboard/company"
                   onClick={() => setShowDropdown(false)}
-                  className="flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-semibold text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                  className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] font-medium text-foreground hover:text-slate-900 dark:hover:text-white hover:bg-slate-50 dark:hover:bg-raised transition-colors"
                 >
-                  <Building className="w-3.5 h-3.5 text-amber-500" />
-                  <span>Mon Entreprise & Moyens</span>
+                  <Building className="w-4 h-4 text-hl" />
+                  <span>{t('layout.header.my_company')}</span>
                 </Link>
 
                 <Link
                   href="/dashboard/branding"
                   onClick={() => setShowDropdown(false)}
-                  className="flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-semibold text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                  className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] font-medium text-foreground hover:text-slate-900 dark:hover:text-white hover:bg-slate-50 dark:hover:bg-raised transition-colors"
                 >
-                  <Sparkles className="w-3.5 h-3.5 text-amber-500" />
-                  <span>Charte & Modèles</span>
+                  <Sparkles className="w-4 h-4 text-hl" />
+                  <span>{t('layout.header.charter_templates')}</span>
                 </Link>
 
                 <Link
                   href="/dashboard/settings"
                   onClick={() => setShowDropdown(false)}
-                  className="flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-semibold text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                  className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] font-medium text-foreground hover:text-slate-900 dark:hover:text-white hover:bg-slate-50 dark:hover:bg-raised transition-colors"
                 >
-                  <User className="w-3.5 h-3.5 text-slate-400" />
-                  <span>Paramètres du compte</span>
+                  <User className="w-4 h-4 text-muted-foreground" />
+                  <span>{t('layout.header.account_settings')}</span>
                 </Link>
+
+                <div className="divider !my-1" />
 
                 <button
                   onClick={handleLogout}
-                  className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-bold text-rose-600 dark:text-rose-400 hover:bg-rose-500/10 transition-colors text-left cursor-pointer"
+                  className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] font-medium text-danger hover:bg-danger/8 transition-colors text-left cursor-pointer"
                 >
-                  <LogOut className="w-3.5 h-3.5" />
-                  <span>Se déconnecter</span>
+                  <LogOut className="w-4 h-4" />
+                  <span>{t('layout.header.sign_out')}</span>
                 </button>
               </div>
             )}
           </div>
         ) : (
-          <div className="flex items-center gap-2 pl-3 border-l border-slate-200 dark:border-slate-800">
+          <div className="flex items-center gap-2.5 pl-3 border-l border-slate-200/60 dark:border-zinc-800/50">
             <Link
               href="/login"
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 text-xs font-bold border border-slate-200 dark:border-slate-700 transition-colors"
+              className="btn-secondary !py-2 !px-3.5 !text-[13px]"
             >
-              <LogIn className="w-3.5 h-3.5" />
-              <span>Connexion</span>
+              <LogIn className="w-4 h-4" />
+              <span>{t('layout.header.sign_in')}</span>
             </Link>
             <Link
               href="/register"
-              className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-black transition-all shadow-sm"
+              className="btn-primary !py-2 !px-3.5 !text-[13px]"
             >
-              <span>Créer un compte</span>
+              <span>{t('layout.header.create_account')}</span>
             </Link>
           </div>
         )}

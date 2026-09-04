@@ -1,70 +1,171 @@
+@import url('https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
+/* ═══════════════════════════════════════════════════════════════════════
+   SYSTÈME DE DESIGN — btpAO
+   Cyanotype & Chantier : bleu de plan technique (précision, conformité)
+   + ochre de terrain (chaleur, matière) sur un gris technique neutre.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+
+/* ═══════════════════════════════════════════════════════════════════════
+   CHARTE — définie une seule fois
+
+   Tout ce qui a une couleur dans l'application la prend ici. Les valeurs sont
+   des triplets RGB et non des hexadécimaux : c'est ce qui permet à Tailwind de
+   composer les opacités (`bg-hl/10`) tout en gardant une seule source.
+
+   Avant cette passe, le bleu de mise en avant était écrit en dur 506 fois dans
+   le JSX. En thème sombre il restait donc au bleu du thème clair, presque
+   illisible sur fond encre, pendant que les composants récents basculaient
+   correctement — d'où une couleur de surlignage qui n'était jamais tout à fait
+   la même d'un écran à l'autre.
+
+   Rôles, et rien d'autre :
+     hl        mise en avant — action principale, lien, onglet actif, focus
+     accent    accent éditorial et friction — étiquettes, alertes, dépassement
+     positive  confirmation mesurée (connecté, enregistré, sous le plafond)
+     danger    perte de données ou blocage
+   ═══════════════════════════════════════════════════════════════════════ */
+
+:root {
+  /* Bleu cyanotype — la couleur de mise en avant */
+  --hl-rgb: 28 96 145;
+  --hl-strong-rgb: 18 63 96;
+  --hl-soft-rgb: 234 241 245;
+  --hl-contrast-rgb: 255 255 255;
+
+  /* Ocre corten — accent éditorial et signal de friction */
+  --accent-rgb: 168 92 24;
+  --accent-strong-rgb: 130 69 18;
+
+  /* Vert de contrôle */
+  --positive-rgb: 31 90 62;
+
+  /* Rouge de terre cuite — jamais décoratif */
+  --danger-rgb: 168 48 26;
+
+  /* Plans de surface, en triplets pour les mêmes raisons */
+  --card-rgb: 255 255 255;
+  --sunken-rgb: 226 231 231;
+  --raised-rgb: 255 255 255;
+  --line-rgb: 197 205 210;
+}
+
+.dark {
+  --hl-rgb: 90 166 214;
+  --hl-strong-rgb: 124 187 226;
+  --hl-soft-rgb: 22 36 48;
+  --hl-contrast-rgb: 11 20 27;
+
+  --accent-rgb: 217 134 47;
+  --accent-strong-rgb: 232 168 99;
+
+  --positive-rgb: 134 208 171;
+
+  --danger-rgb: 240 145 122;
+
+  --card-rgb: 18 28 37;
+  --sunken-rgb: 13 22 29;
+  --raised-rgb: 24 36 47;
+  --line-rgb: 42 56 68;
+}
+
 @layer base {
-  /* LIGHT MODE (DEFAULT) */
+  /* ── CLAIR — « béton et calque » ────────────────────────────────────────
+     Fond gris béton, surfaces blanches par-dessus. Le fond quasi blanc de la
+     version précédente écrasait les cartes contre la page et laissait le texte
+     secondaire flotter à 5:1 de contraste : illisible en usage prolongé. Ici le
+     fond descend à 91 % de luminosité, les surfaces restent blanches, et le
+     texte secondaire remonte à 32 % — soit 7,4:1 sur le fond et 8,4:1 sur une
+     carte. Les filets passent de presque invisibles à réellement structurants. */
   :root {
-    --background: 210 40% 98%;
-    --foreground: 222.2 47.4% 11.2%;
+    --font-jakarta: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    --font-archivo: 'Archivo', 'Plus Jakarta Sans', sans-serif;
+    --font-jetbrains-mono: 'JetBrains Mono', monospace;
+
+    --background: 195 12% 91%;
+    --foreground: 205 42% 11%;
 
     --card: 0 0% 100%;
-    --card-foreground: 222.2 47.4% 11.2%;
+    --card-foreground: 205 42% 11%;
 
     --popover: 0 0% 100%;
-    --popover-foreground: 222.2 47.4% 11.2%;
+    --popover-foreground: 205 42% 11%;
 
-    --primary: 38 92% 50%;
+    --primary: 205 70% 30%;
     --primary-foreground: 0 0% 100%;
 
-    --secondary: 210 40% 96.1%;
-    --secondary-foreground: 222.2 47.4% 11.2%;
+    --secondary: 197 14% 86%;
+    --secondary-foreground: 205 42% 11%;
 
-    --muted: 210 40% 96.1%;
-    --muted-foreground: 215.4 16.3% 46.9%;
+    --muted: 197 14% 87%;
+    --muted-foreground: 205 16% 32%;
 
-    --accent: 210 40% 96.1%;
-    --accent-foreground: 222.2 47.4% 11.2%;
+    --accent: 28 72% 36%;
+    --accent-foreground: 0 0% 100%;
 
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 210 40% 98%;
+    --destructive: 8 72% 42%;
+    --destructive-foreground: 0 0% 100%;
 
-    --border: 214.3 31.8% 91.4%;
-    --input: 214.3 31.8% 91.4%;
-    --ring: 38 92% 50%;
+    --border: 200 13% 79%;
+    --input: 200 13% 76%;
+    --ring: 205 70% 34%;
 
-    --radius: 0.75rem;
+    --radius: 0.375rem;
+
+    --surface-glass: 0 0% 100%;
+    --surface-glass-opacity: 0.94;
+    --surface-elevated: 0 0% 100%;
+
+    /* Plans nommés — utilisés par les composants ci-dessous et par les écrans
+       qui ont besoin de plus de deux niveaux de surface. */
+    --sunken: 197 16% 88%;
+    --hairline: 200 13% 74%;
   }
 
-  /* DARK MODE */
+  /* ── SOMBRE — « encre de plan » ─────────────────────────────────────────
+     Bleu de Prusse très sombre, jamais de noir pur : le fond garde une trace de
+     bleu qui rappelle le tirage de plan. Texte secondaire remonté à 71 % pour
+     rester lisible sur les longues sessions. */
   .dark {
-    --background: 224 35% 7%;
-    --foreground: 210 40% 98%;
+    --background: 206 44% 6%;
+    --foreground: 197 22% 96%;
 
-    --card: 222 28% 11%;
-    --card-foreground: 210 40% 98%;
+    --card: 206 32% 10%;
+    --card-foreground: 197 22% 96%;
 
-    --popover: 222 28% 11%;
-    --popover-foreground: 210 40% 98%;
+    --popover: 206 32% 10%;
+    --popover-foreground: 197 22% 96%;
 
-    --primary: 38 92% 50%;
-    --primary-foreground: 222.2 47.4% 11.2%;
+    --primary: 203 62% 52%;
+    --primary-foreground: 206 44% 6%;
 
-    --secondary: 217.2 32.6% 17.5%;
-    --secondary-foreground: 210 40% 98%;
+    --secondary: 206 26% 15%;
+    --secondary-foreground: 197 22% 96%;
 
-    --muted: 217.2 32.6% 17.5%;
-    --muted-foreground: 215 20.2% 65.1%;
+    --muted: 206 26% 15%;
+    --muted-foreground: 203 16% 71%;
 
-    --accent: 217.2 32.6% 17.5%;
-    --accent-foreground: 210 40% 98%;
+    --accent: 30 68% 56%;
+    --accent-foreground: 206 44% 6%;
 
-    --destructive: 0 62.8% 30.6%;
-    --destructive-foreground: 210 40% 98%;
+    --destructive: 8 62% 52%;
+    --destructive-foreground: 0 0% 100%;
 
-    --border: 221 28% 17%;
-    --input: 221 28% 17%;
-    --ring: 38 92% 50%;
+    --border: 206 24% 20%;
+    --input: 206 24% 24%;
+    --ring: 203 62% 52%;
+
+    --surface-glass: 206 32% 10%;
+    --surface-glass-opacity: 0.92;
+    --surface-elevated: 206 28% 13%;
+
+    --sunken: 206 30% 8%;
+    --hairline: 206 22% 26%;
   }
 }
 
@@ -73,114 +174,604 @@
     @apply border-border;
   }
   body {
-    @apply font-sans antialiased;
+    @apply font-sans antialiased selection:bg-hl/25 selection:text-foreground;
   }
   h1, h2, h3, h4, h5, h6 {
-    @apply font-heading tracking-tight text-slate-900 dark:text-[#F9FAFB];
+    @apply font-heading tracking-tight text-foreground;
   }
 }
 
-/* Custom Scrollbars */
+
+/* ── Contextes de surface ────────────────────────────────────────────────────
+   Deux écrans échappent au thème de l'utilisateur : l'accueil est toujours sur
+   fond encre, les écrans de connexion toujours sur papier. Plutôt que d'y
+   recopier des couleurs — c'est ce qui faisait dériver la charte — ils
+   redéfinissent localement les mêmes variables. Le vocabulaire reste identique
+   partout : `bg-hl`, `text-corten`, `border-line` se comportent de la même
+   façon dans l'admin, sur l'accueil et sur la connexion.
+
+   Effet voulu : sur fond encre, la mise en avant prend d'elle-même sa valeur
+   claire. Le bouton principal de l'accueil et l'onglet actif de l'admin sont
+   donc la même couleur, pensée pour le même rôle. */
+
+.on-ink {
+  --hl-rgb: 90 166 214;
+  --hl-strong-rgb: 124 187 226;
+  --hl-soft-rgb: 22 36 48;
+  --hl-contrast-rgb: 11 20 27;
+  --accent-rgb: 217 134 47;
+  --accent-strong-rgb: 232 168 99;
+  --positive-rgb: 134 208 171;
+  --danger-rgb: 240 145 122;
+
+  --background: 205 42% 8%;
+  --foreground: 197 22% 94%;
+  --muted-foreground: 203 16% 70%;
+  --card-rgb: 17 29 39;
+  --raised-rgb: 22 36 48;
+  --sunken-rgb: 9 17 23;
+  --line-rgb: 45 62 76;
+
+  --card: 205 39% 11%;
+  --card-foreground: 197 22% 94%;
+  --popover: 205 39% 11%;
+  --popover-foreground: 197 22% 94%;
+  --secondary: 205 30% 14%;
+  --muted: 205 30% 14%;
+  --border: 205 25% 24%;
+  --input: 205 25% 28%;
+  --sunken: 205 40% 7%;
+  --hairline: 205 22% 30%;
+  --ring: 203 62% 52%;
+
+  background-color: hsl(var(--background));
+  color: hsl(var(--foreground));
+}
+
+.on-paper {
+  --hl-rgb: 28 96 145;
+  --hl-strong-rgb: 18 63 96;
+  --hl-soft-rgb: 234 241 245;
+  --hl-contrast-rgb: 255 255 255;
+  --accent-rgb: 143 78 18;
+  --accent-strong-rgb: 108 58 13;
+  --positive-rgb: 31 90 62;
+  --danger-rgb: 147 46 18;
+
+  --background: 100 6% 91%;
+  --foreground: 205 42% 10%;
+  --muted-foreground: 205 14% 27%;
+  --card-rgb: 255 255 255;
+  --raised-rgb: 255 255 255;
+  --sunken-rgb: 224 227 223;
+  --line-rgb: 190 196 190;
+
+  --card: 0 0% 100%;
+  --card-foreground: 205 42% 10%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 205 42% 10%;
+  --secondary: 100 6% 87%;
+  --muted: 100 6% 88%;
+  --border: 100 6% 76%;
+  --input: 100 6% 72%;
+  --sunken: 100 6% 88%;
+  --hairline: 100 6% 72%;
+  --ring: 205 70% 34%;
+
+  background-color: hsl(var(--background));
+  color: hsl(var(--foreground));
+}
+
+/* ═══════════════════════════════════════════════════
+   COMPOSANTS
+
+   Principe de la refonte : la profondeur vient des filets et des plans, pas des
+   ombres floues. Un rayon de 6 px maximum. Une seule couleur d'action (le bleu
+   de plan), une seule couleur de friction (l'ocre corten). Les libellés
+   techniques passent en monospace capitale — c'est la langue du cartouche de
+   plan, et c'est ce qui relie l'admin à la page d'accueil.
+   ═══════════════════════════════════════════════════ */
+@layer components {
+
+  /* ─── Étiquettes d'état ─── */
+  .badge-pill {
+    @apply inline-flex items-center gap-1.5 px-2 py-0.5 rounded-[3px] font-mono text-[10px] font-medium uppercase tracking-[0.08em] bg-[hsl(var(--sunken))] text-[hsl(var(--muted-foreground))] border border-[hsl(var(--border))] transition-colors duration-150;
+  }
+  .badge-pill-primary {
+    @apply inline-flex items-center gap-1.5 px-2 py-0.5 rounded-[3px] font-mono text-[10px] font-semibold uppercase tracking-[0.08em] bg-hl text-hl-contrast border border-hl transition-colors duration-150;
+  }
+  .badge-pill-amber {
+    @apply inline-flex items-center gap-1.5 px-2 py-0.5 rounded-[3px] font-mono text-[10px] font-semibold uppercase tracking-[0.08em] bg-corten/10 text-corten border border-corten/40;
+  }
+  .badge-pill-emerald {
+    @apply inline-flex items-center gap-1.5 px-2 py-0.5 rounded-[3px] font-mono text-[10px] font-medium uppercase tracking-[0.08em] bg-positive/10 text-positive border border-positive/40;
+  }
+  .badge-pill-slate {
+    @apply badge-pill;
+  }
+  .badge-pill-red {
+    @apply inline-flex items-center gap-1.5 px-2 py-0.5 rounded-[3px] font-mono text-[10px] font-medium uppercase tracking-[0.08em] bg-danger/10 text-danger border border-danger/40;
+  }
+
+  /* ─── Surfaces ─── */
+  .card-modern {
+    @apply bg-card border border-[hsl(var(--border))] rounded-[6px] transition-colors duration-150;
+  }
+  .card-modern-hover {
+    @apply card-modern hover:border-hl/60;
+  }
+  .card-elevated {
+    @apply bg-card border border-[hsl(var(--border))] rounded-[6px];
+  }
+  .card-glass {
+    @apply bg-card/95 backdrop-blur-md border border-[hsl(var(--border))] rounded-[6px];
+  }
+  .card-inset {
+    @apply bg-[hsl(var(--sunken))] border border-[hsl(var(--border))] rounded-[5px];
+  }
+
+  /* ─── Cartouche : la signature du produit ───────────────────────────────
+     Un plan d'exécution porte toujours, en bas à droite, un cadre qui dit qui a
+     dessiné quoi et quand. On garde ce geste : deux équerres fines aux angles
+     opposés, assez discrètes pour ne pas parasiter la lecture, assez présentes
+     pour qu'une capture d'écran de ce produit soit reconnaissable. */
+  .card-drafted {
+    @apply relative bg-card border border-[hsl(var(--border))] rounded-[5px];
+  }
+  .card-drafted::before,
+  .card-drafted::after {
+    content: '';
+    position: absolute;
+    width: 10px;
+    height: 10px;
+    pointer-events: none;
+    opacity: 0.7;
+  }
+  .card-drafted::before {
+    top: -1px;
+    left: -1px;
+    border-top: 1.5px solid rgb(var(--hl-rgb));
+    border-left: 1.5px solid rgb(var(--hl-rgb));
+  }
+  .card-drafted::after {
+    bottom: -1px;
+    right: -1px;
+    border-bottom: 1.5px solid rgb(var(--hl-rgb));
+    border-right: 1.5px solid rgb(var(--hl-rgb));
+  }
+
+  /* ─── Cartes de synthèse ─── */
+  /* La carte de tête est toujours sur fond encre, quel que soit le thème :
+     elle emprunte donc le contexte `.on-ink` plutôt que de redéfinir ses
+     propres couleurs. */
+  .vision-card {
+    @apply relative overflow-hidden rounded-[6px] bg-card border border-[hsl(var(--border))] transition-colors duration-150;
+  }
+  .vision-card-hero {
+    @apply relative overflow-hidden rounded-[6px] border border-line p-6 sm:p-7;
+  }
+  .vision-kpi-icon {
+    @apply w-9 h-9 rounded-[5px] bg-hl flex items-center justify-center text-hl-contrast shrink-0;
+  }
+  .vision-kpi-icon-emerald {
+    @apply w-9 h-9 rounded-[5px] bg-positive flex items-center justify-center text-hl-contrast shrink-0;
+  }
+  .vision-kpi-icon-indigo {
+    @apply w-9 h-9 rounded-[5px] bg-corten flex items-center justify-center text-hl-contrast shrink-0;
+  }
+  .vision-kpi-icon-slate {
+    @apply w-9 h-9 rounded-[5px] bg-[hsl(var(--sunken))] border border-[hsl(var(--border))] flex items-center justify-center text-foreground shrink-0;
+  }
+
+  /* ─── Actions ─── */
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 px-3.5 py-2 rounded-[5px] bg-hl hover:bg-hl-strong text-hl-contrast font-semibold text-[13px] transition-colors duration-150 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-hl/50 focus-visible:ring-offset-2 focus-visible:ring-offset-[hsl(var(--background))];
+  }
+  .btn-secondary {
+    @apply inline-flex items-center justify-center gap-2 px-3.5 py-2 rounded-[5px] bg-card hover:bg-[hsl(var(--sunken))] text-foreground font-semibold text-[13px] border border-[hsl(var(--border))] transition-colors duration-150 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-hl/50 focus-visible:ring-offset-2 focus-visible:ring-offset-[hsl(var(--background))];
+  }
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-2 px-2.5 py-1.5 rounded-[5px] text-[hsl(var(--muted-foreground))] hover:text-foreground hover:bg-[hsl(var(--sunken))] font-medium text-[13px] transition-colors duration-150 cursor-pointer;
+  }
+  .btn-danger {
+    @apply inline-flex items-center justify-center gap-2 px-3.5 py-2 rounded-[5px] bg-danger hover:bg-danger/85 text-hl-contrast font-semibold text-[13px] transition-colors duration-150 cursor-pointer;
+  }
+  .btn-accent {
+    @apply inline-flex items-center justify-center gap-2 px-3.5 py-2 rounded-[5px] bg-corten hover:bg-corten-strong text-hl-contrast font-semibold text-[13px] transition-colors duration-150 cursor-pointer;
+  }
+
+  /* ─── Saisie ─── */
+  .input-field {
+    @apply w-full px-3 py-2 rounded-[5px] bg-card border border-[hsl(var(--input))] text-[13px] text-foreground placeholder:text-[hsl(var(--muted-foreground))]/70 focus:outline-none focus:border-hl focus:ring-2 focus:ring-hl/25 transition-colors duration-150 font-medium;
+  }
+  .input-field-with-icon {
+    @apply input-field pl-10;
+  }
+
+  /* ─── En-têtes de section ─── */
+  .section-header {
+    @apply space-y-1;
+  }
+  .section-title {
+    @apply text-[15px] font-bold text-foreground font-heading tracking-tight flex items-center gap-2.5;
+  }
+  .section-desc {
+    @apply text-[12.5px] text-[hsl(var(--muted-foreground))] leading-relaxed;
+  }
+
+  /* ─── Étiquette de cartouche ─── */
+  .eyebrow-mono {
+    @apply inline-flex items-center gap-1.5 font-mono text-[10px] font-semibold uppercase tracking-[0.16em] text-corten;
+  }
+  .eyebrow-mono::before {
+    content: '';
+    display: inline-block;
+    width: 14px;
+    height: 1.5px;
+    background: currentColor;
+    opacity: 0.8;
+  }
+
+  /* ─── Navigation ─── */
+  .nav-link {
+    @apply relative flex items-center justify-between ps-3.5 pe-3 py-2 rounded-[5px] text-[13px] text-[hsl(var(--muted-foreground))] hover:text-foreground hover:bg-[hsl(var(--sunken))] font-medium transition-colors duration-150;
+  }
+  .nav-link-active {
+    @apply relative flex items-center justify-between ps-3.5 pe-3 py-2 rounded-[5px] text-[13px] font-semibold bg-[hsl(var(--sunken))] text-foreground transition-colors duration-150;
+  }
+  /* Le repère d'onglet actif est un trait, pas un aplat coloré : il indique la
+     position sans repeindre la moitié de la barre latérale. */
+  .nav-link-active::before {
+    content: '';
+    position: absolute;
+    inset-inline-start: 0;
+    top: 6px;
+    bottom: 6px;
+    width: 2px;
+    background: rgb(var(--hl-rgb));
+    border-radius: 2px;
+  }
+
+  /* ─── Onglets ─── */
+  .tab-group {
+    @apply flex items-center gap-0.5 p-0.5 rounded-[5px] bg-[hsl(var(--sunken))] border border-[hsl(var(--border))];
+  }
+  .tab-item {
+    @apply flex items-center gap-2 px-3 py-1.5 rounded-[4px] text-[12.5px] font-medium text-[hsl(var(--muted-foreground))] hover:text-foreground transition-colors duration-150 cursor-pointer;
+  }
+  .tab-item-active {
+    @apply flex items-center gap-2 px-3 py-1.5 rounded-[4px] text-[12.5px] font-semibold bg-card text-foreground border border-[hsl(var(--border))] transition-colors duration-150;
+  }
+
+  /* ─── Pastilles d'état ─── */
+  .status-dot {
+    @apply w-1.5 h-1.5 rounded-full shrink-0;
+  }
+  .status-dot-live {
+    @apply relative flex h-2 w-2 shrink-0;
+  }
+  .status-dot-live::before {
+    content: '';
+    @apply absolute inline-flex h-full w-full rounded-full opacity-75 animate-ping;
+  }
+  .status-dot-live::after {
+    content: '';
+    @apply relative inline-flex rounded-full h-2 w-2;
+  }
+
+  /* ─── Filets ─── */
+  .divider {
+    @apply border-t border-[hsl(var(--border))];
+  }
+
+  /* ─── Tableaux denses ───────────────────────────────────────────────────
+     Un outil de suivi se lit en balayant des colonnes, pas en ouvrant des
+     cartes. Ces classes donnent le même tableau partout : en-tête en monospace
+     capitale, filet net sous l'en-tête, lignes séparées par un filet fin. */
+  .data-table {
+    @apply w-full border-collapse text-[12.5px];
+  }
+  .data-table thead tr {
+    border-bottom: 1px solid hsl(var(--hairline));
+  }
+  .data-table th {
+    @apply text-start font-mono text-[10px] font-medium uppercase tracking-[0.12em] text-[hsl(var(--muted-foreground))] pb-2 px-3 align-bottom;
+  }
+  .data-table td {
+    @apply py-2.5 px-3 align-top;
+  }
+  .data-table tbody tr {
+    border-bottom: 1px solid hsl(var(--border));
+  }
+  .data-table tbody tr:hover {
+    background: hsl(var(--sunken));
+  }
+  .data-table th:first-child,
+  .data-table td:first-child {
+    @apply ps-0;
+  }
+  .data-table th:last-child,
+  .data-table td:last-child {
+    @apply pe-0;
+  }
+
+  /* ─── Conteneur de page ─── */
+  .page-container {
+    @apply space-y-5 pb-16;
+  }
+
+  /* ─── Trame de papier millimétré ─── */
+  .blueprint-grid {
+    background-image:
+      linear-gradient(rgba(122, 186, 226, 0.08) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(122, 186, 226, 0.08) 1px, transparent 1px);
+    background-size: 32px 32px;
+  }
+  .blueprint-grid-light {
+    background-image:
+      linear-gradient(rgba(28, 96, 145, 0.07) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(28, 96, 145, 0.07) 1px, transparent 1px);
+    background-size: 32px 32px;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   PASSERELLE DE CHARTE
+
+   Les écrans admin existants codent en dur les couleurs de l'ancienne charte
+   (slate-200/80 pour les filets, zinc-400 pour le texte secondaire, #111A24
+   pour les surfaces sombres…). Les réécrire un par un dans le JSX, ce serait
+   des milliers de lignes touchées pour un gain purement visuel, avec le risque
+   d'y casser une condition d'affichage au passage.
+
+   On redirige donc ces valeurs vers les jetons de la nouvelle charte. Ces
+   règles arrivent après @tailwind utilities dans le fichier, à spécificité
+   égale : c'est l'ordre source qui tranche, aucun !important n'est nécessaire.
+   Seules les teintes dont l'usage est sans ambiguïté sont reprises — le texte
+   slate-400, qui sert parfois sur fond sombre, est laissé tel quel.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* Texte secondaire — le cœur du problème de lisibilité signalé */
+.text-slate-500,
+.text-slate-600,
+.text-zinc-500,
+.text-zinc-600 {
+  color: hsl(var(--muted-foreground));
+}
+.text-slate-700,
+.text-zinc-700 {
+  color: hsl(var(--foreground));
+}
+
+/* Surfaces claires enfoncées */
+.bg-slate-50,
+.bg-slate-50\/80,
+.bg-zinc-50 {
+  background-color: hsl(var(--sunken));
+}
+
+/* Anneau de focus visible partout — exigence d'accessibilité, pas une option */
+:where(a, button, [role='button'], [role='tab'], input, select, textarea, summary):focus-visible {
+  outline: 2px solid rgb(var(--hl-rgb));
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ═══════════════════════════════════════════════════
+   SCROLLBARS — Refined & Minimal
+   ═══════════════════════════════════════════════════ */
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 5px;
+  height: 5px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(156, 163, 175, 0.25);
+  background: rgba(107, 143, 163, 0.25);
   border-radius: 9999px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(156, 163, 175, 0.45);
+  background: rgba(107, 143, 163, 0.45);
+}
+.dark ::-webkit-scrollbar-thumb {
+  background: rgba(107, 143, 163, 0.22);
+}
+.dark ::-webkit-scrollbar-thumb:hover {
+  background: rgba(107, 143, 163, 0.4);
 }
 
-/* Tiptap Editor Clean Typography */
+/* ═══════════════════════════════════════════════════
+   TIPTAP EDITOR — Typographie claire, palette Cyanotype
+   ═══════════════════════════════════════════════════ */
 .tiptap {
   outline: none;
   min-height: 420px;
-  font-family: var(--font-ibm-plex), 'IBM Plex Sans', sans-serif;
+  font-family: var(--font-jakarta), 'Plus Jakarta Sans', sans-serif;
 }
 
 .tiptap h1 {
-  font-family: var(--font-manrope), 'Manrope', sans-serif;
+  font-family: var(--font-jakarta), 'Plus Jakarta Sans', sans-serif;
   font-size: 1.5rem;
   font-weight: 700;
-  color: #F59E0B;
+  color: rgb(var(--hl-rgb));
   margin-top: 1.5rem;
   margin-bottom: 0.75rem;
 }
 
 .tiptap h2 {
-  font-family: var(--font-manrope), 'Manrope', sans-serif;
+  font-family: var(--font-jakarta), 'Plus Jakarta Sans', sans-serif;
   font-size: 1.25rem;
   font-weight: 600;
-  color: #F9FAFB;
+  color: hsl(var(--foreground));
   margin-top: 1.25rem;
   margin-bottom: 0.5rem;
 }
 
 .tiptap h3 {
-  font-family: var(--font-manrope), 'Manrope', sans-serif;
+  font-family: var(--font-jakarta), 'Plus Jakarta Sans', sans-serif;
   font-size: 1.1rem;
   font-weight: 600;
-  color: #9CA3AF;
+  color: hsl(var(--muted-foreground));
   margin-top: 1rem;
   margin-bottom: 0.5rem;
 }
 
-.tiptap p {
-  line-height: 1.7;
-  color: #D1D5DB;
+.tiptap p,
+.tiptap ul,
+.tiptap ol {
+  color: hsl(var(--foreground));
   margin-bottom: 0.85rem;
 }
-
+.tiptap p {
+  line-height: 1.7;
+}
 .tiptap ul {
   list-style-type: disc;
   padding-left: 1.5rem;
-  margin-bottom: 0.85rem;
-  color: #D1D5DB;
 }
-
 .tiptap ol {
   list-style-type: decimal;
   padding-left: 1.5rem;
-  margin-bottom: 0.85rem;
-  color: #D1D5DB;
 }
 
 .tiptap table {
   border-collapse: collapse;
   width: 100%;
   margin: 1.25rem 0;
-  border-radius: 8px;
+  border-radius: 5px;
   overflow: hidden;
 }
 
 .tiptap th {
-  background-color: #131823;
-  color: #F59E0B;
+  background-color: rgb(var(--hl-soft-rgb));
+  color: rgb(var(--hl-rgb));
   font-weight: 600;
-  padding: 0.75rem 1rem;
-  border: 1px solid #1E2638;
+  padding: 0.7rem 1rem;
+  border: 1px solid hsl(var(--border));
   text-align: left;
 }
 
 .tiptap td {
-  padding: 0.65rem 1rem;
-  border: 1px solid #1E2638;
-  color: #E5E7EB;
+  padding: 0.6rem 1rem;
+  border: 1px solid hsl(var(--border));
+  color: hsl(var(--foreground));
 }
 
 .tiptap tr:nth-child(even) {
-  background-color: rgba(19, 24, 35, 0.5);
+  background-color: hsl(var(--sunken) / 0.55);
 }
 
 .tiptap blockquote {
-  border-left: 3px solid #D97706;
+  border-left: 3px solid rgb(var(--hl-rgb));
   padding-left: 1rem;
   font-style: italic;
-  color: #9CA3AF;
+  color: hsl(var(--muted-foreground));
   margin: 1rem 0;
+}
+
+/* Surlignage posé depuis la barre d'outils : lavis d'ocre corten, le rôle
+   « accent » de la charte. La valeur littérale est écrite dans le document
+   (voir tiptap-editor.tsx) pour survivre à l'export Word ; cette règle ne fait
+   qu'assurer un rendu correct du texte par-dessus. */
+.tiptap mark {
+  background-color: #F3E2CC;
+  color: #1B2A33;
+  padding: 0 0.15em;
+  border-radius: 2px;
+}
+
+/* ═══════════════════════════════════════════════════
+   ANIMATIONS
+   ═══════════════════════════════════════════════════ */
+@keyframes fade-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes scale-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes slide-in-right {
+  from {
+    opacity: 0;
+    transform: translateX(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.animate-fade-in-up {
+  animation: fade-in-up 0.3s ease-out both;
+}
+
+.animate-scale-in {
+  animation: scale-in 0.2s ease-out both;
+}
+
+.animate-slide-in-right {
+  animation: slide-in-right 0.25s ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-fade-in-up,
+  .animate-scale-in,
+  .animate-slide-in-right,
+  .status-dot-live::before {
+    animation: none !important;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   CONSOLE BUDGETS & PLAFONDS IA
+
+   L'écran garde son jeu de variables propre, mais celui-ci dérive désormais des
+   jetons globaux : la console doit se lire comme une feuille du même dossier que
+   le reste de l'admin, pas comme une application voisine. Seules deux couleurs
+   lui sont propres — l'accent d'action et la couleur de friction réservée au
+   dépassement de plafond.
+   ═══════════════════════════════════════════════════════════════════════ */
+:root {
+  --cost-surface-0: hsl(var(--background));
+  --cost-surface-1: hsl(var(--card));
+  --cost-surface-2: hsl(var(--sunken));
+  --cost-rule: hsl(var(--border));
+  --cost-rule-strong: hsl(var(--hairline));
+  --cost-ink-1: hsl(var(--foreground));
+  --cost-ink-2: hsl(var(--muted-foreground));
+  --cost-ink-3: hsl(var(--muted-foreground) / 0.72);
+  --cost-accent: rgb(var(--hl-rgb));
+  --cost-friction: rgb(var(--accent-rgb));
+}
+
+.dark {
+  --cost-accent: rgb(var(--hl-rgb));
+  --cost-friction: rgb(var(--accent-rgb));
 }

@@ -125,6 +125,7 @@ async def compile_technical_memo(
             export_job_id=str(job_id),
             doc_format=payload.format,
             include_visuals=payload.include_gantt or payload.include_organigramme,
+            include_cover_page=payload.include_cover_page,
         )
     except Exception as e:
         new_job.status = "failed"
@@ -212,7 +213,33 @@ async def download_exported_job_file(
     result = await db.execute(stmt)
     job = result.scalar_one_or_none()
 
-    if not job or not job.s3_docx_url:
+    if not job or (not job.s3_docx_url and not job.s3_pdf_url):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Fichier d'export introuvable ou accès non autorisé."
+        )
+
+    # Un job "pdf" sert le vrai PDF converti quand la conversion LibreOffice a réussi
+    # (correctif tâche #66, 02/09) ; sinon (LibreOffice indisponible sur ce worker,
+    # cf. job.error_message posé par build_export_doc_task) on retombe honnêtement sur
+    # le .docx -- toujours généré en premier -- plutôt qu'un 404, l'utilisateur récupère
+    # au moins un document exploitable.
+    if job.format == "pdf" and job.s3_pdf_url:
+        try:
+            pdf_bytes = storage_service.download_file(current_user.tenant_id, job.s3_pdf_url)
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Fichier introuvable dans le stockage: {e}"
+            )
+        pdf_filename = f"Memoire_Technique_{job.project_id}.pdf"
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{pdf_filename}"'}
+        )
+
+    if not job.s3_docx_url:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Fichier d'export introuvable ou accès non autorisé."
@@ -312,13 +339,49 @@ async def stream_project_docx(
         except Exception:
             template_bytes = None
 
+    # Repli : aucun template client explicite (ou son téléchargement a échoué) -> réutiliser
+    # la structure du plus récent export .docx déjà généré et complété pour ce tenant, plutôt
+    # qu'un document vierge générique. build_memo_docx applique déjà à tout template_bytes fourni
+    # ici la même logique de remplacement de placeholders / détection de sections manquantes /
+    # préservation d'en-tête-pied-de-page (voir plus haut dans ce fichier) — aucun changement
+    # nécessaire côté générateur, seule la source du template change.
+    used_fallback_template_job_id: Optional[str] = None
+    if not template_bytes:
+        try:
+            fallback_stmt = (
+                select(ExportJob)
+                .where(
+                    ExportJob.tenant_id == t_uuid,
+                    ExportJob.status == "completed",
+                    ExportJob.s3_docx_url.isnot(None),
+                )
+                .order_by(ExportJob.completed_at.desc())
+                .limit(1)
+            )
+            fallback_res = await db.execute(fallback_stmt)
+            fallback_job = fallback_res.scalar_one_or_none()
+            if fallback_job and fallback_job.s3_docx_url:
+                template_bytes = storage_service.download_file(current_user.tenant_id, fallback_job.s3_docx_url)
+                used_fallback_template_job_id = str(fallback_job.id)
+                print(f"[Export] Aucun template explicite pour tenant={current_user.tenant_id} -- repli sur l'export complete le plus recent (job={used_fallback_template_job_id}) comme template.")
+        except Exception:
+            template_bytes = None
+            used_fallback_template_job_id = None
+
     tenant_res = await db.execute(select(Tenant).where(Tenant.id == t_uuid))
     tenant_row = tenant_res.scalar_one_or_none()
     company_name = None
+    branding = {}
     if tenant_row:
         branding = tenant_row.branding_config or {}
         company_name = branding.get("company_name") or tenant_row.name
     company_name = company_name or "Votre Entreprise"
+    # BT02 (01/09) : couleur de marque + forme deja lues via branding_config ci-dessus --
+    # transmises a build_memo_docx pour que les visuels Gantt/Organigramme de CET export
+    # (quand include_visuals y est actif) refletent la charte du client comme le fait deja
+    # l'apercu web (voir visuals.py::_get_tenant_brand_color / _get_tenant_shape_style).
+    brand_color = branding.get("primary_color")
+    shape_style = branding.get("shape_style")
 
     project_dict = {
         "id": str(project.id),
@@ -343,6 +406,9 @@ async def stream_project_docx(
         include_visuals=False,
         required_section_titles=required_section_titles,
         gantt_tasks=gantt_tasks,
+        language=getattr(project, "output_language", None) or "fr",
+        brand_color=brand_color,
+        shape_style=shape_style,
     )
 
     raw_title = project.title or "Memoire_Technique"

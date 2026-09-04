@@ -2,7 +2,7 @@
 Pydantic v2 Models & Data Transfer Objects (DTOs) for btpAO
 """
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, Field
 
 
@@ -90,6 +90,7 @@ class ProjectCreate(BaseModel):
         default_factory=lambda: {"technical_weight": 60, "price_weight": 40}
     )
     strategic_directives: Optional[str] = None
+    output_language: Literal["fr", "en", "ar"] = "fr"
 
 
 class ProjectUpdate(BaseModel):
@@ -103,6 +104,7 @@ class ProjectUpdate(BaseModel):
     submission_deadline: Optional[datetime] = None
     scoring_notes: Optional[Dict[str, Any]] = None
     strategic_directives: Optional[str] = None
+    output_language: Optional[Literal["fr", "en", "ar"]] = None
 
 
 class GoNoGoSummaryOut(BaseModel):
@@ -129,6 +131,7 @@ class ProjectOut(BaseModel):
     submission_deadline: Optional[datetime]
     scoring_notes: Dict[str, Any]
     strategic_directives: Optional[str] = None
+    output_language: str = "fr"
     outcome_status: str = "pending"
     buyer_feedback: Dict[str, Any] = Field(default_factory=dict)
     outcome_recorded_at: Optional[datetime] = None
@@ -374,6 +377,11 @@ class UpdateSectionResponse(BaseModel):
     learning_proposal: Optional[LearningProposal] = None
 
 
+class GanttLearningCheckResponse(BaseModel):
+    learning_opportunity: bool = False
+    learning_proposal: Optional[LearningProposal] = None
+
+
 class UpdateSectionContent(BaseModel):
     content_html: str
     content_json: Optional[Dict[str, Any]] = None
@@ -449,6 +457,38 @@ class DiagramGenerationRequest(BaseModel):
     nodes: Optional[List[Dict[str, Any]]] = None
 
 
+# --- Interactive organigramme nodes (03/09, boucle d'apprentissage "schemas/tableaux") ---
+class OrganigrammeNodeBase(BaseModel):
+    nom: str
+    role: str
+    experience_ans: int = Field(default=10, ge=0, le=60)
+    presence_hebdo_pct: int = Field(default=100, ge=0, le=100)
+    qualif: Optional[str] = None
+
+
+class OrganigrammeNodeCreate(OrganigrammeNodeBase):
+    pass
+
+
+class OrganigrammeNodeUpdate(BaseModel):
+    nom: Optional[str] = None
+    role: Optional[str] = None
+    experience_ans: Optional[int] = Field(default=None, ge=0, le=60)
+    presence_hebdo_pct: Optional[int] = Field(default=None, ge=0, le=100)
+    qualif: Optional[str] = None
+
+
+class OrganigrammeNodeOut(OrganigrammeNodeBase):
+    id: str
+    project_id: str
+    sequence: int
+
+
+class OrganigrammeLearningCheckResponse(BaseModel):
+    learning_opportunity: bool = False
+    learning_proposal: Optional[LearningProposal] = None
+
+
 # -----------------------------------------------------------------------------
 # Export Models
 # -----------------------------------------------------------------------------
@@ -458,6 +498,7 @@ class ExportDocumentRequest(BaseModel):
     template_id: Optional[str] = None
     include_gantt: bool = True
     include_organigramme: bool = True
+    include_cover_page: bool = True
 
 
 class ExportJobOut(BaseModel):
@@ -567,5 +608,7 @@ class TenantReferenceUrlOut(BaseModel):
     added_at: datetime
     last_fetched_at: Optional[datetime] = None
     status: str = "active"
+    content_title: Optional[str] = None
+    last_fetch_error: Optional[str] = None
 
 

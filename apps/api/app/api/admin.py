@@ -804,14 +804,17 @@ async def update_llm_keys(
             prov_id = prov_input.id or str(uuid.uuid4())[:8]
             existing_p = existing_map.get(prov_id, {})
             
-            raw_key = prov_input.api_key.strip() if prov_input.api_key else ""
-            
-            # If key was supplied and is NOT a masked string, encrypt it
-            if raw_key and "•••" not in raw_key and "***" not in raw_key:
-                encrypted_key = encrypt_api_key(raw_key)
-            else:
-                # Preserve existing encrypted key
-                encrypted_key = existing_p.get("api_key", "")
+            # 03/09 (suite) : ce formulaire general ne gere plus les cles du tout --
+            # seul POST /llm-keys/test-provider (test + sauvegarde atomique en une
+            # seule requete, avec son propre commit) a le droit d'ecrire une cle.
+            # Avant ce correctif, un "Enregistrer" clique juste apres un test reussi
+            # (par ex. pour valider le choix du palier par defaut) pouvait renvoyer
+            # un api_key vide/perime pour ce fournisseur et l'ecraser -- c'est
+            # exactement ce qui est arrive au 03/09 06:02 (cle Gemini testee avec
+            # succes a 05:58, disparue apres le premier "Enregistrer" suivant). On
+            # preserve donc INCONDITIONNELLEMENT la cle deja stockee ici, quoi que
+            # le payload contienne : ce champ n'est plus modifiable que via le test.
+            encrypted_key = existing_p.get("api_key", "")
 
             zone = prov_input.zone or "US"
             saved_providers.append({

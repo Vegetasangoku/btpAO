@@ -138,22 +138,88 @@ async def create_checkout_session(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Initializes Stripe Checkout Session for self-service subscription upgrade.
+    Initializes a REAL Stripe Checkout Session for self-service subscription upgrade.
     Protected strictly by require_tenant_owner.
-    """
 
+    01/09 : remplace l'implementation precedente qui fabriquait une fausse URL
+    (/billing/checkout-success?session_id=cs_simulated_...) et un faux session_id
+    SANS jamais appeler l'API Stripe -- l'utilisateur aurait ete rediriges vers une
+    page inexistante et aucun paiement n'aurait jamais ete initie. Construit
+    desormais un vrai stripe.checkout.Session via price_data dynamique (pas besoin
+    de pre-creer des Price IDs dans le dashboard Stripe : le prix vient directement
+    de subscription_plans.price_monthly_cents). Echoue honnetement (501) si
+    STRIPE_SECRET_KEY n'est pas configuree, plutot que de simuler un succes.
+    """
     try:
         t_uuid = uuid.UUID(current_user.tenant_id)
     except ValueError:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid tenant UUID")
 
-    checkout_url = f"/billing/checkout-success?session_id=cs_simulated_{uuid.uuid4().hex[:12]}&plan={payload.plan_id}"
-    session_id = f"cs_test_{uuid.uuid4().hex}"
+    if not settings.STRIPE_SECRET_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail=(
+                "Le paiement en ligne (Stripe) n'est pas configure sur ce serveur. "
+                "STRIPE_SECRET_KEY est absente de la configuration. Contactez votre "
+                "administrateur pour activer les paiements en self-service."
+            ),
+        )
+
+    if not payload.success_url or not payload.cancel_url:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="success_url et cancel_url (URLs absolues) sont requis pour creer une session de paiement.",
+        )
+
+    plan_stmt = select(SubscriptionPlan).where(
+        SubscriptionPlan.id == payload.plan_id,
+        SubscriptionPlan.is_active == True,
+    )
+    plan_res = await db.execute(plan_stmt)
+    plan = plan_res.scalar_one_or_none()
+    if not plan:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Palier '{payload.plan_id}' introuvable ou inactif.")
+
+    if not plan.price_monthly_cents:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Ce palier est a tarif negocie (sur devis) et ne peut pas etre souscrit en self-service. Contactez notre equipe commerciale.",
+        )
+
+    metadata = {"tenant_id": str(t_uuid), "plan_id": payload.plan_id}
+
+    try:
+        import stripe
+        stripe.api_key = settings.STRIPE_SECRET_KEY
+
+        session = stripe.checkout.Session.create(
+            mode="subscription",
+            client_reference_id=str(t_uuid),
+            customer_email=current_user.email,
+            metadata=metadata,
+            subscription_data={"metadata": metadata},
+            line_items=[{
+                "price_data": {
+                    "currency": "eur",
+                    "product_data": {"name": f"btpAO - {plan.name}"},
+                    "unit_amount": plan.price_monthly_cents,
+                    "recurring": {"interval": "month"},
+                },
+                "quantity": 1,
+            }],
+            success_url=payload.success_url,
+            cancel_url=payload.cancel_url,
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Echec de la creation de la session Stripe : {e}",
+        )
 
     return {
         "success": True,
-        "checkout_url": checkout_url,
-        "session_id": session_id,
+        "checkout_url": session.url,
+        "session_id": session.id,
         "plan_id": payload.plan_id,
     }
 
@@ -239,6 +305,7 @@ async def stripe_webhook(
                     sub.status = "active"
                     sub.billing_mode = "stripe"
                     sub.stripe_subscription_id = data_obj.get("subscription") or data_obj.get("id")
+                    sub.stripe_customer_id = data_obj.get("customer") or sub.stripe_customer_id
                     sub.current_period_start = now
                     sub.current_period_end = period_end
                     sub.updated_at = now
@@ -250,6 +317,7 @@ async def stripe_webhook(
                         status="active",
                         billing_mode="stripe",
                         stripe_subscription_id=data_obj.get("subscription") or data_obj.get("id"),
+                        stripe_customer_id=data_obj.get("customer"),
                         allow_overage=True,
                         current_period_start=now,
                         current_period_end=period_end,

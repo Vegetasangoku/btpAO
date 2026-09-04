@@ -124,19 +124,24 @@ def test_platform_admin_create_and_list_tenants_full_lifecycle():
 
     client = TestClient(app)
     headers = {"Authorization": f"Bearer {admin_token}"}
+    suffix = uuid.uuid4().hex[:6]
+    test_name = f"Test Admin Eiffage {suffix}"
+    test_slug = f"test-admin-tenant-{suffix}"
+
+    test_siret = f"444{uuid.uuid4().int % 100000000000:011d}"
 
     payload = {
-        "name": "Test Admin Eiffage TP Méditerranée",
-        "slug": "test-admin-tenant-eiffage-med",
-        "siret": "44455566600018",
-        "contact_email": "contact@eiffage-med.fr",
+        "name": test_name,
+        "slug": test_slug,
+        "siret": test_siret,
+        "contact_email": f"contact-{suffix}@eiffage-med.fr",
         "plan": "enterprise",
         "country_code": "FR",
         "llm_provider": "anthropic",
-        "llm_model": "claude-3-5-sonnet-20241022",
+        "llm_model": "claude-sonnet-5",
         "model_routing_config": {
-            "extraction_gonogo": {"provider": "Anthropic", "model": "claude-3-5-sonnet-20241022"},
-            "redaction_memoire": {"provider": "Anthropic", "model": "claude-3-5-sonnet-20241022"},
+            "extraction_gonogo": {"provider": "Anthropic", "model": "claude-sonnet-5"},
+            "redaction_memoire": {"provider": "Anthropic", "model": "claude-sonnet-5"},
             "analyse_prix": {"provider": "Mistral AI", "model": "mistral-large-2407"}
         }
     }
@@ -146,12 +151,12 @@ def test_platform_admin_create_and_list_tenants_full_lifecycle():
     assert create_res.status_code == 200, f"Expected 200 on creation, got {create_res.status_code}: {create_res.text}"
     
     created_data = create_res.json()
-    assert created_data["name"] == "Test Admin Eiffage TP Méditerranée"
-    assert created_data["slug"] == "test-admin-tenant-eiffage-med"
+    assert created_data["name"] == test_name
+    assert created_data["slug"] == test_slug
     assert created_data["plan"] == "enterprise"
     assert created_data["country_code"] == "FR"
-    assert created_data["siret"] == "44455566600018"
-    assert created_data["contact_email"] == "contact@eiffage-med.fr"
+    assert created_data["siret"] == test_siret
+    assert created_data["contact_email"] == f"contact-{suffix}@eiffage-med.fr"
     assert created_data["monthly_limit"] == 50
     created_id = created_data["id"]
 
@@ -167,12 +172,12 @@ def test_platform_admin_create_and_list_tenants_full_lifecycle():
     assert len(matching) == 1, f"Created tenant ID {created_id} not found in GET /admin/tenants list!"
     
     item = matching[0]
-    assert item["name"] == "Test Admin Eiffage TP Méditerranée"
-    assert item["slug"] == "test-admin-tenant-eiffage-med"
+    assert item["name"] == test_name
+    assert item["slug"] == test_slug
     assert item["plan"] == "enterprise"
     assert item["country_code"] == "FR"
-    assert item["siret"] == "44455566600018"
-    assert item["contact_email"] == "contact@eiffage-med.fr"
+    assert item["siret"] == test_siret
+    assert item["contact_email"] == f"contact-{suffix}@eiffage-med.fr"
     assert "users_count" in item
     assert "active_projects_count" in item
     assert item["monthly_limit"] == 50
@@ -192,11 +197,14 @@ def test_platform_admin_create_belgium_tenant():
 
     client = TestClient(app)
     headers = {"Authorization": f"Bearer {admin_token}"}
+    suffix = uuid.uuid4().hex[:6]
+    test_name = f"Test Admin Bespix Belgique {suffix}"
+    test_slug = f"test-admin-tenant-bespix-{suffix}"
 
     payload = {
-        "name": "Test Admin Bespix Belgique SA",
-        "slug": "test-admin-tenant-bespix-be",
-        "contact_email": "direction@bespix.be",
+        "name": test_name,
+        "slug": test_slug,
+        "contact_email": f"direction-{suffix}@bespix.be",
         "plan": "pro",
         "country_code": "BE",
     }
@@ -205,7 +213,7 @@ def test_platform_admin_create_belgium_tenant():
     assert create_res.status_code == 200, f"Expected 200, got {create_res.status_code}: {create_res.text}"
     
     data = create_res.json()
-    assert data["name"] == "Test Admin Bespix Belgique SA"
+    assert data["name"] == test_name
     assert data["country_code"] == "BE"
     assert data["plan"] == "pro"
     assert data["monthly_limit"] == 15

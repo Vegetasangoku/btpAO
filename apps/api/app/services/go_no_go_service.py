@@ -47,7 +47,11 @@ class GoNoGoService:
         strictly contextualized by the country regulatory profile of the tenant.
         """
         # 1. Resolve Country Regulatory Profile (strictly fails if unsupported country_code)
-        regulatory_profile = await regulatory_service.get_tenant_regulatory_profile(db=db, tenant_id=tenant_id)
+        # Cadre reglementaire du MARCHE, pas de l'entreprise (04/09) : un go/no-go evalue
+        # sur les qualifications francaises alors que le marche est qatari n'a aucun sens.
+        regulatory_profile = await regulatory_service.get_project_regulatory_profile(
+            db=db, tenant_id=tenant_id, project_id=project_id
+        )
         recognized_quals = regulatory_profile.recognized_qualifications if regulatory_profile.recognized_qualifications is not None else []
         quals_label = ", ".join(recognized_quals[:2]) if recognized_quals else "Certifications professionnelles"
 

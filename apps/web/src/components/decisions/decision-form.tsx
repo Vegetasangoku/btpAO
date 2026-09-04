@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { ProjectDecisionsForm, CadreEquipe, PhaseChantier } from '@/lib/types';
 import { api } from '@/lib/api';
+import { useTranslation } from '@/components/i18n-provider';
 
 interface DecisionFormProps {
   projectId: string;
@@ -24,6 +25,7 @@ interface DecisionFormProps {
 }
 
 export function DecisionForm({ projectId, initialData, onSaved }: DecisionFormProps) {
+  const { t } = useTranslation();
   const [formData, setFormData] = useState<ProjectDecisionsForm>(
     initialData || {
       delai_mois: 6,
@@ -108,45 +110,45 @@ export function DecisionForm({ projectId, initialData, onSaved }: DecisionFormPr
   };
 
   return (
-    <div className="bg-white dark:bg-slate-900/90 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-lg dark:shadow-2xl space-y-6">
+    <div className="card-modern p-6 sm:p-7 space-y-6 rounded-2xl font-sans">
       {/* Header */}
-      <div className="flex flex-wrap items-center justify-between gap-4 pb-4 border-b border-slate-200 dark:border-slate-800">
+      <div className="flex flex-wrap items-center justify-between gap-4 pb-4 border-b border-line">
         <div>
-          <h2 className="text-base font-bold text-slate-900 dark:text-white flex items-center gap-2">
-            <Sliders className="w-5 h-5 text-amber-500 dark:text-amber-400" />
-            Formulaire de Décisions & Choix Métiers (Conducteur de Travaux)
+          <h2 className="text-[15px] font-bold text-foreground flex items-center gap-2 font-heading">
+            <Sliders className="w-4 h-4 text-hl" />
+            {t('decisions.form.title')}
           </h2>
-          <p className="text-xs text-slate-400">
-            Ces choix techniques alimentent directement la rédaction précise et personnalisée de chaque section.
+          <p className="text-[12px] text-muted-foreground mt-0.5">
+            {t('decisions.form.subtitle')}
           </p>
         </div>
 
         <button
           onClick={handleSave}
           disabled={isSaving}
-          className="flex items-center gap-2 px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold shadow-glow disabled:opacity-50 transition-all"
+          className="btn-primary cursor-pointer"
         >
           <Save className="w-4 h-4" />
-          <span>{isSaving ? 'Enregistrement...' : 'Enregistrer les choix'}</span>
+          <span>{isSaving ? t('decisions.form.saving') : t('decisions.form.save_btn')}</span>
         </button>
       </div>
 
       {saveSuccess && (
-        <div className="p-3 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs flex items-center gap-2">
-          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-          Choix métiers enregistrés avec succès. Le moteur de rédaction et le Gantt sont synchronisés.
+        <div className="p-3.5 rounded-xl bg-positive/8 border border-positive/20 text-positive text-[13px] font-semibold flex items-center gap-2 animate-fade-in-up">
+          <CheckCircle2 className="w-4 h-4 text-positive shrink-0" />
+          {t('decisions.form.save_success')}
         </div>
       )}
 
       {/* Tabs Navigation */}
-      <div className="flex flex-wrap gap-2 border-b border-slate-200 dark:border-slate-800 pb-3">
+      <div className="tab-group !p-1 flex-wrap">
         {[
-          { id: 'delais', label: '1. Délais & Planning', icon: Calendar },
-          { id: 'materiels', label: '2. Matériels & Grues', icon: Truck },
-          { id: 'cadres', label: '3. Encadrement & CVs', icon: Users },
-          { id: 'rse', label: '4. RSE & Déchets', icon: Leaf },
-          { id: 'securite', label: '5. Sécurité & PPSPS', icon: ShieldCheck },
-          { id: 'phasage', label: '6. Phasage BTP', icon: ArrowRight },
+          { id: 'delais', label: t('decisions.form.tab_delais'), icon: Calendar },
+          { id: 'materiels', label: t('decisions.form.tab_materiels'), icon: Truck },
+          { id: 'cadres', label: t('decisions.form.tab_cadres'), icon: Users },
+          { id: 'rse', label: t('decisions.form.tab_rse'), icon: Leaf },
+          { id: 'securite', label: t('decisions.form.tab_securite'), icon: ShieldCheck },
+          { id: 'phasage', label: t('decisions.form.tab_phasage'), icon: ArrowRight },
         ].map((tab) => {
           const Icon = tab.icon;
           const isActive = activeTab === tab.id;
@@ -154,11 +156,7 @@ export function DecisionForm({ projectId, initialData, onSaved }: DecisionFormPr
             <button
               key={tab.id}
               onClick={() => setActiveTab(tab.id as any)}
-              className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium transition-all ${
-                isActive
-                  ? 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/40'
-                  : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800/60'
-              }`}
+              className={isActive ? 'tab-item-active !bg-hl !text-hl-contrast' : 'tab-item'}
             >
               <Icon className="w-3.5 h-3.5" />
               <span>{tab.label}</span>
@@ -169,41 +167,41 @@ export function DecisionForm({ projectId, initialData, onSaved }: DecisionFormPr
 
       {/* Tab 1: Délais */}
       {activeTab === 'delais' && (
-        <div className="space-y-4">
+        <div className="space-y-4 animate-fade-in-up">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="space-y-1.5">
-              <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">Délai global d’exécution garanti (mois)</label>
+              <label className="text-[13px] font-medium text-foreground">{t('decisions.form.delai_label')}</label>
               <input
                 type="number"
                 min="1"
                 max="48"
                 value={formData.delai_mois}
                 onChange={(e) => setFormData({ ...formData, delai_mois: parseInt(e.target.value) || 6 })}
-                className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg p-2.5 text-xs text-slate-900 dark:text-slate-200 focus:outline-none focus:border-amber-500"
+                className="input-field font-mono"
               />
             </div>
 
             <div className="space-y-1.5">
-              <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">Date prévisionnelle de démarrage</label>
+              <label className="text-[13px] font-medium text-foreground">{t('decisions.form.date_demarrage_label')}</label>
               <input
                 type="date"
                 value={formData.date_demarrage || ''}
                 onChange={(e) => setFormData({ ...formData, date_demarrage: e.target.value })}
-                className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg p-2.5 text-xs text-slate-900 dark:text-slate-200 focus:outline-none focus:border-amber-500"
+                className="input-field"
               />
             </div>
           </div>
 
-          <div className="flex items-center gap-3 p-3 rounded-lg bg-slate-50 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800">
+          <div className="flex items-center gap-3 p-3.5 rounded-xl card-inset">
             <input
               type="checkbox"
               id="travail_nuit"
               checked={formData.travail_de_nuit}
               onChange={(e) => setFormData({ ...formData, travail_de_nuit: e.target.checked })}
-              className="rounded bg-white dark:bg-slate-900 border-slate-300 dark:border-slate-700 text-amber-500 focus:ring-0 w-4 h-4"
+              className="rounded text-hl focus:ring-hl w-4 h-4 cursor-pointer"
             />
-            <label htmlFor="travail_nuit" className="text-xs text-slate-700 dark:text-slate-300 cursor-pointer">
-              Travail de nuit ou horaires décalés prévus (soumis à autorisation municipale et acoustique)
+            <label htmlFor="travail_nuit" className="text-[13px] text-foreground cursor-pointer font-medium">
+              {t('decisions.form.travail_nuit_label')}
             </label>
           </div>
         </div>
@@ -212,18 +210,18 @@ export function DecisionForm({ projectId, initialData, onSaved }: DecisionFormPr
       {/* Tab 2: Matériels */}
       {activeTab === 'materiels' && (
         <div className="space-y-3">
-          <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">
-            Parc matériel lourd affecté (Grues à tour, pelles, banches de coffrage)
+          <label className="text-xs font-semibold text-foreground">
+            {t('decisions.form.materiel_label')}
           </label>
           <textarea
             rows={4}
             value={formData.materiel_principal}
             onChange={(e) => setFormData({ ...formData, materiel_principal: e.target.value })}
-            className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg p-3 text-xs text-slate-900 dark:text-slate-200 focus:outline-none focus:border-amber-500 leading-relaxed"
-            placeholder="Ex : Grue à tour Potain MDT 219 (flèche 50m), 2 pelles Liebherr 22t..."
+            className="input-field leading-relaxed"
+            placeholder={t('decisions.form.materiel_placeholder')}
           />
-          <p className="text-[11px] text-slate-500 dark:text-slate-400">
-            Ces spécifications matérielles seront automatiquement injectées dans la section 2 et la notice de levage.
+          <p className="text-[11px] text-muted-foreground">
+            {t('decisions.form.materiel_helper')}
           </p>
         </div>
       )}
@@ -232,12 +230,12 @@ export function DecisionForm({ projectId, initialData, onSaved }: DecisionFormPr
       {activeTab === 'cadres' && (
         <div className="space-y-4">
           <div className="flex items-center justify-between">
-            <p className="text-xs font-semibold text-slate-700 dark:text-slate-300">Équipe d’encadrement dédiée au chantier</p>
+            <p className="text-xs font-semibold text-foreground">{t('decisions.form.cadres_label')}</p>
             <button
               onClick={addCadre}
-              className="flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400 hover:text-amber-700 dark:hover:text-amber-300 font-semibold"
+              className="flex items-center gap-1 text-xs text-hl hover:underline font-semibold cursor-pointer"
             >
-              <Plus className="w-3.5 h-3.5" /> Ajouter un cadre
+              <Plus className="w-3.5 h-3.5" /> {t('decisions.form.add_cadre_btn')}
             </button>
           </div>
 
@@ -245,10 +243,10 @@ export function DecisionForm({ projectId, initialData, onSaved }: DecisionFormPr
             {formData.equipe_cadres.map((cadre, idx) => (
               <div
                 key={idx}
-                className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800/80 grid grid-cols-1 md:grid-cols-4 gap-3 items-center"
+                className="p-3.5 rounded-xl bg-sunken border border-line grid grid-cols-1 md:grid-cols-4 gap-3 items-center"
               >
                 <div>
-                  <label className="text-[10px] text-slate-500 dark:text-slate-400 uppercase font-semibold">Nom & Prénom</label>
+                  <label className="text-[10px] text-muted-foreground uppercase font-semibold">{t('decisions.form.cadre_nom_label')}</label>
                   <input
                     type="text"
                     value={cadre.nom}
@@ -257,13 +255,13 @@ export function DecisionForm({ projectId, initialData, onSaved }: DecisionFormPr
                       updated[idx].nom = e.target.value;
                       setFormData({ ...formData, equipe_cadres: updated });
                     }}
-                    className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded p-1.5 text-xs text-slate-900 dark:text-slate-200"
-                    placeholder="Jean Dupont"
+                    className="input-field !py-1.5 !text-xs"
+                    placeholder={t('decisions.form.cadre_nom_placeholder')}
                   />
                 </div>
 
                 <div>
-                  <label className="text-[10px] text-slate-500 dark:text-slate-400 uppercase font-semibold">Rôle sur chantier</label>
+                  <label className="text-[10px] text-muted-foreground uppercase font-semibold">{t('decisions.form.cadre_role_label')}</label>
                   <input
                     type="text"
                     value={cadre.role}
@@ -272,14 +270,14 @@ export function DecisionForm({ projectId, initialData, onSaved }: DecisionFormPr
                       updated[idx].role = e.target.value;
                       setFormData({ ...formData, equipe_cadres: updated });
                     }}
-                    className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded p-1.5 text-xs text-slate-900 dark:text-slate-200"
-                    placeholder="Conducteur de Travaux"
+                    className="input-field !py-1.5 !text-xs"
+                    placeholder={t('decisions.form.cadre_role_placeholder')}
                   />
                 </div>
 
                 <div className="grid grid-cols-2 gap-2">
                   <div>
-                    <label className="text-[10px] text-slate-500 dark:text-slate-400 uppercase font-semibold">Exp. (ans)</label>
+                    <label className="text-[10px] text-muted-foreground uppercase font-semibold">{t('decisions.form.cadre_exp_label')}</label>
                     <input
                       type="number"
                       value={cadre.experience_ans}
@@ -288,11 +286,11 @@ export function DecisionForm({ projectId, initialData, onSaved }: DecisionFormPr
                         updated[idx].experience_ans = parseInt(e.target.value) || 0;
                         setFormData({ ...formData, equipe_cadres: updated });
                       }}
-                      className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded p-1.5 text-xs text-slate-900 dark:text-slate-200"
+                      className="input-field !py-1.5 !text-xs font-mono"
                     />
                   </div>
                   <div>
-                    <label className="text-[10px] text-slate-500 dark:text-slate-400 uppercase font-semibold">% Présence</label>
+                    <label className="text-[10px] text-muted-foreground uppercase font-semibold">{t('decisions.form.cadre_presence_label')}</label>
                     <input
                       type="number"
                       value={cadre.presence_hebdo_pct}
@@ -301,14 +299,14 @@ export function DecisionForm({ projectId, initialData, onSaved }: DecisionFormPr
                         updated[idx].presence_hebdo_pct = parseInt(e.target.value) || 100;
                         setFormData({ ...formData, equipe_cadres: updated });
                       }}
-                      className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded p-1.5 text-xs text-slate-900 dark:text-slate-200"
+                      className="input-field !py-1.5 !text-xs font-mono"
                     />
                   </div>
                 </div>
 
                 <div className="flex items-center justify-between gap-2 pt-3 md:pt-0">
                   <div className="flex-1">
-                    <label className="text-[10px] text-slate-500 dark:text-slate-400 uppercase font-semibold">Diplôme / Qualif</label>
+                    <label className="text-[10px] text-muted-foreground uppercase font-semibold">{t('decisions.form.cadre_qualif_label')}</label>
                     <input
                       type="text"
                       value={cadre.qualif || ''}
@@ -317,14 +315,14 @@ export function DecisionForm({ projectId, initialData, onSaved }: DecisionFormPr
                         updated[idx].qualif = e.target.value;
                         setFormData({ ...formData, equipe_cadres: updated });
                       }}
-                      className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded p-1.5 text-xs text-slate-900 dark:text-slate-200"
-                      placeholder="ESTP, Master..."
+                      className="input-field !py-1.5 !text-xs"
+                      placeholder={t('decisions.form.cadre_qualif_placeholder')}
                     />
                   </div>
                   <button
                     onClick={() => removeCadre(idx)}
-                    className="text-slate-400 dark:text-slate-500 hover:text-red-500 dark:hover:text-red-400 p-1.5 rounded self-end mb-0.5"
-                    title="Supprimer ce cadre"
+                    className="text-slate-400 hover:text-danger p-1.5 rounded self-end mb-0.5 cursor-pointer"
+                    title={t('decisions.form.remove_cadre_title')}
                   >
                     <Trash2 className="w-4 h-4" />
                   </button>
@@ -339,26 +337,26 @@ export function DecisionForm({ projectId, initialData, onSaved }: DecisionFormPr
       {activeTab === 'rse' && (
         <div className="space-y-4">
           <div className="space-y-1.5">
-            <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">
-              Démarche RSE & Bétons bas carbone
+            <label className="text-xs font-semibold text-foreground">
+              {t('decisions.form.rse_beton_label')}
             </label>
             <textarea
               rows={3}
               value={formData.demarche_rse_environnement}
               onChange={(e) => setFormData({ ...formData, demarche_rse_environnement: e.target.value })}
-              className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg p-3 text-xs text-slate-900 dark:text-slate-200 focus:outline-none focus:border-amber-500"
+              className="input-field"
             />
           </div>
 
           <div className="space-y-1.5">
-            <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">
-              Tri des déchets in situ & Filières de revalorisation locales
+            <label className="text-xs font-semibold text-foreground">
+              {t('decisions.form.rse_dechets_label')}
             </label>
             <textarea
               rows={3}
               value={formData.gestion_dechets}
               onChange={(e) => setFormData({ ...formData, gestion_dechets: e.target.value })}
-              className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg p-3 text-xs text-slate-900 dark:text-slate-200 focus:outline-none focus:border-amber-500"
+              className="input-field"
             />
           </div>
         </div>
@@ -367,14 +365,14 @@ export function DecisionForm({ projectId, initialData, onSaved }: DecisionFormPr
       {/* Tab 5: Sécurité */}
       {activeTab === 'securite' && (
         <div className="space-y-3">
-          <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">
-            Mesures de Sécurité, PPSPS & Plan d’Assurance Qualité (PAQ)
+          <label className="text-xs font-semibold text-foreground">
+            {t('decisions.form.securite_label')}
           </label>
           <textarea
             rows={4}
             value={formData.mesures_securite}
             onChange={(e) => setFormData({ ...formData, mesures_securite: e.target.value })}
-            className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg p-3 text-xs text-slate-900 dark:text-slate-200 focus:outline-none focus:border-amber-500"
+            className="input-field"
           />
         </div>
       )}
@@ -383,12 +381,12 @@ export function DecisionForm({ projectId, initialData, onSaved }: DecisionFormPr
       {activeTab === 'phasage' && (
         <div className="space-y-4">
           <div className="flex items-center justify-between">
-            <p className="text-xs font-semibold text-slate-700 dark:text-slate-300">Phasage chronologique pour le Gantt</p>
+            <p className="text-xs font-semibold text-foreground">{t('decisions.form.phasage_label')}</p>
             <button
               onClick={addPhase}
-              className="flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400 hover:text-amber-700 dark:hover:text-amber-300 font-semibold"
+              className="flex items-center gap-1 text-xs text-hl hover:underline font-semibold cursor-pointer"
             >
-              <Plus className="w-3.5 h-3.5" /> Ajouter une phase
+              <Plus className="w-3.5 h-3.5" /> {t('decisions.form.add_phase_btn')}
             </button>
           </div>
 
@@ -396,7 +394,7 @@ export function DecisionForm({ projectId, initialData, onSaved }: DecisionFormPr
             {formData.phasage_travaux.map((phase, idx) => (
               <div
                 key={idx}
-                className="p-3 rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 grid grid-cols-1 md:grid-cols-12 gap-3 items-center"
+                className="p-3 rounded-xl bg-sunken border border-line grid grid-cols-1 md:grid-cols-12 gap-3 items-center"
               >
                 <div className="md:col-span-6">
                   <input
@@ -407,8 +405,8 @@ export function DecisionForm({ projectId, initialData, onSaved }: DecisionFormPr
                       updated[idx].phase = e.target.value;
                       setFormData({ ...formData, phasage_travaux: updated });
                     }}
-                    className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded p-1.5 text-xs text-slate-900 dark:text-slate-200"
-                    placeholder="Intitulé de la phase"
+                    className="input-field !py-1.5 !text-xs"
+                    placeholder={t('decisions.form.phase_placeholder')}
                   />
                 </div>
 
@@ -421,8 +419,8 @@ export function DecisionForm({ projectId, initialData, onSaved }: DecisionFormPr
                       updated[idx].duree_semaines = parseInt(e.target.value) || 1;
                       setFormData({ ...formData, phasage_travaux: updated });
                     }}
-                    className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded p-1.5 text-xs text-slate-900 dark:text-slate-200"
-                    placeholder="Semaines"
+                    className="input-field !py-1.5 !text-xs font-mono"
+                    placeholder={t('decisions.form.duree_placeholder')}
                   />
                 </div>
 
@@ -435,15 +433,15 @@ export function DecisionForm({ projectId, initialData, onSaved }: DecisionFormPr
                       updated[idx].jalon = e.target.value;
                       setFormData({ ...formData, phasage_travaux: updated });
                     }}
-                    className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded p-1.5 text-xs text-slate-900 dark:text-slate-200"
-                    placeholder="Jalon clé"
+                    className="input-field !py-1.5 !text-xs"
+                    placeholder={t('decisions.form.jalon_placeholder')}
                   />
                 </div>
 
                 <div className="md:col-span-1 flex justify-end">
                   <button
                     onClick={() => removePhase(idx)}
-                    className="text-slate-400 dark:text-slate-500 hover:text-red-500 dark:hover:text-red-400 p-1"
+                    className="text-slate-400 hover:text-danger p-1 cursor-pointer"
                   >
                     <Trash2 className="w-4 h-4" />
                   </button>

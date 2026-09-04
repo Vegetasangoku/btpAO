@@ -125,6 +125,10 @@ async def generate_single_section(
     # 1. Enforce Subscription Quota
     await billing_service.check_and_enforce_quota(current_user.tenant_id, action="section", db=db)
 
+    # 1 bis. Plafond mensuel de coût IA (forfait ou surcharge client) — bloque avant
+    # l'appel plutôt que de laisser filer la facture. Voir cost_limits_service.
+    await billing_service.check_and_enforce_cost_cap(current_user.tenant_id, db=db)
+
     # 2. Fetch real project (guarantees tenant ownership)
     proj_stmt = select(Project).where(Project.id == p_uuid, Project.tenant_id == t_uuid)
     proj_res = await db.execute(proj_stmt)

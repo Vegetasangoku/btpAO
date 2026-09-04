@@ -17,8 +17,10 @@ import {
 } from 'lucide-react';
 import { api } from '@/lib/api';
 import { supabase } from '@/lib/supabase/client';
+import { useTranslation } from '@/components/i18n-provider';
 
 function ResetPasswordForm() {
+  const { t } = useTranslation();
   const router = useRouter();
   const searchParams = useSearchParams();
   const token = searchParams.get('token');
@@ -57,13 +59,13 @@ function ResetPasswordForm() {
               setUserEmail(res.email);
               setErrorMsg(null);
             } else {
-              setErrorMsg("Ce lien de réinitialisation est invalide ou a expiré.");
+              setErrorMsg(t('auth.reset.error_invalid_link'));
             }
             setVerifying(false);
           }
         } catch (err: any) {
           if (mounted) {
-            setErrorMsg(err?.message || "Ce lien de réinitialisation est invalide ou a expiré. Veuillez refaire une demande.");
+            setErrorMsg(err?.message || t('auth.reset.error_invalid_link_retry'));
             setVerifying(false);
           }
         }
@@ -123,7 +125,7 @@ function ResetPasswordForm() {
           const hash = typeof window !== 'undefined' ? window.location.hash : '';
           const hasRecoveryHash = hash.includes('access_token') || hash.includes('type=recovery');
           if (!hasRecoveryHash && !userEmail) {
-            setErrorMsg("Lien de réinitialisation manquant ou invalide. Veuillez cliquer sur le lien sécurisé reçu par e-mail.");
+            setErrorMsg(t('auth.reset.error_missing_link'));
             setVerifying(false);
           }
         }
@@ -141,17 +143,17 @@ function ResetPasswordForm() {
   async function handleReset(e: React.FormEvent) {
     e.preventDefault();
     if (!password || !confirmPassword) {
-      setErrorMsg('Veuillez renseigner et confirmer votre nouveau mot de passe.');
+      setErrorMsg(t('auth.reset.error_required'));
       return;
     }
 
     if (password.length < 8) {
-      setErrorMsg('Le mot de passe doit comporter au moins 8 caractères.');
+      setErrorMsg(t('auth.reset.error_password_length'));
       return;
     }
 
     if (password !== confirmPassword) {
-      setErrorMsg('Les deux mots de passe ne correspondent pas.');
+      setErrorMsg(t('auth.reset.error_password_mismatch'));
       return;
     }
 
@@ -180,7 +182,7 @@ function ResetPasswordForm() {
         router.push('/login');
       }, 2500);
     } catch (err: any) {
-      setErrorMsg(err?.message || "Erreur lors de la mise à jour du mot de passe.");
+      setErrorMsg(err?.message || t('auth.reset.error_generic'));
     } finally {
       setLoading(false);
     }
@@ -195,79 +197,79 @@ function ResetPasswordForm() {
 
   if (verifying) {
     return (
-      <div className="bg-slate-900/90 border border-slate-800 py-12 px-6 sm:px-10 rounded-3xl shadow-2xl text-center space-y-4">
-        <div className="w-10 h-10 border-2 border-sky-500 border-t-transparent rounded-full animate-spin mx-auto" />
-        <p className="text-xs text-slate-400">Vérification de la sécurité de votre lien...</p>
+      <div className="card-elevated py-10 px-6 sm:px-8 text-center space-y-3 rounded-2xl">
+        <div className="w-8 h-8 border-2 border-hl border-t-transparent rounded-full animate-spin mx-auto" />
+        <p className="text-[13px] text-muted-foreground font-mono">{t('auth.reset.verifying')}</p>
       </div>
     );
   }
 
   return (
-    <div className="bg-slate-900/90 border border-slate-800 py-8 px-6 sm:px-10 rounded-3xl shadow-2xl space-y-6">
+    <div className="card-elevated p-7 sm:p-8 space-y-5 rounded-2xl animate-fade-in-up">
       {errorMsg && (
-        <div className="p-3.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs flex items-start gap-2.5">
+        <div className="p-3.5 rounded-xl bg-danger/8 border border-danger/20 text-danger text-[13px] flex items-start gap-2.5">
           <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-          <span>{errorMsg}</span>
+          <span className="font-medium">{errorMsg}</span>
         </div>
       )}
 
       {success ? (
         <div className="space-y-4 text-center py-2">
-          <div className="w-16 h-16 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 flex items-center justify-center mx-auto shadow-glow">
-            <CheckCircle2 className="w-8 h-8" />
+          <div className="w-12 h-12 rounded-xl bg-positive/10 border border-positive/30 text-positive flex items-center justify-center mx-auto shadow-sm">
+            <CheckCircle2 className="w-6 h-6" />
           </div>
 
           <div className="space-y-1.5">
-            <h2 className="text-lg font-bold text-white">Mot de passe mis à jour !</h2>
-            <p className="text-xs text-slate-300">
-              Votre nouveau mot de passe a été enregistré avec succès pour <strong className="text-sky-300">{userEmail}</strong>.
+            <h2 className="text-[15px] font-bold text-foreground font-heading">{t('auth.reset.success_title')}</h2>
+            <p className="text-[13px] text-muted-foreground">
+              {t('auth.reset.success_body', { email: userEmail || '' })}
             </p>
           </div>
 
           <Link
             href="/login"
-            className="inline-flex items-center justify-center gap-2 w-full py-3 px-4 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs shadow-glow transition-all"
+            className="btn-primary w-full !py-3 cursor-pointer"
           >
-            <span>Se connecter maintenant</span>
+            <span>{t('auth.reset.btn_login_now')}</span>
             <ArrowRight className="w-4 h-4" />
           </Link>
         </div>
       ) : !token || !userEmail ? (
-        <div className="space-y-4 text-center py-4">
-          <p className="text-xs text-slate-400">
-            Pour réinitialiser votre mot de passe, veuillez utiliser le lien envoyé à votre adresse e-mail.
+        <div className="space-y-4 text-center py-3">
+          <p className="text-[13px] text-muted-foreground">
+            {t('auth.reset.no_token_message')}
           </p>
           <Link
             href="/forgot-password"
-            className="inline-flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs shadow-glow transition-all"
+            className="btn-primary cursor-pointer"
           >
-            <span>Demander un nouveau lien</span>
+            <span>{t('auth.reset.btn_request_new_link')}</span>
             <ArrowRight className="w-4 h-4" />
           </Link>
         </div>
       ) : (
         <form onSubmit={handleReset} className="space-y-4">
-          <div className="p-3.5 rounded-2xl bg-sky-500/10 border border-sky-500/30 flex items-center justify-between text-xs">
+          <div className="p-3.5 rounded-xl bg-hl/8 border border-hl/20 flex items-center justify-between text-[13px]">
             <div className="flex items-center gap-2.5">
-              <div className="w-7 h-7 rounded-lg bg-sky-500/20 text-sky-300 flex items-center justify-center font-bold">
+              <div className="w-7 h-7 rounded-lg bg-hl/15 text-hl flex items-center justify-center font-bold text-xs font-mono">
                 @
               </div>
-              <div>
-                <span className="text-[10px] font-semibold text-slate-400 block uppercase tracking-wider">Compte concerné</span>
-                <span className="font-bold text-white font-mono text-xs">{userEmail}</span>
+              <div className="min-w-0">
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground block">{t('auth.reset.account_label')}</span>
+                <span className="font-bold text-foreground font-mono text-[13px] truncate block">{userEmail}</span>
               </div>
             </div>
-            <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-              Jeton vérifié
+            <span className="badge-pill-emerald text-[9px] shrink-0">
+              {t('auth.reset.token_verified_badge')}
             </span>
           </div>
 
           <div>
-            <label className="block text-xs font-bold text-slate-300 mb-1.5">
-              Nouveau mot de passe
+            <label className="block text-[12px] font-semibold uppercase tracking-wider text-muted-foreground mb-1.5">
+              {t('auth.reset.label_new_password')}
             </label>
             <div className="relative">
-              <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-500">
+              <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-muted-foreground">
                 <Lock className="w-4 h-4" />
               </div>
               <input
@@ -276,12 +278,12 @@ function ResetPasswordForm() {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="••••••••••••"
-                className="w-full pl-10 pr-10 py-2.5 rounded-xl bg-slate-950/80 border border-slate-800 focus:border-sky-500 text-white text-xs placeholder:text-slate-600 focus:outline-none transition-colors"
+                className="input-field-with-icon"
               />
               <button
                 type="button"
                 onClick={() => setShowPassword(!showPassword)}
-                className="absolute inset-y-0 right-0 pr-3.5 flex items-center text-slate-500 hover:text-slate-300"
+                className="absolute inset-y-0 right-0 pr-3.5 flex items-center text-slate-400 hover:text-foreground cursor-pointer"
               >
                 {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
               </button>
@@ -291,35 +293,35 @@ function ResetPasswordForm() {
           {/* Password strength bar */}
           {password.length > 0 && (
             <div className="space-y-1.5">
-              <div className="flex gap-1 h-1.5 w-full">
+              <div className="flex gap-1.5 h-1.5 w-full">
                 {[1, 2, 3, 4].map((step) => (
                   <div
                     key={step}
-                    className={`h-full flex-1 rounded-full transition-colors ${
+                    className={`h-full flex-1 rounded-full transition-colors duration-200 ${
                       strengthScore >= step
                         ? strengthScore === 4
-                          ? 'bg-emerald-500'
+                          ? 'bg-positive'
                           : strengthScore >= 2
-                          ? 'bg-amber-500'
-                          : 'bg-rose-500'
-                        : 'bg-slate-800'
+                          ? 'bg-hl'
+                          : 'bg-danger'
+                        : 'bg-slate-200 dark:bg-raised'
                     }`}
                   />
                 ))}
               </div>
-              <div className="flex justify-between text-[10px] text-slate-500">
-                <span>Min. 8 caractères</span>
-                <span>Majuscules & Chiffres recommandés</span>
+              <div className="flex justify-between text-[10px] font-mono text-muted-foreground">
+                <span>{t('auth.reset.strength_min_chars')}</span>
+                <span>{t('auth.reset.strength_recommend')}</span>
               </div>
             </div>
           )}
 
           <div>
-            <label className="block text-xs font-bold text-slate-300 mb-1.5">
-              Confirmer le nouveau mot de passe
+            <label className="block text-[12px] font-semibold uppercase tracking-wider text-muted-foreground mb-1.5">
+              {t('auth.reset.label_confirm_password')}
             </label>
             <div className="relative">
-              <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-500">
+              <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-muted-foreground">
                 <KeyRound className="w-4 h-4" />
               </div>
               <input
@@ -328,7 +330,7 @@ function ResetPasswordForm() {
                 value={confirmPassword}
                 onChange={(e) => setConfirmPassword(e.target.value)}
                 placeholder="••••••••••••"
-                className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-slate-950/80 border border-slate-800 focus:border-sky-500 text-white text-xs placeholder:text-slate-600 focus:outline-none transition-colors"
+                className="input-field-with-icon"
               />
             </div>
           </div>
@@ -336,24 +338,24 @@ function ResetPasswordForm() {
           <button
             type="submit"
             disabled={loading}
-            className="w-full flex items-center justify-center gap-2 py-3 px-4 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs shadow-glow hover:shadow-sky-500/40 transition-all disabled:opacity-50"
+            className="btn-primary w-full !py-3 !text-[14px] cursor-pointer"
           >
             {loading ? (
-              <span>Enregistrement...</span>
+              <span>{t('auth.reset.saving')}</span>
             ) : (
               <>
-                <span>Valider le nouveau mot de passe</span>
+                <span>{t('auth.reset.btn_submit')}</span>
                 <ArrowRight className="w-4 h-4" />
               </>
             )}
           </button>
 
-          <div className="pt-2 border-t border-slate-800/80 text-center">
+          <div className="pt-2 border-t border-line text-center">
             <Link
               href="/login"
-              className="text-xs text-slate-400 hover:text-white transition-colors"
+              className="text-[13px] text-muted-foreground hover:text-hl transition-colors cursor-pointer"
             >
-              Annuler et revenir à la connexion
+              {t('auth.reset.cancel_link')}
             </Link>
           </div>
         </form>
@@ -363,43 +365,40 @@ function ResetPasswordForm() {
 }
 
 export default function ResetPasswordPage() {
+  const { t } = useTranslation();
   return (
-    <div className="min-h-screen bg-slate-950 flex flex-col justify-center py-12 sm:px-6 lg:px-8 relative overflow-hidden">
-      {/* Background Ambience */}
-      <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[800px] h-[400px] bg-sky-500/10 blur-[120px] pointer-events-none rounded-full" />
-      <div className="absolute bottom-0 right-1/4 w-[400px] h-[300px] bg-emerald-500/10 blur-[100px] pointer-events-none rounded-full" />
-
+    <div className="min-h-screen bg-hl-soft dark:bg-sunken flex flex-col justify-center py-12 px-4 sm:px-6 lg:px-8 relative overflow-hidden transition-colors duration-200 font-sans">
       <div className="sm:mx-auto sm:w-full sm:max-w-md relative z-10 text-center space-y-3">
         {/* Brand Icon */}
-        <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-gradient-to-tr from-sky-500 to-emerald-500 shadow-glow mb-1">
-          <HardHat className="w-8 h-8 text-white" />
+        <div className="inline-flex items-center justify-center w-10 h-10 rounded-xl bg-hl text-hl-contrast shadow-sm mb-1">
+          <HardHat className="w-5 h-5" />
         </div>
 
         {/* Top Badge */}
         <div>
-          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-sky-500/10 border border-sky-500/30 text-sky-300 text-xs font-semibold">
-            <Building className="w-3.5 h-3.5" />
-            Nouveau Mot de Passe Sécurisé
+          <span className="badge-pill text-[10px]">
+            <Building className="w-3 h-3 text-hl" />
+            {t('auth.reset.badge')}
           </span>
         </div>
 
-        <h1 className="text-2xl sm:text-3xl font-black text-white tracking-tight">
-          Réinitialisation du <span className="text-sky-400">mot de passe</span>
+        <h1 className="text-xl sm:text-2xl font-extrabold text-foreground tracking-tight font-heading">
+          {t('auth.reset.heading_prefix')} <span className="text-hl">{t('auth.reset.heading_highlight')}</span>
         </h1>
-        <p className="text-xs sm:text-sm text-slate-400 max-w-sm mx-auto">
-          Définissez un mot de passe robuste pour accéder à votre espace de travail.
+        <p className="text-[13px] text-muted-foreground max-w-sm mx-auto">
+          {t('auth.reset.subtitle')}
         </p>
       </div>
 
-      <div className="mt-8 sm:mx-auto sm:w-full sm:max-w-md relative z-10 px-4">
-        <Suspense fallback={<div className="p-8 text-center text-slate-500 text-xs">Chargement...</div>}>
+      <div className="mt-6 sm:mx-auto sm:w-full sm:max-w-md relative z-10 px-4">
+        <Suspense fallback={<div className="p-8 text-center text-muted-foreground text-[13px] font-mono">{t('auth.reset.loading_suspense')}</div>}>
           <ResetPasswordForm />
         </Suspense>
 
         {/* Footer Security Badge */}
-        <div className="mt-8 text-center flex items-center justify-center gap-2 text-xs text-slate-500">
-          <ShieldCheck className="w-4 h-4 text-emerald-400" />
-          <span>Données chiffrées & hébergement sécurisé conforme RGPD</span>
+        <div className="mt-6 text-center flex items-center justify-center gap-2 text-[12px] text-muted-foreground">
+          <ShieldCheck className="w-3.5 h-3.5 text-positive" />
+          <span>{t('auth.reset.footer_rgpd')}</span>
         </div>
       </div>
     </div>

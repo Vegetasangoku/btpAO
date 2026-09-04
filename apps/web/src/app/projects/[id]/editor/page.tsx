@@ -205,7 +205,7 @@ export default function EditorPage() {
     // échec / en cours / jamais lancée.
     content_html:
       isActiveFailed
-        ? `<p style="color:#fca5a5">⚠️ ${t('editor.fallback_failed_html')}</p>`
+        ? `<p style="color:#A8301A">⚠️ ${t('editor.fallback_failed_html')}</p>`
         : (isActiveGenerating || isActiveProcessing)
           ? `<p>⏳ ${t('editor.fallback_generating_html')}</p>`
           : (activeSection?.content_html || `<p>${t('editor.fallback_empty_html')}</p>`),
@@ -224,16 +224,11 @@ export default function EditorPage() {
   return (
     <div className="flex h-[calc(100vh-120px)] gap-4 pb-4">
       {/* Left Panel: Section Navigator */}
-      <div className="w-64 shrink-0 overflow-y-auto rounded-2xl bg-white dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800 p-3 space-y-1">
-        <p className="text-[10px] font-bold uppercase text-slate-500 px-2 pb-2 tracking-widest">{t('editor.sections_title')}</p>
+      <div className="w-64 shrink-0 overflow-y-auto card-modern p-3 space-y-1">
+        <p className="text-[10px] font-bold uppercase text-muted-foreground px-2 pb-2 tracking-widest">{t('editor.sections_title')}</p>
         {SECTION_KEYS.map((meta) => {
           const sec = findSection(meta.key);
           const isActive = activeKey === meta.key;
-          // "A du contenu" = un statut réellement terminé (généré / édité / validé / restauré),
-          // PAS juste "content_html non-vide" -- le backend écrit un texte-placeholder
-          // ("Génération en cours...") dès l'insertion en base, donc `Boolean(content_html)`
-          // seul était vrai avant même que la génération réelle ait commencé (coche verte
-          // trompeuse). Voir aussi le badge de score plus bas, même logique.
           const isDone = meta.key === 'planning_gantt'
             ? true
             : (sec?.status === 'generated' || sec?.status === 'edited' || sec?.status === 'validated' || sec?.status === 'restored') && Boolean(sec?.content_html);
@@ -246,42 +241,42 @@ export default function EditorPage() {
             <button
               key={meta.key}
               onClick={() => setActiveKey(meta.key)}
-              className={`w-full text-left px-3 py-2.5 rounded-xl flex items-start gap-2.5 transition-all group ${
+              className={`w-full text-left px-3 py-2.5 rounded-xl flex items-start gap-2.5 transition-all cursor-pointer group ${
                 isActive
-                  ? 'bg-amber-600/20 border border-amber-500/40 text-amber-700 dark:text-amber-300'
-                  : 'hover:bg-slate-100 dark:hover:bg-slate-800/60 text-slate-600 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
+                  ? 'bg-hl/10 border border-hl/40 text-hl font-semibold shadow-xs'
+                  : 'hover:bg-slate-100/70 dark:hover:bg-raised text-muted-foreground hover:text-foreground'
               }`}
             >
               <div className="mt-0.5 shrink-0">
                 {isKeyGenerating
-                  ? <Loader2 className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 animate-spin" />
+                  ? <Loader2 className="w-3.5 h-3.5 text-hl animate-spin" />
                   : hasFailed
-                    ? <AlertTriangle className="w-3.5 h-3.5 text-rose-400" />
+                    ? <AlertTriangle className="w-3.5 h-3.5 text-danger" />
                     : isLocked
-                      ? <Lock className="w-3.5 h-3.5 text-emerald-400" />
+                      ? <Lock className="w-3.5 h-3.5 text-positive" />
                       : isDone
-                        ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                        : <div className="w-3.5 h-3.5 rounded-full border border-slate-400 dark:border-slate-600 border-dashed" />
+                        ? <CheckCircle2 className="w-3.5 h-3.5 text-positive" />
+                        : <div className="w-3.5 h-3.5 rounded-full border border-slate-300 dark:border-line border-dashed" />
                 }
               </div>
               <div className="flex-1 min-w-0">
-                <p className="text-[11px] font-semibold leading-tight line-clamp-2">{t(meta.labelKey)}</p>
+                <p className="text-[12px] font-semibold leading-tight line-clamp-2">{t(meta.labelKey)}</p>
                 {meta.key === 'planning_gantt' ? (
-                  <p className="text-[10px] font-mono mt-0.5 text-amber-600 dark:text-amber-400">{t('editor.studio_visuals')}</p>
+                  <p className="text-[10px] font-mono mt-0.5 text-hl">{t('editor.studio_visuals')}</p>
                 ) : hasFailed ? (
-                  <p className="text-[10px] font-mono mt-0.5 text-rose-400">{t('editor.generation_failed')}</p>
+                  <p className="text-[10px] font-mono mt-0.5 text-danger">{t('editor.generation_failed')}</p>
                 ) : isKeyGenerating ? (
-                  <p className="text-[10px] font-mono mt-0.5 text-amber-600 dark:text-amber-400">{t('editor.generating')}</p>
+                  <p className="text-[10px] font-mono mt-0.5 text-hl">{t('editor.generating')}</p>
                 ) : isDone && score !== undefined ? (
-                  <p className={`text-[10px] font-mono mt-0.5 ${score >= 90 ? 'text-emerald-400' : score >= 70 ? 'text-amber-400' : 'text-rose-400'}`}>
+                  <p className={`text-[10px] font-mono mt-0.5 ${score >= 90 ? 'text-positive' : score >= 70 ? 'text-hl' : 'text-danger'}`}>
                     {t('editor.score_rc', { score })}
                   </p>
                 ) : (
-                  <p className="text-[10px] font-mono mt-0.5 text-slate-400 dark:text-slate-600">{t('editor.not_generated')}</p>
+                  <p className="text-[10px] font-mono mt-0.5 text-muted-foreground">{t('editor.not_generated')}</p>
                 )}
               </div>
               {!meta.mandatory && (
-                <span className="text-[9px] font-semibold text-slate-400 dark:text-slate-600 bg-slate-200 dark:bg-slate-800 px-1 py-0.5 rounded shrink-0">{t('editor.optional_tag')}</span>
+                <span className="text-[9px] font-semibold text-muted-foreground bg-sunken px-1.5 py-0.5 rounded shrink-0">{t('editor.optional_tag')}</span>
               )}
             </button>
           );
@@ -291,14 +286,14 @@ export default function EditorPage() {
       {/* Right Panel: Editor */}
       <div className="flex-1 overflow-y-auto space-y-4">
         {/* Section Header */}
-        <div className="flex flex-wrap items-center justify-between gap-3 p-4 rounded-2xl bg-white dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800">
+        <div className="flex flex-wrap items-center justify-between gap-3 p-4 rounded-xl card-modern">
           <div>
-            <h2 className="text-sm font-bold text-slate-900 dark:text-white">{activeMetaSection ? t(activeMetaSection.labelKey) : ''}</h2>
+            <h2 className="text-[14px] font-bold text-foreground font-heading">{activeMetaSection ? t(activeMetaSection.labelKey) : ''}</h2>
             {!activeMetaSection?.mandatory && (
-              <p className="text-[11px] text-slate-500">{t('editor.optional_note')}</p>
+              <p className="text-[11px] text-muted-foreground">{t('editor.optional_note')}</p>
             )}
             {isGanttSection && (
-              <p className="text-[11px] text-slate-500">{t('editor.gantt_note')}</p>
+              <p className="text-[11px] text-muted-foreground">{t('editor.gantt_note')}</p>
             )}
           </div>
 
@@ -307,7 +302,7 @@ export default function EditorPage() {
               <button
                 onClick={() => handleGenerate(activeKey)}
                 disabled={isActiveGenerating}
-                className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-amber-600/20 border border-amber-500/30 text-amber-700 dark:text-amber-300 text-xs font-semibold hover:bg-amber-600/30 transition-all disabled:opacity-60"
+                className="btn-primary !py-1.5 !px-3 !text-[12px]"
               >
                 {isActiveGenerating
                   ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> {t('editor.generating_ai')}</>
@@ -320,13 +315,13 @@ export default function EditorPage() {
 
         {/* Editor Area */}
         {loading ? (
-          <div className="flex items-center justify-center py-20">
-            <Loader2 className="w-8 h-8 animate-spin text-amber-600 dark:text-amber-400" />
+          <div className="flex items-center justify-center py-20 text-[13px] text-muted-foreground font-mono">
+            <Loader2 className="w-8 h-8 animate-spin text-hl" />
           </div>
         ) : isGanttSection ? (
           <InteractiveGanttChart projectId={projectId} projectTitle={project?.title || t('editor.default_project_title')} />
         ) : (
-          <div className="rounded-2xl overflow-hidden border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/40">
+          <div className="card-modern overflow-hidden">
             <TiptapEditor
               key={activeKey}
               projectId={projectId}
@@ -337,36 +332,35 @@ export default function EditorPage() {
           </div>
         )}
 
-        {/* Compliance Badge -- un état explicite par situation réelle, jamais un score
-            inventé ni un silence pendant qu'une génération est bloquée. */}
+        {/* Compliance Badge */}
         {!isGanttSection && (
           isActiveFailed ? (
-            <div className="p-4 rounded-2xl border text-sm font-semibold flex items-center gap-2 bg-rose-500/10 border-rose-500/30 text-rose-300">
+            <div className="p-4 rounded-xl border text-[13px] font-semibold flex items-center gap-2.5 bg-danger/8 border-danger/20 text-danger">
               <AlertTriangle className="w-4 h-4" />
               {t('editor.badge_failed')}
             </div>
           ) : (isActiveGenerating || isActiveProcessing) ? (
-            <div className="p-4 rounded-2xl border text-sm font-semibold flex items-center gap-2 bg-amber-500/10 border-amber-500/30 text-amber-700 dark:text-amber-300">
+            <div className="p-4 rounded-xl border text-[13px] font-semibold flex items-center gap-2.5 bg-hl/8 border-hl/20 text-hl">
               <Loader2 className="w-4 h-4 animate-spin" />
               {t('editor.badge_generating')}
             </div>
           ) : (currentSection?.status === 'generated' || currentSection?.status === 'edited' || currentSection?.status === 'validated' || currentSection?.status === 'restored') ? (
-            <div className={`p-4 rounded-2xl border text-sm font-semibold flex items-center gap-2 ${
+            <div className={`p-4 rounded-xl border text-[13px] font-semibold flex items-center gap-2.5 ${
               (currentSection.compliance_score ?? 0) >= 90
-                ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                ? 'bg-positive/8 border-positive/20 text-positive'
                 : (currentSection.compliance_score ?? 0) >= 70
-                  ? 'bg-amber-500/10 border-amber-500/30 text-amber-300'
-                  : 'bg-rose-500/10 border-rose-500/30 text-rose-300'
+                  ? 'bg-hl/8 border-hl/20 text-hl'
+                  : 'bg-danger/8 border-danger/20 text-danger'
             }`}>
               {(currentSection.compliance_score ?? 0) >= 90
-                ? <CheckCircle2 className="w-4 h-4" />
-                : <AlertTriangle className="w-4 h-4" />
+                ? <CheckCircle2 className="w-4 h-4 text-positive" />
+                : <AlertTriangle className="w-4 h-4 text-hl" />
               }
-              {t('editor.badge_score_prefix')}<span className="font-mono text-lg">{currentSection.compliance_score ?? 0}%</span>
+              {t('editor.badge_score_prefix')}<span className="font-mono text-base font-bold">{currentSection.compliance_score ?? 0}%</span>
               {(currentSection.compliance_score ?? 0) < 80 && t('editor.badge_score_warning')}
             </div>
           ) : (
-            <div className="p-4 rounded-2xl border text-sm font-semibold flex items-center gap-2 bg-slate-100 dark:bg-slate-800/60 border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-400">
+            <div className="p-4 rounded-xl card-inset text-[13px] text-muted-foreground flex items-center gap-2">
               {t('editor.badge_not_generated')}
             </div>
           )

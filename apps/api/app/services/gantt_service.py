@@ -12,7 +12,80 @@ import matplotlib
 matplotlib.use("Agg")  # Non-interactive backend — must be set before importing pyplot
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+import matplotlib.patches as mpatches
 from app.core.storage import storage_service
+
+
+def _readable_text_color(hex_color: str) -> str:
+    """Pique blanc ou anthracite selon la luminance perçue de hex_color, pour que le
+    texte reste lisible quel que soit la couleur de marque choisie par le client (une
+    couleur de marque claire avec du texte blanc dessus serait illisible)."""
+    try:
+        h = (hex_color or "").lstrip("#")
+        if len(h) != 6:
+            return "#ffffff"
+        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+        luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
+        return "#0f172a" if luminance > 0.6 else "#ffffff"
+    except Exception:
+        return "#ffffff"
+
+
+def _get_aspect(ax) -> float:
+    """Facteur mutation_aspect pour les barres arrondies/pilule. Volontairement PAS la
+    correction "complete" (display_ratio / data_ratio) qu'utilise diagram_service._get_
+    aspect : sur un Gantt, l'axe x (dates, ~des dizaines/centaines de jours) et l'axe y
+    (index de tache, quelques unites) ont un rapport de donnees si extreme (souvent >30:1)
+    que cette division fait exploser mutation_aspect (valeurs ~15-20+), ce qui casse le
+    calcul de coin arrondi de FancyBboxPatch (des pointes verticales parasites plutot
+    qu'un coin arrondi -- constate empiriquement par rendu PNG avant integration, 01/09).
+    Le ratio d'affichage seul (hauteur/largeur des axes en pixels, independant de l'echelle
+    des donnees) reste dans une plage raisonnable (~0.5-0.7 pour ce format de figure) et
+    produit un arrondi propre et borne -- verifie de meme par rendu PNG compare. Pour
+    diagram_service (organigramme), les deux formules coincident de toute facon puisque
+    ses axes sont deja carres (0-100 / 0-100, data_ratio=1)."""
+    try:
+        ll, ur = ax.transAxes.transform([(0, 0), (1, 1)])
+        disp_w, disp_h = (ur - ll)
+        return disp_h / disp_w
+    except Exception:
+        return 1.0
+
+
+def _draw_phase_bar(ax, y_pos, p_start, duration_days, bar_height, color, edgecolor, linewidth, alpha, zorder, shape_style, mutation_aspect):
+    """Dessine une barre de phase Gantt. "anguleux" (par defaut, ou valeur absente/
+    inconnue) garde EXACTEMENT le rendu historique (ax.barh, rectangle net) -- aucune
+    regression pour les tenants n'ayant jamais choisi de style. "arrondi"/"pilule"
+    dessinent un FancyBboxPatch avec correction d'aspect (voir _get_aspect) pour un
+    arrondi visuellement correct malgre l'echelle tres differente des axes x (dates) et y
+    (index de tache) -- verifie empiriquement avant integration (rendu PNG compare)."""
+    style = (shape_style or "anguleux").strip().lower()
+    if style not in ("arrondi", "pilule"):
+        ax.barh(
+            y_pos, duration_days, left=p_start, height=bar_height, align="center",
+            color=color, edgecolor=edgecolor, linewidth=linewidth, alpha=alpha, zorder=zorder,
+        )
+        return
+    # Facteurs verifies par rendu PNG (01/09) : au-dela d'environ 1.5-2x bar_height, le
+    # rayon d'arrondi depasse la moitie de la hauteur de la barre et FancyBboxPatch produit
+    # le meme artefact de pointes parasites que mentionne dans _get_aspect ci-dessus, donc
+    # rester nettement en-dessous de ce seuil pour les deux presets.
+    rounding_factor = 0.7 if style == "arrondi" else 1.3
+    x0 = mdates.date2num(p_start)
+    box = mpatches.FancyBboxPatch(
+        (x0, y_pos - bar_height / 2), duration_days, bar_height,
+        boxstyle=f"round,pad=0,rounding_size={bar_height * rounding_factor}",
+        facecolor=color, edgecolor=edgecolor, linewidth=linewidth, alpha=alpha, zorder=zorder,
+        mutation_aspect=mutation_aspect,
+    )
+    ax.add_patch(box)
+
+
+def _milestone_marker(shape_style: Optional[str]) -> str:
+    """"anguleux" (par defaut/valeur absente) -> losange (rendu historique inchange) ;
+    "arrondi"/"pilule" -> cercle."""
+    style = (shape_style or "anguleux").strip().lower()
+    return "o" if style in ("arrondi", "pilule") else "D"
 
 
 class GanttService:
@@ -23,6 +96,8 @@ class GanttService:
         project_title: str,
         phases: List[Dict[str, Any]],
         start_date_str: Optional[str] = "2026-10-01",
+        brand_color: Optional[str] = None,
+        shape_style: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Builds a high-resolution BTP construction Gantt chart with phase bars, milestones & buffers.
@@ -64,10 +139,26 @@ class GanttService:
         fig.patch.set_facecolor("#ffffff")
         ax.set_facecolor("#f8fafc")
 
-        # Color palette (BTP Steel Blue, Amber, Teal, Emerald, Indigo)
-        bar_colors = ["#0284c7", "#0d9488", "#059669", "#d97706", "#4f46e5"]
+        # Couleur de marque du client en tete de palette (branding_config.primary_color,
+        # 30/08) -- les 4 teintes suivantes restent fixes pour garder les phases
+        # visuellement distinctes (un Gantt entierement monochrome perdrait sa lisibilite).
+        bar_colors = [brand_color or "#0284c7", "#0d9488", "#059669", "#d97706", "#4f46e5"]
 
         y_positions = list(range(len(task_names) - 1, -1, -1))
+
+        use_rounded_bars = (shape_style or "").strip().lower() in ("arrondi", "pilule")
+        if use_rounded_bars:
+            # Bornes explicites AVANT le tracé pour que get_data_ratio() (donc la
+            # correction d'aspect du rounding, voir _get_aspect) soit stable quel que
+            # soit l'ordre de tracé des barres -- laissé à l'autoscale par défaut pour
+            # "anguleux" afin de ne rien changer au comportement historique.
+            x_margin_days = max((end_dates[-1] - start_dates[0]).days * 0.02, 1)
+            ax.set_xlim(
+                mdates.date2num(start_dates[0] - datetime.timedelta(days=x_margin_days)),
+                mdates.date2num(end_dates[-1] + datetime.timedelta(days=x_margin_days)),
+            )
+            ax.set_ylim(-0.5, len(y_positions) - 0.5)
+        mutation_aspect = _get_aspect(ax) if use_rounded_bars else 1.0
 
         for idx, y_pos in enumerate(y_positions):
             p_start = start_dates[idx]
@@ -75,17 +166,9 @@ class GanttService:
             duration_days = (p_end - p_start).days
             color = bar_colors[idx % len(bar_colors)]
 
-            ax.barh(
-                y_pos,
-                duration_days,
-                left=p_start,
-                height=0.45,
-                align="center",
-                color=color,
-                edgecolor="#0f172a",
-                linewidth=1.2,
-                alpha=0.92,
-                zorder=3
+            _draw_phase_bar(
+                ax, y_pos, p_start, duration_days, 0.45, color, "#0f172a", 1.2, 0.92, 3,
+                shape_style, mutation_aspect,
             )
 
             ax.text(
@@ -105,7 +188,7 @@ class GanttService:
                 ax.plot(
                     p_end,
                     y_pos,
-                    marker="D",
+                    marker=_milestone_marker(shape_style),
                     markersize=10,
                     color="#e11d48",
                     markeredgecolor="#ffffff",
@@ -271,7 +354,7 @@ class GanttService:
             previous_id = task_id
         return tasks
 
-    def generate_gantt_chart_png_from_tasks(self, tenant_id, project_id, project_title, tasks):
+    def generate_gantt_chart_png_from_tasks(self, tenant_id, project_id, project_title, tasks, brand_color=None, shape_style=None):
         """
         Renders the same high-resolution BTP Gantt PNG as generate_gantt_chart_png, but
         from real persisted project_gantt_tasks rows instead of a stateless phases list
@@ -281,9 +364,10 @@ class GanttService:
         interactive view's highlighting so the two stay visually consistent. Uploads to
         the SAME storage key as generate_gantt_chart_png, so any existing caller reading
         that key (e.g. the Word export) transparently picks up the richer chart.
+        `shape_style` : voir generate_gantt_chart_png (BT02, 01/09).
         """
         if not tasks:
-            return self.generate_gantt_chart_png(tenant_id, project_id, project_title, phases=[])
+            return self.generate_gantt_chart_png(tenant_id, project_id, project_title, phases=[], brand_color=brand_color, shape_style=shape_style)
 
         ordered = sorted(tasks, key=lambda t: (t.get("sequence", 0), t["start_date"]))
         critical_ids = self.compute_critical_path(tasks)
@@ -292,8 +376,24 @@ class GanttService:
         fig.patch.set_facecolor("#ffffff")
         ax.set_facecolor("#f8fafc")
 
-        bar_colors = ["#0284c7", "#0d9488", "#059669", "#d97706", "#4f46e5"]
+        # Couleur de marque du client (branding_config.primary_color) en tete de palette
+        # (30/08, reponse a une demande explicite d'adaptation a la charte graphique) --
+        # les 4 teintes suivantes restent fixes pour garder les phases visuellement
+        # distinctes (un Gantt entierement monochrome perdrait sa lisibilite).
+        bar_colors = [brand_color or "#0284c7", "#0d9488", "#059669", "#d97706", "#4f46e5"]
         y_positions = list(range(len(ordered) - 1, -1, -1))
+
+        overall_start = min(t["start_date"] for t in ordered)
+        overall_end = max(t["end_date"] for t in ordered)
+        use_rounded_bars = (shape_style or "").strip().lower() in ("arrondi", "pilule")
+        if use_rounded_bars:
+            x_margin_days = max((overall_end - overall_start).days * 0.02, 1)
+            ax.set_xlim(
+                mdates.date2num(overall_start - datetime.timedelta(days=x_margin_days)),
+                mdates.date2num(overall_end + datetime.timedelta(days=x_margin_days)),
+            )
+            ax.set_ylim(-0.5, len(y_positions) - 0.5)
+        mutation_aspect = _get_aspect(ax) if use_rounded_bars else 1.0
 
         for idx, y_pos in enumerate(y_positions):
             t = ordered[idx]
@@ -303,10 +403,9 @@ class GanttService:
             is_critical = t["id"] in critical_ids
             color = "#dc2626" if is_critical else bar_colors[idx % len(bar_colors)]
 
-            ax.barh(
-                y_pos, duration_days, left=p_start, height=0.45, align="center",
-                color=color, edgecolor="#0f172a", linewidth=1.6 if is_critical else 1.2,
-                alpha=0.92, zorder=3
+            _draw_phase_bar(
+                ax, y_pos, p_start, duration_days, 0.45, color, "#0f172a",
+                1.6 if is_critical else 1.2, 0.92, 3, shape_style, mutation_aspect,
             )
             ax.text(
                 p_start + datetime.timedelta(days=duration_days / 2), y_pos,
@@ -316,7 +415,7 @@ class GanttService:
             milestone = t.get("milestone_label")
             if milestone:
                 ax.plot(
-                    p_end, y_pos, marker="D", markersize=10, color="#e11d48",
+                    p_end, y_pos, marker=_milestone_marker(shape_style), markersize=10, color="#e11d48",
                     markeredgecolor="#ffffff", markeredgewidth=1.5, zorder=5
                 )
                 ax.text(
@@ -336,8 +435,6 @@ class GanttService:
         ax.grid(axis="x", which="both", color="#cbd5e1", linestyle="--", linewidth=0.7, alpha=0.7, zorder=1)
         ax.set_axisbelow(True)
 
-        overall_start = min(t["start_date"] for t in ordered)
-        overall_end = max(t["end_date"] for t in ordered)
         total_weeks = (overall_end - overall_start).days // 7
         total_months = round(total_weeks / 4.33, 1)
         n_critical = len(critical_ids)

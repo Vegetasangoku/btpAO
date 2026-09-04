@@ -44,6 +44,20 @@ celery_app.conf.update(
     task_time_limit=3600,  # 1 hour max per task
     worker_prefetch_multiplier=1,
     broker_connection_retry_on_startup=True,
+    # 03/09 (nuit) : le conteneur worker ecoute "-Q default,ocr,generation" (docker-compose.yml)
+    # mais rien ici ne routait les taches vers ces files -- Celery publiait donc CHAQUE tache
+    # (generate_section_task y compris) sur sa file par defaut interne "celery", que ce worker
+    # n'ecoute justement pas. Consequence : toute tache .delay()'ee restait invisible pour le
+    # worker, pour toujours, sans la moindre erreur ni cote API ni cote worker (le worker tourne,
+    # healthy, mais ne voit jamais rien passer) -- c'est la cause racine du dossier bloque sur
+    # "processing" ce soir (03/09, 71260018_CCTP_VDEF). task_default_queue aligne la file par
+    # defaut de Celery sur une file reellement ecoutee ; task_routes isole en plus les 2 taches
+    # les plus lourdes sur leurs files dediees, comme le nommage -Q le laissait deviner.
+    task_default_queue="default",
+    task_routes={
+        "tasks.parse_dce_task": {"queue": "ocr"},
+        "tasks.generate_section_task": {"queue": "generation"},
+    },
 )
 
 # ── Celery Beat Scheduled Tasks ──────────────────────────────────────────────

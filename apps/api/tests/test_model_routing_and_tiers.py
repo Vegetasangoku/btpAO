@@ -28,8 +28,8 @@ async def test_model_routing_hierarchy():
     )
 
     result_mock = MagicMock()
-    # First call: select(Tenant), second call: select(PlatformSettings)
-    result_mock.scalar_one_or_none.side_effect = [tenant_a, None]
+    # First call: select(Tenant), second call: select(PlatformSettings) for get_effective_tiers, third call: select(PlatformSettings) for default tier
+    result_mock.scalar_one_or_none.side_effect = [tenant_a, None, None]
     db_mock.execute.return_value = result_mock
 
     res_a = await model_routing_service.resolve_model_for_tenant(
@@ -45,7 +45,7 @@ async def test_model_routing_hierarchy():
         id="global",
         settings={"default_llm_tier": "avance"},
     )
-    result_mock.scalar_one_or_none.side_effect = [tenant_a, ps_mock]
+    result_mock.scalar_one_or_none.side_effect = [tenant_a, ps_mock, ps_mock]
 
     res_platform_changed = await model_routing_service.resolve_model_for_tenant(
         db=db_mock,
@@ -64,7 +64,7 @@ async def test_model_routing_hierarchy():
         plan="starter",
         branding_config={"llm_model_tier": "economique"},
     )
-    result_mock.scalar_one_or_none.side_effect = [tenant_b, ps_mock]
+    result_mock.scalar_one_or_none.side_effect = [tenant_b, ps_mock, ps_mock]
 
     res_b = await model_routing_service.resolve_model_for_tenant(
         db=db_mock,
@@ -83,14 +83,14 @@ async def test_model_routing_hierarchy():
         plan="enterprise",
         branding_config={"llm_model_tier": "maximum"},
     )
-    result_mock.scalar_one_or_none.side_effect = [tenant_c, ps_mock]
+    result_mock.scalar_one_or_none.side_effect = [tenant_c, ps_mock, ps_mock]
 
     res_c = await model_routing_service.resolve_model_for_tenant(
         db=db_mock,
         tenant_id=tenant_id_c,
     )
     assert res_c["tier_id"] == "maximum"
-    assert res_c["model_string"] == "anthropic/claude-fable-5"
+    assert res_c["model_string"] == "anthropic/claude-fable-5-1"
     assert res_c["is_override"] is True
 
 
@@ -148,12 +148,12 @@ async def test_llm_generator_logs_and_returns_model():
             rag_dce_chunks=[{"section_title": "CCTP Lot Gros Oeuvre", "page_number": 12, "content": "Fondations spéciales"}],
             rag_company_assets=[{"category": "Matériel", "description": "Grues à tour Potain"}],
             regulatory_profile=sample_reg_profile,
-            llm_model="anthropic/claude-3-5-haiku-20241022",
+            llm_model="anthropic/claude-haiku-4-5-20251001",
         )
 
 
-        assert res["model_used"] == "anthropic/claude-3-5-haiku-20241022"
+        assert res["model_used"] == "anthropic/claude-haiku-4-5-20251001"
         assert "Claude Haiku 4.5" in res["content_html"]
         mock_litellm.assert_called_once()
         call_kwargs = mock_litellm.call_args[1]
-        assert call_kwargs["model"] == "anthropic/claude-3-5-haiku-20241022"
+        assert call_kwargs["model"] == "anthropic/claude-haiku-4-5-20251001"

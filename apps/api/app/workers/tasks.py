@@ -17,7 +17,7 @@ from app.core.db import get_worker_db_session, AsyncSessionLocal
 
 logger = logging.getLogger(__name__)
 from app.core.storage import storage_service
-from app.models.entities import DCECriterionEntity, DCEDocument, DCEEmbedding, ExportJob, ExportTemplate, GeneratedSection, KnowledgeVector, LlmCatalogModel, LlmUsageLog, Project, ProjectDecision, ProjectGanttTask, CompanyAsset, Tenant, SharePointConnection, SharePointSyncItem
+from app.models.entities import DCECriterionEntity, DCEDocument, DCEEmbedding, ExportJob, ExportTemplate, GeneratedSection, KnowledgeVector, LlmCatalogModel, LlmUsageLog, Project, ProjectDecision, ProjectGanttTask, CompanyAsset, Tenant, SharePointConnection, SharePointSyncItem, TenantReferenceUrl
 
 from app.services.billing_service import billing_service
 from app.services.ocr_cost_service import check_and_enforce_ocr_cap, log_ocr_usage
@@ -367,7 +367,11 @@ def generate_section_task(
 
                 # 6. Resolve Country Regulatory Profile
                 from app.services.regulatory_service import regulatory_service
-                reg_profile = await regulatory_service.get_tenant_regulatory_profile(db=db, tenant_id=tenant_uuid)
+                # Pays du MARCHE (Project.country_code) et non plus du tenant -- voir
+                # regulatory_service.get_project_regulatory_profile et migration 00037.
+                reg_profile = await regulatory_service.get_project_regulatory_profile(
+                    db=db, tenant_id=tenant_uuid, project_id=project_uuid
+                )
                 reg_dict = {
                     "country_code": reg_profile.country_code,
                     "country_name": reg_profile.country_name,
@@ -425,6 +429,29 @@ def generate_section_task(
                         for r in web_results
                     ]
 
+                # 7bis. Sites de reference ajoutes par le tenant (ex. site de l'acheteur
+                # public vise, federation professionnelle...) -- INDEPENDANT du repli web
+                # ci-dessus : contrairement a la recherche Serper, ce sont des sources que le
+                # tenant a explicitement demande d'utiliser a CHAQUE generation pour coller
+                # au plus pres du client vise (garde-fou de cout : MAX_TENANT_REFERENCE_URLS
+                # sites au total -- voir company_bootstrap.py -- contenu de chacun re-borne a
+                # CONTEXT_LIMITS["client_sites"] caracteres au moment du prompt, voir
+                # llm_generator.py).
+                client_sites_stmt = select(TenantReferenceUrl).where(
+                    TenantReferenceUrl.tenant_id == tenant_uuid,
+                    TenantReferenceUrl.status == "active",
+                    TenantReferenceUrl.content_excerpt.isnot(None),
+                ).order_by(TenantReferenceUrl.added_at.desc())
+                client_sites_res = await db.execute(client_sites_stmt)
+                client_sites_payload = [
+                    {
+                        "title": u.content_title or u.label or u.url,
+                        "url": u.url,
+                        "content": u.content_excerpt,
+                    }
+                    for u in client_sites_res.scalars().all()
+                ]
+
                 # 8. Retrieve Tenant Custom System Prompt and Model Tier
                 tenant_rec = (await db.execute(select(Tenant).where(Tenant.id == tenant_uuid))).scalars().first()
                 tenant_custom_prompt = (tenant_rec.branding_config or {}).get("system_prompt") if tenant_rec else None
@@ -455,6 +482,7 @@ def generate_section_task(
                     rag_dce_chunks=dce_chunks,
                     rag_company_assets=company_assets,
                     rag_web_sources=web_sources_payload,
+                    rag_client_sites=client_sites_payload,
                     tenant_learnings=tenant_learnings_payload,
                     regulatory_profile=reg_dict,
                     tenant_system_prompt=tenant_custom_prompt,
@@ -537,10 +565,29 @@ def generate_section_task(
 
             except Exception as e:
                 try:
-                    if section:
-                        section.status = "failed"
-                        section.compliance_notes = f"Erreur de génération : {str(e)}"
-                        await db.commit()
+                    if not section:
+                        # 03/09 (nuit) : la ligne "processing" creee par POST /api/generate/section
+                        # n'etait pas toujours visible ici (generate_section_task.delay() part avant
+                        # le commit de la requete HTTP -- get_db() ne committe qu'a la sortie de la
+                        # route). Resultat : en cas d'echec sur une section jamais encore generee,
+                        # "section" valait None et cette exception etait avalee sans AUCUNE trace en
+                        # base -- la section restait bloquee sur "processing" pour toujours, sans le
+                        # moindre message d'erreur visible. On cree desormais systematiquement une
+                        # ligne d'echec ici, pour que l'echec soit TOUJOURS visible cote utilisateur.
+                        section = GeneratedSection(
+                            id=uuid.uuid4(),
+                            tenant_id=tenant_uuid,
+                            project_id=proj_uuid,
+                            section_key=section_key,
+                            title=f"Section {section_key}",
+                            order_index=1,
+                            content_html="",
+                        )
+                        db.add(section)
+                    section.status = "failed"
+                    section.compliance_notes = f"Erreur de génération : {str(e)}"
+                    section.updated_at = datetime.utcnow()
+                    await db.commit()
                 except Exception:
                     pass
                 raise e

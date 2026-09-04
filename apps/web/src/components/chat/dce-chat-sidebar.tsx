@@ -20,6 +20,7 @@ import {
   AlertCircle,
 } from 'lucide-react';
 import { api } from '@/lib/api';
+import { useTranslation } from '@/components/i18n-provider';
 
 interface ChatSource {
   type?: string;
@@ -54,18 +55,19 @@ interface DCEChatSidebarProps {
 }
 
 export function DCEChatSidebar({ projectId, projectTitle, isOpen, onClose, mode = 'project' }: DCEChatSidebarProps) {
+  const { t } = useTranslation();
   const [sourceMode, setSourceMode] = useState<'corpus' | 'corpus_web' | 'web'>('corpus');
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       id: 'm-1',
       sender: 'assistant',
       text: mode === 'company'
-        ? `Bonjour ! Je suis votre **Assistant Savoir-Faire Entreprise**.\n\nPosez une question sur vos fiches techniques, moyens, références ou certifications, et sélectionnez votre source :\n- **Corpus** : Documents et savoir-faire de votre entreprise (onglet Savoir-Faire)\n- **Corpus + Web** : Corpus enrichi de vos sites de référence configurés\n- **Web** : Recherche limitée strictement à vos sites de référence configurés (onglet Sites de Référence)`
-        : `Bonjour ! Je suis votre **Assistant Technique BTP** pour le projet **${projectTitle || 'en cours'}**.\n\nPosez une question technique et sélectionnez votre source :\n- **Corpus** : Pièces du DCE et base de savoir-faire entreprise\n- **Corpus + Web** : Synthèse enrichie avec veille normative externe\n- **Web** : Recherche externe temps réel (DTU, normes, données marché)`,
+        ? t('chat.sidebar.welcome_company')
+        : t('chat.sidebar.welcome_project', { title: projectTitle || t('chat.sidebar.project_fallback') }),
       source_mode: 'corpus',
       sources: mode === 'company'
-        ? [{ title: 'Savoir-Faire Entreprise', citation: '[Source : Mon Entreprise]', snippet: 'Fiches techniques, moyens matériels et références indexés pour votre entreprise' }]
-        : [{ title: 'Pièces de Marché DCE', page: 1, citation: '[Source : DCE]', snippet: 'CCTP, RC, DPGF et savoir-faire entreprise indexés pour votre projet' }],
+        ? [{ title: t('chat.sidebar.src_company_title'), citation: t('chat.sidebar.src_company_citation'), snippet: t('chat.sidebar.src_company_snippet') }]
+        : [{ title: t('chat.sidebar.src_project_title'), page: 1, citation: t('chat.sidebar.src_project_citation'), snippet: t('chat.sidebar.src_project_snippet') }],
       timestamp: new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }),
     },
   ]);
@@ -76,16 +78,16 @@ export function DCEChatSidebar({ projectId, projectTitle, isOpen, onClose, mode 
 
   const SUGGESTED_PROMPTS = mode === 'company'
     ? [
-        'Quelles sont nos certifications et qualifications professionnelles ?',
-        'Quels engins et matériels avons-nous dans notre parc ?',
-        'Quelles sont nos références de chantiers similaires ?',
-        'Quelle est notre politique QSE / RSE ?',
+        t('chat.sidebar.prompt_company_1'),
+        t('chat.sidebar.prompt_company_2'),
+        t('chat.sidebar.prompt_company_3'),
+        t('chat.sidebar.prompt_company_4'),
       ]
     : [
-        'Quelles sont les pénalités de retard et le délai d\'exécution ?',
-        'Quelles sont les exigences béton bas-carbone (RE2020) ?',
-        'Quels sont les critères de notation et pondérations du RC ?',
-        'Quelles normes DTU s\'appliquent au gros œuvre ?',
+        t('chat.sidebar.prompt_project_1'),
+        t('chat.sidebar.prompt_project_2'),
+        t('chat.sidebar.prompt_project_3'),
+        t('chat.sidebar.prompt_project_4'),
       ];
 
   useEffect(() => {
@@ -128,15 +130,15 @@ export function DCEChatSidebar({ projectId, projectTitle, isOpen, onClose, mode 
 
     } catch (err: any) {
       const errorText = err?.status === 401 || err?.message?.includes('401')
-        ? 'Session expirée, reconnecte-toi.'
-        : (err?.message || 'Erreur lors de la consultation des sources.');
+        ? t('chat.sidebar.error_session_expired')
+        : (err?.message || t('chat.sidebar.error_generic'));
 
       setMessages((prev) => [
         ...prev,
         {
           id: `err-${Date.now()}`,
           sender: 'assistant',
-          text: `⚠️ **Erreur** : ${errorText}`,
+          text: `⚠️ **${t('chat.sidebar.error_prefix')}** : ${errorText}`,
           source_mode: sourceMode,
           sources: [],
           timestamp: new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }),
@@ -150,28 +152,28 @@ export function DCEChatSidebar({ projectId, projectTitle, isOpen, onClose, mode 
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-y-0 right-0 w-full sm:w-[480px] bg-slate-900/95 backdrop-blur-xl border-l border-slate-800 shadow-2xl z-50 flex flex-col animate-in slide-in-from-right duration-300">
+    <div className="fixed inset-y-0 right-0 w-full sm:w-[480px] bg-card backdrop-blur-xl border-l border-line shadow-floating z-50 flex flex-col animate-in slide-in-from-right duration-300 font-sans">
       {/* Header */}
-      <div className="p-4 border-b border-slate-800 bg-slate-950/70 space-y-3">
+      <div className="p-4 border-b border-line bg-sunken space-y-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2.5">
-            <div className="w-9 h-9 rounded-xl bg-sky-500/20 text-sky-400 flex items-center justify-center border border-sky-500/30 shadow-glow">
+            <div className="w-9 h-9 rounded-xl bg-hl text-hl-contrast flex items-center justify-center shadow-xs">
               <Bot className="w-5 h-5" />
             </div>
             <div>
-              <h3 className="text-xs font-bold text-white flex items-center gap-1.5">
-                <span>{mode === 'company' ? 'Assistant Q&A Savoir-Faire Entreprise' : 'Assistant Q&A DCE & Normes'}</span>
-                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+              <h3 className="text-xs font-bold text-foreground flex items-center gap-1.5 font-heading">
+                <span>{mode === 'company' ? t('chat.sidebar.header_title_company') : t('chat.sidebar.header_title_project')}</span>
+                <span className="w-2 h-2 rounded-full bg-positive animate-pulse" />
               </h3>
-              <p className="text-[10px] text-slate-400 truncate max-w-[260px]">
-                {mode === 'company' ? 'Mon Entreprise' : (projectTitle || 'Projet en cours')}
+              <p className="text-[10px] text-muted-foreground truncate max-w-[260px]">
+                {mode === 'company' ? t('chat.sidebar.header_sub_company') : (projectTitle || t('chat.sidebar.header_sub_project_fallback'))}
               </p>
             </div>
           </div>
 
           <button
             onClick={onClose}
-            className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+            className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-card transition-colors cursor-pointer"
           >
             <X className="w-4 h-4" />
           </button>
@@ -179,53 +181,53 @@ export function DCEChatSidebar({ projectId, projectTitle, isOpen, onClose, mode 
 
         {/* 3-Choice Source Selector */}
         <div className="space-y-1">
-          <div className="flex items-center justify-between text-[10px] text-slate-400 font-medium">
-            <span>Périmètre des sources :</span>
-            <span className="text-sky-400 font-bold">
-              {sourceMode === 'corpus' && (mode === 'company' ? 'Documents Entreprise' : 'Documents Projet & Entreprise')}
-              {sourceMode === 'corpus_web' && 'Corpus + Recherche Web'}
-              {sourceMode === 'web' && (mode === 'company' ? 'Sites de Référence Configurés Uniquement' : 'Recherche Web Externe Seule')}
+          <div className="flex items-center justify-between text-[10px] text-muted-foreground font-medium">
+            <span>{t('chat.sidebar.scope_label')}</span>
+            <span className="text-hl font-bold">
+              {sourceMode === 'corpus' && (mode === 'company' ? t('chat.sidebar.scope_corpus_company') : t('chat.sidebar.scope_corpus_project'))}
+              {sourceMode === 'corpus_web' && t('chat.sidebar.scope_corpus_web')}
+              {sourceMode === 'web' && (mode === 'company' ? t('chat.sidebar.scope_web_company') : t('chat.sidebar.scope_web_project'))}
             </span>
           </div>
 
-          <div className="grid grid-cols-3 gap-1.5 p-1 rounded-xl bg-slate-950/90 border border-slate-800 text-[11px]">
+          <div className="grid grid-cols-3 gap-1.5 p-1 rounded-xl bg-card border border-line text-[11px]">
             <button
               type="button"
               onClick={() => setSourceMode('corpus')}
-              className={`py-1.5 px-2 rounded-lg font-bold flex items-center justify-center gap-1.5 transition-all ${
+              className={`py-1.5 px-2 rounded-lg font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
                 sourceMode === 'corpus'
-                  ? 'bg-sky-600 text-white shadow-glow'
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+                  ? 'bg-hl text-hl-contrast shadow-xs'
+                  : 'text-muted-foreground hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-raised'
               }`}
             >
               <Database className="w-3 h-3" />
-              <span>Corpus</span>
+              <span>{t('chat.sidebar.btn_corpus')}</span>
             </button>
 
             <button
               type="button"
               onClick={() => setSourceMode('corpus_web')}
-              className={`py-1.5 px-2 rounded-lg font-bold flex items-center justify-center gap-1.5 transition-all ${
+              className={`py-1.5 px-2 rounded-lg font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
                 sourceMode === 'corpus_web'
-                  ? 'bg-sky-600 text-white shadow-glow'
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+                  ? 'bg-hl text-hl-contrast shadow-xs'
+                  : 'text-muted-foreground hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-raised'
               }`}
             >
               <Layers className="w-3 h-3" />
-              <span>Corpus + Web</span>
+              <span>{t('chat.sidebar.btn_corpus_web')}</span>
             </button>
 
             <button
               type="button"
               onClick={() => setSourceMode('web')}
-              className={`py-1.5 px-2 rounded-lg font-bold flex items-center justify-center gap-1.5 transition-all ${
+              className={`py-1.5 px-2 rounded-lg font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
                 sourceMode === 'web'
-                  ? 'bg-sky-600 text-white shadow-glow'
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+                  ? 'bg-hl text-hl-contrast shadow-xs'
+                  : 'text-muted-foreground hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-raised'
               }`}
             >
               <Globe className="w-3 h-3" />
-              <span>Web</span>
+              <span>{t('chat.sidebar.btn_web')}</span>
             </button>
           </div>
         </div>
@@ -240,20 +242,20 @@ export function DCEChatSidebar({ projectId, projectTitle, isOpen, onClose, mode 
               m.sender === 'user' ? 'items-end' : 'items-start'
             }`}
           >
-            <div className="flex items-center gap-1.5 text-[10px] text-slate-500">
+            <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
               {m.sender === 'user' ? (
                 <>
-                  <span className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 font-mono text-[9px]">
-                    Mode : {m.source_mode || 'corpus'}
+                  <span className="px-1.5 py-0.5 rounded bg-slate-200 dark:bg-raised text-foreground font-mono text-[9px]">
+                    {t('chat.sidebar.mode_prefix', { mode: m.source_mode || 'corpus' })}
                   </span>
-                  <span>Vous</span>
+                  <span>{t('chat.sidebar.you')}</span>
                   <span>•</span>
                   <span>{m.timestamp}</span>
                 </>
               ) : (
                 <>
-                  <Sparkles className="w-3 h-3 text-sky-400" />
-                  <span className="font-bold text-sky-300">Assistant Technique</span>
+                  <Sparkles className="w-3 h-3 text-hl" />
+                  <span className="font-bold text-foreground">{t('chat.sidebar.assistant_name')}</span>
                   <span>•</span>
                   <span>{m.timestamp}</span>
                 </>
@@ -263,52 +265,54 @@ export function DCEChatSidebar({ projectId, projectTitle, isOpen, onClose, mode 
             <div
               className={`p-3.5 rounded-2xl max-w-[92%] leading-relaxed ${
                 m.sender === 'user'
-                  ? 'bg-sky-600 text-white rounded-tr-sm'
-                  : 'bg-slate-950/80 border border-slate-800 text-slate-200 rounded-tl-sm'
+                  ? 'bg-hl text-hl-contrast rounded-tr-sm shadow-xs'
+                  : 'bg-sunken border border-line text-foreground rounded-tl-sm'
               }`}
             >
               {m.is_degraded && (
-                <div className="mb-2 p-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-300 text-[10px] flex items-center gap-1.5 font-medium">
-                  <AlertCircle className="w-3.5 h-3.5 shrink-0 text-amber-400" />
-                  <span>Réponse simplifiée / extrait direct : le service IA était temporairement indisponible.</span>
+                <div className="mb-2 p-2.5 rounded-xl bg-slate-100 dark:bg-card border border-line text-foreground text-[10px] flex items-center gap-1.5 font-medium">
+                  <AlertCircle className="w-3.5 h-3.5 shrink-0 text-hl" />
+                  {/* Le serveur renvoie la cause exacte (clé absente, plafond
+                      atteint, appel refusé). L'afficher évite d'envoyer chercher
+                      une panne là où il manque un réglage. */}
+                  <span>{m.degraded_reason || t('chat.sidebar.degraded_notice')}</span>
                 </div>
               )}
 
               <div className="whitespace-pre-wrap">{m.text}</div>
 
-
               {/* Source Citations with strict tags */}
               {m.sources && m.sources.length > 0 && (
-                <div className="mt-3 pt-2.5 border-t border-slate-800/80 space-y-1.5">
-                  <p className="text-[10px] font-bold text-slate-400 flex items-center gap-1">
-                    <BookOpen className="w-3 h-3 text-sky-400" />
-                    <span>Sources identifiées ({m.sources.length}) :</span>
+                <div className="mt-3 pt-2.5 border-t border-line space-y-1.5">
+                  <p className="text-[10px] font-bold text-muted-foreground flex items-center gap-1 font-heading">
+                    <BookOpen className="w-3 h-3 text-hl" />
+                    <span>{t('chat.sidebar.sources_identified', { count: m.sources.length })}</span>
                   </p>
                   <div className="space-y-1">
                     {m.sources.map((s, idx) => (
                       <div
                         key={idx}
-                        className="p-1.5 rounded-lg bg-slate-900/90 border border-slate-800/60 text-[10px] text-slate-300 space-y-0.5"
+                        className="p-2 rounded-lg bg-card border border-line text-[10px] text-foreground space-y-0.5"
                       >
                         <div className="flex items-center justify-between">
-                          <span className="font-semibold text-sky-400 flex items-center gap-1">
-                            {s.type === 'web' ? <Globe className="w-3 h-3 text-emerald-400" /> : <FileText className="w-3 h-3 text-sky-400" />}
-                            {s.citation || s.title || `Source #${idx + 1}`}
+                          <span className="font-semibold text-foreground flex items-center gap-1">
+                            {s.type === 'web' ? <Globe className="w-3 h-3 text-positive" /> : <FileText className="w-3 h-3 text-hl" />}
+                            {s.citation || s.title || t('chat.sidebar.source_fallback', { n: idx + 1 })}
                           </span>
                           {s.url && (
                             <a
                               href={s.url}
                               target="_blank"
                               rel="noopener noreferrer"
-                              className="text-[9px] text-sky-400 hover:underline flex items-center gap-0.5"
+                              className="text-[9px] text-hl hover:underline flex items-center gap-0.5"
                             >
-                              <span>Ouvrir</span>
+                              <span>{t('chat.sidebar.open_link')}</span>
                               <ExternalLink className="w-2.5 h-2.5" />
                             </a>
                           )}
                         </div>
                         {s.snippet && (
-                          <p className="text-[10px] text-slate-400 line-clamp-2">
+                          <p className="text-[10px] text-muted-foreground line-clamp-2">
                             {s.snippet}
                           </p>
                         )}
@@ -322,11 +326,11 @@ export function DCEChatSidebar({ projectId, projectTitle, isOpen, onClose, mode 
         ))}
 
         {isLoading && (
-          <div className="flex items-center gap-2 p-3 rounded-2xl bg-slate-950/80 border border-slate-800 text-xs text-sky-400">
+          <div className="flex items-center gap-2 p-3 rounded-2xl bg-white dark:bg-raised border border-line text-xs text-hl">
             <Loader2 className="w-4 h-4 animate-spin shrink-0" />
             <div className="space-y-0.5">
-              <p className="font-semibold">Recherche et synthèse en cours ({sourceMode})...</p>
-              <p className="text-[10px] text-slate-500">Extraction des sources et vérification anti-hallucination</p>
+              <p className="font-semibold">{t('chat.sidebar.loading_search', { mode: sourceMode })}</p>
+              <p className="text-[10px] text-muted-foreground">{t('chat.sidebar.loading_detail')}</p>
             </div>
           </div>
         )}
@@ -336,16 +340,16 @@ export function DCEChatSidebar({ projectId, projectTitle, isOpen, onClose, mode 
 
       {/* Suggested Prompts if few messages */}
       {messages.length <= 2 && (
-        <div className="px-4 py-2 border-t border-slate-800/60 bg-slate-950/40">
-          <p className="text-[10px] font-bold text-slate-500 mb-1.5 uppercase tracking-wider">
-            Questions suggérées :
+        <div className="px-4 py-2 border-t border-line bg-slate-50 dark:bg-card">
+          <p className="text-[10px] font-bold text-muted-foreground mb-1.5 uppercase tracking-wider">
+            {t('chat.sidebar.suggested_questions')}
           </p>
           <div className="flex flex-wrap gap-1.5">
             {SUGGESTED_PROMPTS.map((p, idx) => (
               <button
                 key={idx}
                 onClick={() => handleSendMessage(p)}
-                className="text-[10px] py-1 px-2 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white transition-colors text-left"
+                className="text-[10px] py-1 px-2.5 rounded-lg bg-white dark:bg-raised hover:bg-sunken border border-line text-foreground hover:text-hl transition-colors text-left cursor-pointer"
               >
                 {p}
               </button>
@@ -355,7 +359,7 @@ export function DCEChatSidebar({ projectId, projectTitle, isOpen, onClose, mode 
       )}
 
       {/* Input Area */}
-      <div className="p-4 border-t border-slate-800 bg-slate-950/80">
+      <div className="p-4 border-t border-line bg-sunken">
         <form
           onSubmit={(e) => {
             e.preventDefault();
@@ -367,14 +371,14 @@ export function DCEChatSidebar({ projectId, projectTitle, isOpen, onClose, mode 
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder={mode === 'company' ? `Poser une question sur votre entreprise (${sourceMode})...` : `Poser une question sur le projet (${sourceMode})...`}
+            placeholder={mode === 'company' ? t('chat.sidebar.placeholder_company', { mode: sourceMode }) : t('chat.sidebar.placeholder_project', { mode: sourceMode })}
             disabled={isLoading}
-            className="flex-1 px-3.5 py-2.5 rounded-xl bg-slate-900 border border-slate-800 focus:border-sky-500 text-white text-xs placeholder:text-slate-600 focus:outline-none transition-colors"
+            className="input-field !py-2 !text-xs"
           />
           <button
             type="submit"
             disabled={!input.trim() || isLoading}
-            className="p-2.5 rounded-xl bg-sky-600 hover:bg-sky-500 text-white disabled:opacity-40 shadow-glow transition-all"
+            className="p-2.5 rounded-xl bg-hl hover:bg-hl-strong text-hl-contrast disabled:opacity-40 shadow-xs transition-all cursor-pointer"
           >
             <Send className="w-4 h-4" />
           </button>

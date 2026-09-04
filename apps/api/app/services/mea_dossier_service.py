@@ -51,6 +51,7 @@ class MEADossierService:
         """
         doc = docx.Document()
         is_ar = language == "ar"
+        is_fr = language == "fr"
 
         if is_ar:
             # Arabic Title & Header
@@ -89,6 +90,29 @@ class MEADossierService:
             self._apply_rtl_to_paragraph(p4)
             r4 = p4.add_run("٤. إقرار الالتزام: نقر بالتزامنا بكود البناء السعودي (SBC) ومتطلبات المحتوى المحلي (LCGPA) بنسبة مطابقة كاملة.")
             self._apply_rtl_to_run(r4)
+        elif is_fr:
+            # Version Française (02/09, correctif tâche #66 : "Français" produisait
+            # silencieusement de l'anglais faute de branche dédiée ici)
+            p_title = doc.add_paragraph()
+            p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            r_title = p_title.add_run("ROYAUME D'ARABIE SAOUDITE — FORMULAIRE OFFICIEL DE SOUMISSION")
+            r_title.font.name = "Arial"
+            r_title.font.size = Pt(16)
+            r_title.font.bold = True
+            r_title.font.color.rgb = RGBColor(16, 85, 50)
+
+            p_sub = doc.add_paragraph()
+            p_sub.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            r_sub = p_sub.add_run("Loi sur les marchés publics et la concurrence (GTPL — Décret royal n° M/128) — Conformité portail Etimad")
+            r_sub.font.size = Pt(10)
+            r_sub.font.italic = True
+
+            sa_project_title = project.get('title', 'Travaux de Construction')
+            sa_client_name = project.get('client_name', 'Entité Gouvernementale')
+            doc.add_paragraph().add_run(f"1. Identification du soumissionnaire : {tenant.get('name', 'Société de Travaux')} (Registre de commerce (CR) : {tenant.get('siret', tenant.get('cr_number', '1010000000'))})").bold = True
+            doc.add_paragraph().add_run(f"2. Autorité adjudicatrice et projet : {sa_project_title} — {sa_client_name} (Réf. : {project.get('reference_code', 'SA-2026')})")
+            doc.add_paragraph().add_run("3. Attestations légales obligatoires : Certificat de Zakat (ZATCA), assurance sociale (GOSI), classification des entrepreneurs (MOMRAH) et taux de saoudisation (Nitaqat) vérifiés.")
+            doc.add_paragraph().add_run("4. Engagement technique : Conformité totale au Code de la construction saoudien (SBC 201/801) et aux normes de contenu local (LCGPA).")
         else:
             # English Version
             p_title = doc.add_paragraph()
@@ -126,6 +150,7 @@ class MEADossierService:
         """
         doc = docx.Document()
         is_ar = language == "ar"
+        is_fr = language == "fr"
 
         if is_ar:
             p_title = doc.add_paragraph()
@@ -155,6 +180,26 @@ class MEADossierService:
             self._apply_rtl_to_paragraph(p3)
             r3 = p3.add_run("٣. معايير القيمة المحلية (ICV): التزام تام بخطة القيمة المحلية المضافة وبرنامج توطين التابع لقطر للطاقة / وزارة المالية.")
             self._apply_rtl_to_run(r3)
+        elif is_fr:
+            p_title = doc.add_paragraph()
+            p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            r_title = p_title.add_run("ÉTAT DU QATAR — FORMULAIRE DE SOUMISSION ASHGHAL / MONAQASAT")
+            r_title.font.size = Pt(16)
+            r_title.font.bold = True
+            r_title.font.color.rgb = RGBColor(140, 29, 64)
+
+            p_sub = doc.add_paragraph()
+            p_sub.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            r_sub = p_sub.add_run("Loi n° 24 de 2015 sur les appels d'offres et Spécifications de construction du Qatar (QCS 2018)")
+            r_sub.font.size = Pt(10)
+            r_sub.font.italic = True
+
+            qa_project_title = project.get('title', "Travaux d'Infrastructure")
+            qa_client_name = project.get('client_name', "Autorité des Travaux Publics (Ashghal)")
+            doc.add_paragraph().add_run(f"1. Coordonnées du soumissionnaire : {tenant.get('name', 'Société de Travaux')} (N° de registre de commerce : {tenant.get('siret', 'CR-QAT-001')})").bold = True
+            doc.add_paragraph().add_run(f"2. Marché et maître d'ouvrage : {qa_project_title} — {qa_client_name} (Réf. : {project.get('reference_code', 'QA-2026')})")
+            doc.add_paragraph().add_run("3. Valeur en pays (ICV) : Score de valeur ajoutée locale certifié et documentation d'achat local jointe.")
+            doc.add_paragraph().add_run("4. Conformité aux normes : Exécution stricte selon le QCS 2018 et la certification de durabilité GSAS 4 étoiles.")
         else:
             p_title = doc.add_paragraph()
             p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -189,6 +234,7 @@ class MEADossierService:
         """
         doc = docx.Document()
         is_ar = language == "ar"
+        is_fr = language == "fr"
 
         if is_ar:
             p_title = doc.add_paragraph()
@@ -218,6 +264,26 @@ class MEADossierService:
             self._apply_rtl_to_paragraph(p3)
             r3 = p3.add_run("٣. نسبة التوطين ومعايير الاستدامة: الالتزام بقرارات وزارة الموارد البشرية والتوطين (MOHRE) ومعايير استدامة (Estidama Pearl / Al Sa'fat).")
             self._apply_rtl_to_run(r3)
+        elif is_fr:
+            p_title = doc.add_paragraph()
+            p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            r_title = p_title.add_run("ÉMIRATS ARABES UNIS — FORMULAIRE DE SOUMISSION FÉDÉRAL")
+            r_title.font.size = Pt(16)
+            r_title.font.bold = True
+            r_title.font.color.rgb = RGBColor(0, 115, 47)
+
+            p_sub = doc.add_paragraph()
+            p_sub.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            r_sub = p_sub.add_run("Décret-loi fédéral n° 11 de 2023 relatif aux marchés publics — Plateforme numérique du Ministère des Finances")
+            r_sub.font.size = Pt(10)
+            r_sub.font.italic = True
+
+            uae_project_title = project.get('title', 'Projet de Développement')
+            uae_client_name = project.get('client_name', "Ministère de l'Énergie et des Infrastructures")
+            doc.add_paragraph().add_run(f"1. Identification de l'entreprise : {tenant.get('name', 'Société de Travaux LLC')} (Licence commerciale : {tenant.get('siret', 'CN-UAE-001')})").bold = True
+            doc.add_paragraph().add_run(f"2. Entité adjudicatrice et projet : {uae_project_title} — {uae_client_name} (Réf. : {project.get('reference_code', 'UAE-2026')})")
+            doc.add_paragraph().add_run("3. Émiratisation et conformité sociale : Conformité totale aux quotas d'émiratisation du MOHRE et au système de protection des salaires (WPS).")
+            doc.add_paragraph().add_run("4. Normes de construction durable : Conformité certifiée à la notation Estidama Pearl (Abou Dabi) et à la réglementation Al Sa'fat (Dubaï).")
         else:
             p_title = doc.add_paragraph()
             p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -253,6 +319,7 @@ class MEADossierService:
         """
         doc = docx.Document()
         is_ar = language == "ar"
+        is_en = language == "en"
 
         if is_ar:
             p_title = doc.add_paragraph()
@@ -282,6 +349,27 @@ class MEADossierService:
             self._apply_rtl_to_paragraph(p3)
             r3 = p3.add_run("٣. المستندات الإدارية: براءة ذمة من الصندوق الوطني للضمان الاجتماعي (CNSS)، إفادة تسجيل لدى وزارة المالية، وتأشيرة نقابة المهندسين (OIA).")
             self._apply_rtl_to_run(r3)
+        elif is_en:
+            # 02/09, correctif tâche #66 : bug miroir du cas SA/QA/AE -- ici c'était
+            # "English" qui produisait silencieusement du français (le else ci-dessous
+            # n'a jamais été que la version française, jamais anglaise).
+            p_title = doc.add_paragraph()
+            p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            r_title = p_title.add_run("LEBANESE REPUBLIC — PUBLIC PROCUREMENT AUTHORITY (PPA)")
+            r_title.font.size = Pt(16)
+            r_title.font.bold = True
+            r_title.font.color.rgb = RGBColor(237, 27, 36)
+
+            p_sub = doc.add_paragraph()
+            p_sub.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            r_sub = p_sub.add_run("Bid submission dossier in accordance with Law No. 244/2021 on public procurement")
+            r_sub.font.size = Pt(10)
+            r_sub.font.italic = True
+
+            doc.add_paragraph().add_run(f"1. Bidder: {tenant.get('name', 'Contracting Company SAL')} (Commercial Registry: {tenant.get('siret', 'RC-BEY-001')})").bold = True
+            doc.add_paragraph().add_run(f"2. Contracting Authority & Project: {project.get('title', 'Public Works')} — {project.get('client_name', 'Council for Development and Reconstruction (CDR)')} (Ref.: {project.get('reference_code', 'LB-2026')})")
+            doc.add_paragraph().add_run("3. Legal Certificates: Tax clearance from the Ministry of Finance, NSSF certificate, and visas from the Order of Engineers and Architects of Beirut/Tripoli (OEA).")
+            doc.add_paragraph().add_run("4. Sworn Declaration: No bankruptcy, no conflict of interest, and full legal compliance under Articles 14 to 18 of Law 244/2021.")
         else:
             p_title = doc.add_paragraph()
             p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER

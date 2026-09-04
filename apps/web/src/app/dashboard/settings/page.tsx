@@ -25,22 +25,24 @@ export default function EnterpriseSettingsPage() {
   const { language, setLanguage, t } = useTranslation();
   const [activeTab, setActiveTab] = useState<'theme' | 'economic' | 'billing' | 'regional' | 'rgpd'>('theme');
 
-  // Economic Rates State
+  // Economic Rates State (persiste reellement via /company/economic-settings -- TenantSettings)
+  const DEFAULT_HOURLY_RATES = {
+    directeurTravaux: 95,
+    conducteurTravaux: 75,
+    chefChantier: 58,
+    compagnonQualifie: 46,
+    manoeuvre: 34,
+    bureauEtudes: 82,
+  };
   const [economicSettings, setEconomicSettings] = useState({
-    hourlyRates: {
-      directeurTravaux: 95,
-      conducteurTravaux: 75,
-      chefChantier: 58,
-      compagnonQualifie: 46,
-      manoeuvre: 34,
-      bureauEtudes: 82,
-    },
+    hourlyRates: DEFAULT_HOURLY_RATES,
     inflationRate: 2.8,
     defaultMarginPercent: 12.0,
     riskContingencyPercent: 4.5,
   });
   const [savingEconomic, setSavingEconomic] = useState(false);
   const [economicSavedMsg, setEconomicSavedMsg] = useState(false);
+  const [economicError, setEconomicError] = useState<string | null>(null);
 
   // Subscription / Quotas
   const [subscription, setSubscription] = useState<{
@@ -62,16 +64,37 @@ export default function EnterpriseSettingsPage() {
 
   useEffect(() => {
     api.getSubscription().then(setSubscription).catch(console.warn);
+    api
+      .getEconomicSettings()
+      .then((data: any) => {
+        setEconomicSettings((prev) => ({
+          hourlyRates: { ...prev.hourlyRates, ...(data.taux_horaires || {}) },
+          inflationRate: data.taux_inflation_pct ?? prev.inflationRate,
+          defaultMarginPercent: data.marge_cible_pct ?? prev.defaultMarginPercent,
+          riskContingencyPercent: data.risk_contingency_pct ?? prev.riskContingencyPercent,
+        }));
+      })
+      .catch(console.warn);
   }, []);
 
-  function handleSaveEconomic(e: React.FormEvent) {
+  async function handleSaveEconomic(e: React.FormEvent) {
     e.preventDefault();
     setSavingEconomic(true);
-    setTimeout(() => {
-      setSavingEconomic(false);
+    setEconomicError(null);
+    try {
+      await api.updateEconomicSettings({
+        taux_inflation_pct: economicSettings.inflationRate,
+        marge_cible_pct: economicSettings.defaultMarginPercent,
+        risk_contingency_pct: economicSettings.riskContingencyPercent,
+        taux_horaires: economicSettings.hourlyRates,
+      });
       setEconomicSavedMsg(true);
       setTimeout(() => setEconomicSavedMsg(false), 3000);
-    }, 400);
+    } catch (err: any) {
+      setEconomicError(err?.message || "Erreur lors de l'enregistrement des réglages économiques.");
+    } finally {
+      setSavingEconomic(false);
+    }
   }
 
   function handleSaveRegional(e: React.FormEvent) {
@@ -81,7 +104,7 @@ export default function EnterpriseSettingsPage() {
   }
 
   async function handleRequestDeletion() {
-    if (!confirm('Êtes-vous sûr de vouloir demander la suppression de votre compte et de vos données d’entreprise (RGPD Art. 17) ?')) return;
+    if (!confirm('Êtes-vous sûr de vouloir demander la suppression de votre compte et de vos données d\'entreprise (RGPD Art. 17) ?')) return;
     setIsDeletingAccount(true);
     try {
       const res = await api.requestAccountDeletion();
@@ -93,46 +116,38 @@ export default function EnterpriseSettingsPage() {
     }
   }
 
+  const tabs = [
+    { id: 'theme' as const, label: t('settings.tab_theme'), icon: Sun },
+    { id: 'economic' as const, label: t('settings.tab_economic'), icon: SlidersHorizontal },
+    { id: 'billing' as const, label: t('settings.tab_billing'), icon: CreditCard },
+    { id: 'regional' as const, label: t('settings.tab_regional'), icon: Globe },
+    { id: 'rgpd' as const, label: t('settings.tab_rgpd'), icon: ShieldCheck },
+  ];
+
   return (
-    <div className="space-y-6 max-w-5xl mx-auto pb-20">
-      {/* Top Banner */}
-      <div className="p-6 rounded-xl bg-white dark:bg-[#131823] border border-slate-200 dark:border-[#1E2638] shadow-subtle space-y-4">
-        <div className="space-y-1">
-          <div className="flex items-center gap-2">
-            <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20">
-              Configuration Système
-            </span>
-          </div>
-          <h1 className="text-xl sm:text-2xl font-extrabold text-slate-900 dark:text-white font-heading">
+    <div className="page-container max-w-5xl mx-auto font-sans">
+      {/* ─── Top Banner ─── */}
+      <div className="card-elevated p-6 sm:p-7 space-y-5 rounded-2xl">
+        <div className="section-header">
+          <span className="badge-pill text-[10px]">Configuration Système</span>
+          <h1 className="text-xl sm:text-2xl font-extrabold text-foreground font-heading tracking-tight mt-2">
             {t('settings.title')}
           </h1>
-          <p className="text-xs text-slate-600 dark:text-slate-400">
-            {t('settings.desc')}
-          </p>
+          <p className="section-desc">{t('settings.desc')}</p>
         </div>
 
         {/* Tab Navigation */}
-        <div className="flex flex-wrap gap-2 pt-2 border-t border-slate-200 dark:border-[#1E2638]">
-          {[
-            { id: 'theme', label: t('settings.tab_theme'), icon: Sun },
-            { id: 'economic', label: t('settings.tab_economic'), icon: SlidersHorizontal },
-            { id: 'billing', label: t('settings.tab_billing'), icon: CreditCard },
-            { id: 'regional', label: t('settings.tab_regional'), icon: Globe },
-            { id: 'rgpd', label: t('settings.tab_rgpd'), icon: ShieldCheck },
-          ].map((tab) => {
+        <div className="tab-group">
+          {tabs.map((tab) => {
             const Icon = tab.icon;
             const isActive = activeTab === tab.id;
             return (
               <button
                 key={tab.id}
-                onClick={() => setActiveTab(tab.id as any)}
-                className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-bold font-heading border transition-all ${
-                  isActive
-                    ? 'bg-amber-500/15 border-amber-500 text-slate-900 dark:text-white'
-                    : 'bg-transparent border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-[#1E2638]'
-                }`}
+                onClick={() => setActiveTab(tab.id)}
+                className={isActive ? 'tab-item-active !bg-hl !text-hl-contrast' : 'tab-item'}
               >
-                <Icon className={`w-4 h-4 ${isActive ? 'text-amber-500' : 'text-slate-400'}`} />
+                <Icon className={`w-4 h-4 ${isActive ? 'text-white' : ''}`} />
                 <span>{tab.label}</span>
               </button>
             );
@@ -140,316 +155,191 @@ export default function EnterpriseSettingsPage() {
         </div>
       </div>
 
-      {/* --- TAB 1: THEME & APPARENCE --- */}
+      {/* ─── TAB 1: THEME & APPARENCE ─── */}
       {activeTab === 'theme' && (
-        <div className="p-6 sm:p-8 rounded-xl bg-white dark:bg-[#131823] border border-slate-200 dark:border-[#1E2638] space-y-6 shadow-subtle">
-          <div className="space-y-1">
-            <h2 className="text-base font-bold text-slate-900 dark:text-white font-heading flex items-center gap-2">
-              <Sun className="w-5 h-5 text-amber-500" />
+        <div className="card-modern p-6 sm:p-8 space-y-6 rounded-2xl animate-fade-in-up">
+          <div className="section-header">
+            <h2 className="section-title">
+              <Sun className="w-5 h-5 text-hl" />
               <span>Apparence de l'Interface (Thème)</span>
             </h2>
-            <p className="text-xs text-slate-600 dark:text-slate-400">
+            <p className="section-desc">
               Choisissez le mode d'affichage de votre espace de travail.
             </p>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            {/* Option 1: Schedule (Horaires Bureau d'Études) */}
-            <button
-              type="button"
-              onClick={() => setTheme('schedule')}
-              className={`p-5 rounded-2xl border text-left transition-all space-y-3 ${
-                theme === 'schedule'
-                  ? 'bg-amber-500/10 border-amber-500 ring-2 ring-amber-500/30'
-                  : 'bg-slate-50 dark:bg-[#0C0F17] border-slate-200 dark:border-[#1E2638] hover:border-slate-400 dark:hover:border-slate-700'
-              }`}
-            >
-              <div className="flex items-center justify-between">
-                <div className="w-9 h-9 rounded-xl bg-amber-500/10 text-amber-600 dark:text-amber-400 flex items-center justify-center">
-                  <Clock className="w-5 h-5" />
+            {[
+              { mode: 'schedule' as const, icon: Clock, title: 'Horaires Chantier', desc: 'Clair en journée (07h30 - 20h30), bascule automatique en sombre le soir.' },
+              { mode: 'system' as const, icon: Laptop, title: 'Système (OS)', desc: "S'adapte directement aux réglages de votre système d'exploitation." },
+              { mode: 'dark' as const, icon: Moon, title: 'Mode Sombre', desc: 'Fond sombre profond, reposant pour les yeux et les longues sessions.' },
+              { mode: 'light' as const, icon: Sun, title: 'Mode Clair', desc: 'Fond clair et net, pour une lisibilité maximale en plein jour.' },
+            ].map(({ mode, icon: ModeIcon, title, desc }) => (
+              <button
+                key={mode}
+                type="button"
+                onClick={() => setTheme(mode)}
+                className={`p-5 rounded-2xl border-2 text-left transition-all duration-200 space-y-3 cursor-pointer ${
+                  theme === mode
+                    ? 'border-hl bg-hl/5 shadow-xs'
+                    : 'border-line bg-white dark:bg-raised hover:border-hl/50'
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${
+                    theme === mode ? 'bg-hl/15 text-hl' : 'bg-slate-100 dark:bg-card text-muted-foreground'
+                  }`}>
+                    <ModeIcon className="w-5 h-5" />
+                  </div>
+                  {theme === mode && (
+                    <span className="badge-pill text-[9px]">Actif</span>
+                  )}
                 </div>
-                {theme === 'schedule' && (
-                  <span className="text-[10px] font-mono font-bold text-amber-600 dark:text-amber-400 bg-amber-500/15 px-2 py-0.5 rounded">
-                    Actif
-                  </span>
-                )}
-              </div>
-              <div>
-                <p className="text-xs font-bold text-slate-900 dark:text-white font-heading">
-                  Horaires Chantier
-                </p>
-                <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
-                  Clair en journée (07h30 - 20h30), bascule automatique en sombre le soir.
-                </p>
-              </div>
-            </button>
-
-            {/* Option 2: System (OS) */}
-            <button
-              type="button"
-              onClick={() => setTheme('system')}
-              className={`p-5 rounded-2xl border text-left transition-all space-y-3 ${
-                theme === 'system'
-                  ? 'bg-amber-500/10 border-amber-500 ring-2 ring-amber-500/30'
-                  : 'bg-slate-50 dark:bg-[#0C0F17] border-slate-200 dark:border-[#1E2638] hover:border-slate-400 dark:hover:border-slate-700'
-              }`}
-            >
-              <div className="flex items-center justify-between">
-                <div className="w-9 h-9 rounded-lg bg-amber-500/10 text-amber-600 dark:text-amber-400 flex items-center justify-center">
-                  <Laptop className="w-5 h-5" />
+                <div>
+                  <p className="text-[13px] font-bold text-foreground font-heading">{title}</p>
+                  <p className="text-[12px] text-muted-foreground mt-1 leading-relaxed">{desc}</p>
                 </div>
-                {theme === 'system' && (
-                  <span className="text-[10px] font-mono font-bold text-amber-600 dark:text-amber-400 bg-amber-500/15 px-2 py-0.5 rounded">
-                    Actif
-                  </span>
-                )}
-              </div>
-              <div>
-                <p className="text-xs font-bold text-slate-900 dark:text-white font-heading">
-                  Système (OS)
-                </p>
-                <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
-                  S’adapte directement aux réglages de votre système d’exploitation (macOS / Windows).
-                </p>
-              </div>
-            </button>
-
-            {/* Option 3: Dark */}
-            <button
-              type="button"
-              onClick={() => setTheme('dark')}
-              className={`p-5 rounded-2xl border text-left transition-all space-y-3 ${
-                theme === 'dark'
-                  ? 'bg-amber-500/10 border-amber-500 ring-2 ring-amber-500/30'
-                  : 'bg-slate-50 dark:bg-[#0C0F17] border-slate-200 dark:border-[#1E2638] hover:border-slate-400 dark:hover:border-slate-700'
-              }`}
-            >
-              <div className="flex items-center justify-between">
-                <div className="w-9 h-9 rounded-lg bg-amber-500/10 text-amber-600 dark:text-amber-400 flex items-center justify-center">
-                  <Moon className="w-5 h-5" />
-                </div>
-                {theme === 'dark' && (
-                  <span className="text-[10px] font-mono font-bold text-amber-600 dark:text-amber-400 bg-amber-500/15 px-2 py-0.5 rounded">
-                    Actif
-                  </span>
-                )}
-              </div>
-              <div>
-                <p className="text-xs font-bold text-slate-900 dark:text-white font-heading">
-                  Mode Sombre (Dark)
-                </p>
-                <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
-                  Fond graphite minéral profond <code className="text-amber-500">#0C0F17</code> reposant pour les yeux.
-                </p>
-              </div>
-            </button>
-
-            {/* Option 4: Light */}
-            <button
-              type="button"
-              onClick={() => setTheme('light')}
-              className={`p-5 rounded-2xl border text-left transition-all space-y-3 ${
-                theme === 'light'
-                  ? 'bg-amber-500/10 border-amber-500 ring-2 ring-amber-500/30'
-                  : 'bg-slate-50 dark:bg-[#0C0F17] border-slate-200 dark:border-[#1E2638] hover:border-slate-400 dark:hover:border-slate-700'
-              }`}
-            >
-              <div className="flex items-center justify-between">
-                <div className="w-9 h-9 rounded-lg bg-amber-500/10 text-amber-600 dark:text-amber-400 flex items-center justify-center">
-                  <Sun className="w-5 h-5" />
-                </div>
-                {theme === 'light' && (
-                  <span className="text-[10px] font-mono font-bold text-amber-600 dark:text-amber-400 bg-amber-500/15 px-2 py-0.5 rounded">
-                    Actif
-                  </span>
-                )}
-              </div>
-              <div>
-                <p className="text-xs font-bold text-slate-900 dark:text-white font-heading">
-                  Mode Clair (Light)
-                </p>
-                <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
-                  Fond calcaire blanc cassé <code className="text-amber-500">#F8FAFC</code> et lisibilité maximale.
-                </p>
-              </div>
-            </button>
+              </button>
+            ))}
           </div>
         </div>
       )}
 
-      {/* --- TAB 2: ECONOMIC SETTINGS --- */}
+      {/* ─── TAB 2: ECONOMIC SETTINGS ─── */}
       {activeTab === 'economic' && (
-        <div className="p-6 sm:p-8 rounded-xl bg-white dark:bg-[#131823] border border-slate-200 dark:border-[#1E2638] space-y-6 shadow-subtle">
-          <div className="space-y-1">
-            <h2 className="text-base font-bold text-slate-900 dark:text-white font-heading flex items-center gap-2">
-              <SlidersHorizontal className="w-5 h-5 text-amber-500" />
-              <span>Règles Économiques & Taux Horaires de Chiffrage</span>
+        <div className="card-modern p-6 sm:p-8 space-y-6 rounded-2xl animate-fade-in-up">
+          <div className="section-header">
+            <h2 className="section-title">
+              <SlidersHorizontal className="w-5 h-5 text-hl" />
+              <span>Règles Économiques & Taux Horaires</span>
             </h2>
-            <p className="text-xs text-slate-600 dark:text-slate-400">
-              Ces taux sont injectés dans l’analyse financière de vos offres et la décomposition de prix.
+            <p className="section-desc">
+              Ces taux sont injectés dans l'analyse financière de vos offres et la décomposition de prix.
             </p>
           </div>
 
-          <form onSubmit={handleSaveEconomic} className="space-y-4">
+          <form onSubmit={handleSaveEconomic} className="space-y-5">
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-              <div className="space-y-1">
-                <label className="text-xs text-slate-700 dark:text-slate-300">Conducteur de Travaux (€/h)</label>
-                <input
-                  type="number"
-                  value={economicSettings.hourlyRates.conducteurTravaux}
-                  onChange={(e) => setEconomicSettings({
-                    ...economicSettings,
-                    hourlyRates: { ...economicSettings.hourlyRates, conducteurTravaux: parseFloat(e.target.value) || 0 }
-                  })}
-                  className="w-full px-3 py-2 rounded-lg bg-slate-50 dark:bg-[#0C0F17] border border-slate-300 dark:border-[#1E2638] text-xs text-slate-900 dark:text-white"
-                />
-              </div>
-
-              <div className="space-y-1">
-                <label className="text-xs text-slate-700 dark:text-slate-300">Chef de Chantier (€/h)</label>
-                <input
-                  type="number"
-                  value={economicSettings.hourlyRates.chefChantier}
-                  onChange={(e) => setEconomicSettings({
-                    ...economicSettings,
-                    hourlyRates: { ...economicSettings.hourlyRates, chefChantier: parseFloat(e.target.value) || 0 }
-                  })}
-                  className="w-full px-3 py-2 rounded-lg bg-slate-50 dark:bg-[#0C0F17] border border-slate-300 dark:border-[#1E2638] text-xs text-slate-900 dark:text-white"
-                />
-              </div>
-
-              <div className="space-y-1">
-                <label className="text-xs text-slate-700 dark:text-slate-300">Compagnon Qualifié (€/h)</label>
-                <input
-                  type="number"
-                  value={economicSettings.hourlyRates.compagnonQualifie}
-                  onChange={(e) => setEconomicSettings({
-                    ...economicSettings,
-                    hourlyRates: { ...economicSettings.hourlyRates, compagnonQualifie: parseFloat(e.target.value) || 0 }
-                  })}
-                  className="w-full px-3 py-2 rounded-lg bg-slate-50 dark:bg-[#0C0F17] border border-slate-300 dark:border-[#1E2638] text-xs text-slate-900 dark:text-white"
-                />
-              </div>
-
-              <div className="space-y-1">
-                <label className="text-xs text-slate-700 dark:text-slate-300">Taux d'Inflation Annuel (%)</label>
-                <input
-                  type="number"
-                  step="0.1"
-                  value={economicSettings.inflationRate}
-                  onChange={(e) => setEconomicSettings({ ...economicSettings, inflationRate: parseFloat(e.target.value) || 0 })}
-                  className="w-full px-3 py-2 rounded-lg bg-slate-50 dark:bg-[#0C0F17] border border-slate-300 dark:border-[#1E2638] text-xs text-slate-900 dark:text-white"
-                />
-              </div>
-
-              <div className="space-y-1">
-                <label className="text-xs text-slate-700 dark:text-slate-300">Marge Commerciale Cible (%)</label>
-                <input
-                  type="number"
-                  step="0.1"
-                  value={economicSettings.defaultMarginPercent}
-                  onChange={(e) => setEconomicSettings({ ...economicSettings, defaultMarginPercent: parseFloat(e.target.value) || 0 })}
-                  className="w-full px-3 py-2 rounded-lg bg-slate-50 dark:bg-[#0C0F17] border border-slate-300 dark:border-[#1E2638] text-xs text-slate-900 dark:text-white"
-                />
-              </div>
-
-              <div className="space-y-1">
-                <label className="text-xs text-slate-700 dark:text-slate-300">Aléas Chantier / Risques (%)</label>
-                <input
-                  type="number"
-                  step="0.1"
-                  value={economicSettings.riskContingencyPercent}
-                  onChange={(e) => setEconomicSettings({ ...economicSettings, riskContingencyPercent: parseFloat(e.target.value) || 0 })}
-                  className="w-full px-3 py-2 rounded-lg bg-slate-50 dark:bg-[#0C0F17] border border-slate-300 dark:border-[#1E2638] text-xs text-slate-900 dark:text-white"
-                />
-              </div>
+              {[
+                { label: 'Conducteur de Travaux (€/h)', value: economicSettings.hourlyRates.conducteurTravaux, key: 'conducteurTravaux' },
+                { label: 'Chef de Chantier (€/h)', value: economicSettings.hourlyRates.chefChantier, key: 'chefChantier' },
+                { label: 'Compagnon Qualifié (€/h)', value: economicSettings.hourlyRates.compagnonQualifie, key: 'compagnonQualifie' },
+                { label: "Taux d'Inflation Annuel (%)", value: economicSettings.inflationRate, key: 'inflationRate', isGlobal: true, step: '0.1' },
+                { label: 'Marge Commerciale Cible (%)', value: economicSettings.defaultMarginPercent, key: 'defaultMarginPercent', isGlobal: true, step: '0.1' },
+                { label: 'Aléas Chantier / Risques (%)', value: economicSettings.riskContingencyPercent, key: 'riskContingencyPercent', isGlobal: true, step: '0.1' },
+              ].map(({ label, value, key, isGlobal, step }) => (
+                <div key={key} className="space-y-1.5">
+                  <label className="text-[13px] font-medium text-foreground">{label}</label>
+                  <input
+                    type="number"
+                    step={step}
+                    value={value}
+                    onChange={(e) => {
+                      const val = parseFloat(e.target.value) || 0;
+                      if (isGlobal) {
+                        setEconomicSettings({ ...economicSettings, [key]: val });
+                      } else {
+                        setEconomicSettings({
+                          ...economicSettings,
+                          hourlyRates: { ...economicSettings.hourlyRates, [key]: val }
+                        });
+                      }
+                    }}
+                    className="input-field"
+                  />
+                </div>
+              ))}
             </div>
 
-            <div className="flex justify-end pt-3">
+            <div className="flex justify-end pt-2">
               <button
                 type="submit"
                 disabled={savingEconomic}
-                className="flex items-center gap-2 px-5 py-2.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold font-heading shadow-subtle transition-all"
+                className="btn-primary cursor-pointer"
               >
-                {savingEconomic ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
+                {savingEconomic ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
                 <span>Enregistrer les règles économiques</span>
               </button>
             </div>
 
             {economicSavedMsg && (
-              <div className="p-3 rounded-lg bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-300 dark:border-emerald-500/30 text-emerald-700 dark:text-emerald-300 text-xs font-semibold flex items-center gap-2">
-                <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
+              <div className="p-3.5 rounded-xl bg-positive/8 border border-positive/20 text-positive text-[13px] font-medium flex items-center gap-2.5 animate-fade-in-up">
+                <CheckCircle2 className="w-4 h-4 text-positive shrink-0" />
                 <span>Règles de chiffrage enregistrées avec succès !</span>
+              </div>
+            )}
+            {economicError && (
+              <div className="p-3.5 rounded-xl bg-danger/8 border border-danger/20 text-danger text-[13px] font-medium flex items-center gap-2.5 animate-fade-in-up">
+                <AlertTriangle className="w-4 h-4 text-danger shrink-0" />
+                <span>{economicError}</span>
               </div>
             )}
           </form>
         </div>
       )}
 
-      {/* --- TAB 3: BILLING & QUOTAS --- */}
+      {/* ─── TAB 3: BILLING & QUOTAS ─── */}
       {activeTab === 'billing' && (
-        <div className="p-6 sm:p-8 rounded-xl bg-white dark:bg-[#131823] border border-slate-200 dark:border-[#1E2638] space-y-6 shadow-subtle">
-          <div className="space-y-1">
-            <h2 className="text-base font-bold text-slate-900 dark:text-white font-heading flex items-center gap-2">
-              <CreditCard className="w-5 h-5 text-amber-500" />
+        <div className="card-modern p-6 sm:p-8 space-y-6 rounded-2xl animate-fade-in-up">
+          <div className="section-header">
+            <h2 className="section-title">
+              <CreditCard className="w-5 h-5 text-hl" />
               <span>Abonnement & Consommation des Quotas</span>
             </h2>
-            <p className="text-xs text-slate-600 dark:text-slate-400">
+            <p className="section-desc">
               Suivez l'utilisation de vos dossiers et exports de mémoires techniques.
             </p>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-            <div className="p-4 rounded-lg bg-slate-50 dark:bg-[#0C0F17] border border-slate-200 dark:border-[#1E2638] space-y-1">
-              <span className="text-[11px] text-slate-500 dark:text-slate-400">Plan d'Abonnement Actif</span>
-              <p className="text-lg font-bold text-slate-900 dark:text-white font-heading">
+            <div className="card-inset p-5 space-y-2 rounded-xl">
+              <span className="text-[12px] text-muted-foreground">Plan d'Abonnement Actif</span>
+              <p className="text-lg font-bold text-foreground font-heading">
                 {subscription?.plan_name || 'BTP Entreprise Pro'}
               </p>
-              <span className="inline-block text-[10px] font-mono text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded">
-                Actif & Conforme
-              </span>
+              <span className="badge-pill-emerald text-[10px]">Actif & Conforme</span>
             </div>
 
-            <div className="p-4 rounded-lg bg-slate-50 dark:bg-[#0C0F17] border border-slate-200 dark:border-[#1E2638] space-y-1">
-              <span className="text-[11px] text-slate-500 dark:text-slate-400">Dossiers d'AO Utilisés</span>
-              <p className="text-lg font-bold text-slate-900 dark:text-white font-heading">
+            <div className="card-inset p-5 space-y-2 rounded-xl">
+              <span className="text-[12px] text-muted-foreground">Dossiers d'AO Utilisés</span>
+              <p className="text-lg font-bold text-foreground font-heading">
                 {subscription?.dossiers_used || 0} / {subscription?.quota_dossiers || 20}
               </p>
-              <p className="text-[10px] text-slate-500">Réinitialisé chaque mois</p>
+              <p className="text-[11px] text-muted-foreground">Réinitialisé chaque mois</p>
             </div>
 
-            <div className="p-4 rounded-lg bg-slate-50 dark:bg-[#0C0F17] border border-slate-200 dark:border-[#1E2638] space-y-1">
-              <span className="text-[11px] text-slate-500 dark:text-slate-400">Exports Word & PDF Réalisés</span>
-              <p className="text-lg font-bold text-slate-900 dark:text-white font-heading">
+            <div className="card-inset p-5 space-y-2 rounded-xl">
+              <span className="text-[12px] text-muted-foreground">Exports Word & PDF Réalisés</span>
+              <p className="text-lg font-bold text-foreground font-heading">
                 {subscription?.exports_used || 0}
               </p>
-              <p className="text-[10px] text-slate-500">Compilations certifiées</p>
+              <p className="text-[11px] text-muted-foreground">Compilations certifiées</p>
             </div>
           </div>
         </div>
       )}
 
-      {/* --- TAB 4: REGIONAL PREFERENCES & GLOBAL LANGUAGE --- */}
+      {/* ─── TAB 4: REGIONAL ─── */}
       {activeTab === 'regional' && (
-        <div className="p-6 sm:p-8 rounded-xl bg-white dark:bg-[#131823] border border-slate-200 dark:border-[#1E2638] space-y-6 shadow-subtle">
-          <div className="space-y-1">
-            <h2 className="text-base font-bold text-slate-900 dark:text-white font-heading flex items-center gap-2">
-              <Globe className="w-5 h-5 text-amber-500" />
+        <div className="card-modern p-6 sm:p-8 space-y-6 rounded-2xl animate-fade-in-up">
+          <div className="section-header">
+            <h2 className="section-title">
+              <Globe className="w-5 h-5 text-hl" />
               <span>{t('settings.tab_regional')}</span>
             </h2>
-            <p className="text-xs text-slate-600 dark:text-slate-400">
-              Définissez la réglementation pays et la langue active de la plateforme et des dossiers générés.
+            <p className="section-desc">
+              Définissez la réglementation pays et la langue active de la plateforme.
             </p>
           </div>
 
-          <form onSubmit={handleSaveRegional} className="space-y-4">
+          <form onSubmit={handleSaveRegional} className="space-y-5">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div className="space-y-1">
-                <label className="text-xs text-slate-700 dark:text-slate-300">Réglementation Pays par Défaut</label>
+              <div className="space-y-1.5">
+                <label className="text-[13px] font-medium text-foreground">Réglementation Pays par Défaut</label>
                 <select
                   value={defaultCountry}
                   onChange={(e) => setDefaultCountry(e.target.value)}
-                  className="w-full px-3 py-2 rounded-lg bg-slate-50 dark:bg-[#0C0F17] border border-slate-300 dark:border-[#1E2638] text-xs text-slate-900 dark:text-white"
+                  className="input-field"
                 >
                   <option value="FR">🇫🇷 France (Code de la Commande Publique)</option>
                   <option value="SA">🇸🇦 Arabie Saoudite (GTPL / Local Content Authority)</option>
@@ -459,12 +349,12 @@ export default function EnterpriseSettingsPage() {
                 </select>
               </div>
 
-              <div className="space-y-1">
-                <label className="text-xs text-slate-700 dark:text-slate-300">Langue Globale de l'Interface & des Livrables</label>
+              <div className="space-y-1.5">
+                <label className="text-[13px] font-medium text-foreground">Langue Globale de l'Interface & des Livrables</label>
                 <select
                   value={language}
                   onChange={(e) => setLanguage(e.target.value as Language)}
-                  className="w-full px-3 py-2 rounded-lg bg-slate-50 dark:bg-[#0C0F17] border border-slate-300 dark:border-[#1E2638] text-xs text-slate-900 dark:text-white"
+                  className="input-field"
                 >
                   <option value="fr">🇫🇷 Français (French)</option>
                   <option value="en">🇬🇧 English (International / FIDIC)</option>
@@ -473,18 +363,15 @@ export default function EnterpriseSettingsPage() {
               </div>
             </div>
 
-            <div className="flex justify-end pt-3">
-              <button
-                type="submit"
-                className="px-5 py-2.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold font-heading"
-              >
+            <div className="flex justify-end pt-2">
+              <button type="submit" className="btn-primary cursor-pointer">
                 {t('common.save')}
               </button>
             </div>
 
             {regionalSavedMsg && (
-              <div className="p-3 rounded-lg bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-300 dark:border-emerald-500/30 text-emerald-700 dark:text-emerald-300 text-xs font-semibold flex items-center gap-2">
-                <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
+              <div className="p-3.5 rounded-xl bg-positive/8 border border-positive/20 text-positive text-[13px] font-medium flex items-center gap-2.5 animate-fade-in-up">
+                <CheckCircle2 className="w-4 h-4 text-positive shrink-0" />
                 <span>Préférences régionales et langue sauvegardées avec succès !</span>
               </div>
             )}
@@ -492,37 +379,37 @@ export default function EnterpriseSettingsPage() {
         </div>
       )}
 
-      {/* --- TAB 5: RGPD --- */}
+      {/* ─── TAB 5: RGPD ─── */}
       {activeTab === 'rgpd' && (
-        <div className="p-6 sm:p-8 rounded-xl bg-white dark:bg-[#131823] border border-slate-200 dark:border-[#1E2638] space-y-6 shadow-subtle">
-          <div className="space-y-1">
-            <h2 className="text-base font-bold text-slate-900 dark:text-white font-heading flex items-center gap-2">
-              <ShieldCheck className="w-5 h-5 text-amber-500" />
+        <div className="card-modern p-6 sm:p-8 space-y-6 rounded-2xl animate-fade-in-up">
+          <div className="section-header">
+            <h2 className="section-title">
+              <ShieldCheck className="w-5 h-5 text-hl" />
               <span>Confidentialité & Droit à l'Effacement (RGPD Art. 17)</span>
             </h2>
-            <p className="text-xs text-slate-600 dark:text-slate-400">
+            <p className="section-desc">
               Conformément à la réglementation européenne sur la protection des données.
             </p>
           </div>
 
-          <div className="p-5 rounded-lg bg-rose-50 dark:bg-rose-950/20 border border-rose-200 dark:border-rose-500/30 space-y-3">
-            <h3 className="text-xs font-bold text-rose-600 dark:text-rose-400 font-heading">
+          <div className="p-5 rounded-2xl bg-danger/5 border-2 border-dashed border-danger/50 dark:border-danger/20 space-y-4">
+            <h3 className="text-[14px] font-bold text-danger font-heading">
               Suppression Définitive du Compte et des Données
             </h3>
-            <p className="text-xs text-slate-700 dark:text-slate-300 leading-relaxed">
+            <p className="text-[13px] text-muted-foreground leading-relaxed">
               La demande d'effacement déclenche la purge certifiée de tous vos mémoires générés, pièces de consultation déposées, fiches savoir-faire et comptes collaborateurs sous 30 jours calendaires.
             </p>
 
             <button
               onClick={handleRequestDeletion}
               disabled={isDeletingAccount}
-              className="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold font-heading transition-colors cursor-pointer"
+              className="btn-danger cursor-pointer"
             >
               {isDeletingAccount ? 'Traitement...' : 'Demander la suppression de mon compte'}
             </button>
 
             {deletionStatus && (
-              <p className="text-xs font-bold text-emerald-600 dark:text-emerald-400 pt-2">{deletionStatus}</p>
+              <p className="text-[13px] font-medium text-positive pt-2">{deletionStatus}</p>
             )}
           </div>
         </div>

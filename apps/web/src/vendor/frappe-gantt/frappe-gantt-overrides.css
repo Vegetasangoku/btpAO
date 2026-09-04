@@ -1,21 +1,41 @@
 /*
- * Custom styling layered on top of the vendored frappe-gantt.css (kept unmodified so it
- * stays trivially re-vendorable from a future frappe-gantt release). Handles:
- *   - critical-path task bars (task.custom_class = "gantt-critical")
- *   - milestone task bars (task.custom_class = "gantt-milestone")
- *   - light/dark theming to match the app's amber-on-slate brand charter (see Batch 4
- *     of claude/etat-technique-btpao.md for why this app is light-by-default,
- *     dark-activable, amber-accented -- never sky-blue or dark-only).
+ * Custom styling layered on top of the vendored frappe-gantt.css.
+ * Primary: Cyanotype #1C6091
+ * Dark Mode: #111A24, #16212D, #243546
  */
 
+/*
+ * Charte graphique du tenant (04/09). Les couleurs ne sont plus codees en dur : elles
+ * passent par des custom properties posees en inline sur .gantt-target par
+ * InteractiveGanttChart, a partir de tenant.branding_config (primary_color,
+ * secondary_color, shape_style) -- la meme source que celle deja utilisee cote serveur
+ * par diagram_service pour les PNG. Les valeurs ci-dessous restent les defauts
+ * historiques (Cyanotype #1C6091), donc un tenant sans charte ne voit aucun changement.
+ */
+.gantt-target {
+  --btp-gantt-bar: #1C6091;
+  --btp-gantt-bar-progress: #154A73;
+  --btp-gantt-bar-stroke: #123C5E;
+  --btp-gantt-bar-text: #ffffff;
+  --btp-gantt-milestone: #1C6091;
+  --btp-gantt-milestone-progress: #1C3FB7;
+  /* Le chemin critique reste rouge par defaut : c'est une convention de lecture du
+     planning, pas une couleur de marque. Themable malgre tout si besoin. */
+  --btp-gantt-critical: #dc2626;
+  --btp-gantt-critical-progress: #991b1b;
+  --btp-gantt-critical-stroke: #7f1d1d;
+  --btp-gantt-today: #3758f9;
+  --btp-gantt-radius: 4px;
+}
+
 .gantt-target .gantt .bar-wrapper.gantt-critical .bar {
-  fill: #dc2626;
-  stroke: #7f1d1d;
+  fill: var(--btp-gantt-critical);
+  stroke: var(--btp-gantt-critical-stroke);
   stroke-width: 1.4;
 }
 
 .gantt-target .gantt .bar-wrapper.gantt-critical .bar-progress {
-  fill: #991b1b;
+  fill: var(--btp-gantt-critical-progress);
 }
 
 .gantt-target .gantt .bar-wrapper.gantt-critical .bar-label {
@@ -24,63 +44,138 @@
 }
 
 .gantt-target .gantt .bar-wrapper.gantt-milestone .bar {
-  fill: #d97706;
-  stroke: #92400e;
+  fill: var(--btp-gantt-milestone);
+  stroke: var(--btp-gantt-milestone-progress);
 }
 
 .gantt-target .gantt .bar-wrapper.gantt-milestone .bar-progress {
-  fill: #b45309;
+  fill: var(--btp-gantt-milestone-progress);
 }
 
-/* Default (non-critical, non-milestone) bars pick up the app's amber accent instead of
-   frappe-gantt's stock blue, so the chart reads as part of this product, not a generic
-   embed. */
+/* Barres standard (ni critiques, ni jalons) */
 .gantt-target .gantt .bar-wrapper .bar {
-  fill: #0284c7;
+  fill: var(--btp-gantt-bar);
+  stroke: var(--btp-gantt-bar-stroke);
+  stroke-width: 1;
+  /* `rx` en propriete CSS (SVG 2) : frappe-gantt ne pose que l'attribut, on peut donc
+     piloter l'arrondi depuis la charte (shape_style : anguleux / arrondi / pilule)
+     sans toucher au bundle vendore. */
+  rx: var(--btp-gantt-radius);
+  ry: var(--btp-gantt-radius);
 }
 
 .gantt-target .gantt .bar-wrapper .bar-progress {
-  fill: #0369a1;
+  fill: var(--btp-gantt-bar-progress);
+  rx: var(--btp-gantt-radius);
+  ry: var(--btp-gantt-radius);
+}
+
+/* Lisibilite : l'etiquette posee DANS la barre doit contraster avec la couleur de
+   marque (calculee cote composant), celle posee A COTE suit le texte du theme. */
+.gantt-target .gantt .bar-wrapper .bar-label {
+  fill: var(--btp-gantt-bar-text);
+  font-weight: 550;
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.gantt-target .gantt .bar-wrapper .bar-label.big {
+  fill: var(--g-text-dark);
+  font-weight: 500;
+}
+
+.gantt-target .gantt .bar-wrapper:hover .bar {
+  filter: brightness(1.12);
 }
 
 .gantt-target .gantt .today-highlight {
-  fill: rgba(217, 119, 6, 0.08);
+  fill: color-mix(in srgb, var(--btp-gantt-today) 10%, transparent);
 }
 
 .gantt-target .gantt .arrow {
   stroke: #94a3b8;
+  stroke-width: 1.3;
 }
 
-/* Dark mode: swap the grid/background/text colors frappe-gantt hardcodes for light
-   surfaces, matching the app's dark:bg-[#0C0F17] shell. */
+/*
+ * PALETTE SOMBRE COMPLETE (04/09). Bug de fond trouve en inspectant le rendu : le
+ * bundle frappe-gantt conditionne toute sa palette sombre a `html[data-theme="dark"]`,
+ * alors que cette application bascule le theme via une CLASSE `.dark` sur <html>. Aucune
+ * des variables sombres de la librairie ne s'appliquait donc jamais : le graphique
+ * tournait entierement sur la palette CLAIRE posee sur un fond sombre. D'ou les colonnes
+ * de week-end blanches (--g-weekend-highlight-color: #f7f7f7), l'en-tete blanc, le texte
+ * #171717 illisible et les fleches de dependance sombres sur fond sombre. Les quelques
+ * regles ecrites a la main plus bas ne rattrapaient qu'une partie du probleme.
+ * On redefinit ici la palette de la librairie avec les surfaces de l'application
+ * (#111A24 / #16212D / #243546 / slate) plutot qu'avec les gris neutres de l'upstream.
+ */
+.dark .gantt-target,
+:root.dark .gantt-target {
+  --g-header-background: #16212D;
+  --g-row-color: #0F1923;
+  --g-row-border-color: #243546;
+  --g-border-color: #243546;
+  --g-tick-color: #1B2836;
+  --g-tick-color-thick: #243546;
+  --g-text-dark: #e2e8f0;
+  --g-text-light: #ffffff;
+  --g-text-muted: #94a3b8;
+  /* Les colonnes de week-end : quasi invisibles au lieu de blanc franc. */
+  --g-weekend-highlight-color: rgba(148, 163, 184, 0.06);
+  --g-weekend-label-color: #243546;
+  --g-arrow-color: #64748b;
+  --g-today-highlight: #94a3b8;
+  --g-actions-background: #16212D;
+  --g-popup-actions: #1B2836;
+  --g-progress-color: #334155;
+  --g-expected-progress: #334155;
+  --g-handle-color: #cbd5e1;
+  --g-bar-color: #334155;
+  --g-bar-border: #475569;
+}
+
+/* Dark mode: #111A24 & #16212D & #243546 surfaces */
 :root.dark .gantt-target .gantt-container,
+/* Le fond sombre du graphique doit etre porte par le CONTENEUR, pas par le rect SVG
+   .grid-background. Dans cette version de frappe-gantt ce rect est le DERNIER enfant du
+   <svg> : en SVG l'ordre du document est l'ordre de peinture, donc lui donner un fond
+   opaque le fait passer par-dessus tout le reste et masquer integralement les barres.
+   C'est exactement ce qui se produisait en theme sombre (le theme par defaut ici) :
+   graphique visuellement vide alors que les 5 barres etaient bien presentes dans le DOM.
+   L'upstream met d'ailleurs `.gantt .grid-background { fill: none }` precisement pour
+   cette raison -- on ne la surcharge donc plus. Constate et corrige le 04/09. */
 .dark .gantt-target .gantt-container {
-  background: transparent;
+  background: #111A24;
 }
 
 :root.dark .gantt-target .grid-background,
 .dark .gantt-target .grid-background {
-  fill: #0f172a;
+  fill: none;
 }
 
 :root.dark .gantt-target .grid-row,
 .dark .gantt-target .grid-row {
-  fill: #0b1220;
+  fill: #0A121A;
 }
 
 :root.dark .gantt-target .grid-row:nth-child(even),
 .dark .gantt-target .grid-row:nth-child(even) {
-  fill: #0f172a;
+  fill: #111A24;
 }
 
 :root.dark .gantt-target .row-line,
 .dark .gantt-target .row-line {
-  stroke: #1e293b;
+  stroke: #243546;
 }
 
 :root.dark .gantt-target .tick,
 .dark .gantt-target .tick {
-  stroke: #1e293b;
+  stroke: #243546;
+}
+
+:root.dark .gantt-target .bar-wrapper .bar-label.big,
+.dark .gantt-target .bar-wrapper .bar-label.big {
+  fill: #e2e8f0;
 }
 
 :root.dark .gantt-target .upper-text,
@@ -92,13 +187,14 @@
 
 :root.dark .gantt-target .side-header .today-button,
 .dark .gantt-target .side-header .today-button {
-  background: #1e293b;
+  background: #16212D;
   color: #e2e8f0;
+  border: 1px solid #243546;
 }
 
 :root.dark .gantt-target .popup-wrapper,
 .dark .gantt-target .popup-wrapper {
-  background: #0f172a;
+  background: #111A24;
   color: #e2e8f0;
-  border: 1px solid #1e293b;
+  border: 1px solid #243546;
 }

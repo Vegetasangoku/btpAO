@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { DCECriterion } from '@/lib/types';
 import { api } from '@/lib/api';
+import { useTranslation } from '@/components/i18n-provider';
 
 interface DCEUploaderProps {
   projectId: string;
@@ -21,6 +22,7 @@ interface DCEUploaderProps {
 }
 
 export function DCEUploader({ projectId, criteria = [], onCriteriaExtracted }: DCEUploaderProps) {
+  const { t } = useTranslation();
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [docType, setDocType] = useState('rc');
@@ -33,17 +35,17 @@ export function DCEUploader({ projectId, criteria = [], onCriteriaExtracted }: D
     const file = files[0];
     setIsUploading(true);
     setUploadProgress(20);
-    setStatusMessage('Envoi du fichier vers votre espace sécurisé...');
+    setStatusMessage(t('dce.uploader.status_uploading'));
 
     try {
       setTimeout(() => setUploadProgress(50), 400);
-      setTimeout(() => setStatusMessage('Analyse et extraction automatique du contenu...'), 800);
+      setTimeout(() => setStatusMessage(t('dce.uploader.status_analyzing')), 800);
       setTimeout(() => setUploadProgress(80), 1200);
-      setTimeout(() => setStatusMessage('Indexation intelligente & extraction des critères de sélection...'), 1600);
+      setTimeout(() => setStatusMessage(t('dce.uploader.status_indexing')), 1600);
 
       const res = await api.uploadDCE(projectId, docType, file);
       setUploadProgress(100);
-      setStatusMessage('Document analysé avec succès ! Grille de critères extraite.');
+      setStatusMessage(t('dce.uploader.status_success'));
 
       // Refresh criteria
       const updatedCriteria = await api.getCriteria(projectId);
@@ -52,7 +54,7 @@ export function DCEUploader({ projectId, criteria = [], onCriteriaExtracted }: D
       }
     } catch (err) {
       console.error('Upload failed', err);
-      setStatusMessage('Erreur lors du traitement du document.');
+      setStatusMessage(t('dce.uploader.status_error'));
     } finally {
       setTimeout(() => {
         setIsUploading(false);
@@ -62,46 +64,47 @@ export function DCEUploader({ projectId, criteria = [], onCriteriaExtracted }: D
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 font-sans">
       {/* Upload Box Card */}
-      <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-6 shadow-2xl space-y-4">
-        <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-800">
+      <div className="card-modern p-6 sm:p-7 space-y-5 rounded-2xl">
+        <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-line">
           <div>
-            <h3 className="text-sm font-bold text-white flex items-center gap-2">
-              <UploadCloud className="w-5 h-5 text-sky-400" />
-              Ingestion & Traitement des Pièces du DCE
+            <h3 className="text-[14px] font-bold text-foreground flex items-center gap-2 font-heading">
+              <UploadCloud className="w-4 h-4 text-hl" />
+              {t('dce.uploader.title')}
             </h3>
-            <p className="text-xs text-slate-400">
-              Extraction automatique du texte, des tableaux et des critères de notation (RC, CCTP, CCAP).
+            <p className="text-[12px] text-muted-foreground mt-0.5">
+              {t('dce.uploader.subtitle')}
             </p>
           </div>
 
           <div className="flex items-center gap-2">
-            <label className="text-xs text-slate-400 font-medium">Type de pièce :</label>
+            <label className="text-[12px] text-muted-foreground font-medium">{t('dce.uploader.doc_type_label')}</label>
             <select
               value={docType}
               onChange={(e) => setDocType(e.target.value)}
-              className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-sky-500"
+              className="input-field !w-auto !py-1.5 !px-3 !text-[12px] cursor-pointer"
             >
-              <option value="rc">RC (Règlement de Consultation)</option>
-              <option value="cctp">CCTP (Cahier des Clauses Techniques)</option>
-              <option value="ccap">CCAP (Clauses Administratives)</option>
-              <option value="bpu">BPU / DPGF</option>
+              <option value="rc">{t('dce.uploader.opt_rc')}</option>
+              <option value="cctp">{t('dce.uploader.opt_cctp')}</option>
+              <option value="ccap">{t('dce.uploader.opt_ccap')}</option>
+              <option value="bpu">{t('dce.uploader.opt_bpu')}</option>
+              <option value="autre">{t('dce.uploader.opt_autre')}</option>
             </select>
           </div>
         </div>
 
         {/* Drag & Drop Zone */}
-        <label className="border-2 border-dashed border-slate-700 hover:border-sky-500/60 rounded-xl p-8 flex flex-col items-center justify-center gap-3 cursor-pointer bg-slate-950/40 hover:bg-slate-950/70 transition-all group">
-          <div className="w-12 h-12 rounded-2xl bg-sky-500/10 border border-sky-500/30 flex items-center justify-center group-hover:scale-110 transition-transform">
-            <UploadCloud className="w-6 h-6 text-sky-400" />
+        <label className="border-2 border-dashed border-slate-300 dark:border-line hover:border-hl/60 rounded-2xl p-8 flex flex-col items-center justify-center gap-3 cursor-pointer card-inset transition-all duration-200 group">
+          <div className="w-12 h-12 rounded-xl bg-hl text-hl-contrast flex items-center justify-center group-hover:scale-105 transition-transform shadow-xs">
+            <UploadCloud className="w-6 h-6" />
           </div>
-          <div className="text-center">
-            <p className="text-xs font-bold text-slate-200">
-              Glissez-déposez le fichier PDF ici ou <span className="text-sky-400 underline">parcourez vos fichiers</span>
+          <div className="text-center space-y-1">
+            <p className="text-[13px] font-bold text-foreground font-heading">
+              {t('dce.uploader.dropzone_text')}<span className="text-hl underline ml-1">{t('dce.uploader.dropzone_link')}</span>
             </p>
-            <p className="text-[11px] text-slate-400 mt-1">
-              Formats acceptés : PDF, DOCX (Taille max : 100 Mo) • Analyse automatique
+            <p className="text-[11px] text-muted-foreground">
+              {t('dce.uploader.dropzone_formats')}
             </p>
           </div>
           <input
@@ -115,17 +118,17 @@ export function DCEUploader({ projectId, criteria = [], onCriteriaExtracted }: D
 
         {/* Upload Progress Bar */}
         {isUploading && (
-          <div className="space-y-2 p-4 rounded-xl bg-slate-950/80 border border-sky-500/30">
-            <div className="flex justify-between text-xs font-semibold">
-              <span className="text-sky-300 flex items-center gap-2">
-                <Sparkles className="w-3.5 h-3.5 text-sky-400 animate-spin" />
+          <div className="space-y-2 p-4 rounded-xl card-inset border border-hl/30">
+            <div className="flex justify-between text-[12px] font-semibold">
+              <span className="text-hl flex items-center gap-2">
+                <Sparkles className="w-3.5 h-3.5 text-hl animate-spin" />
                 {statusMessage}
               </span>
-              <span className="text-slate-400">{uploadProgress}%</span>
+              <span className="text-muted-foreground font-mono">{uploadProgress}%</span>
             </div>
-            <div className="w-full bg-slate-800 rounded-full h-2 overflow-hidden">
+            <div className="w-full bg-slate-200 dark:bg-raised rounded-full h-2 overflow-hidden">
               <div
-                className="bg-gradient-to-r from-sky-500 to-emerald-500 h-2 transition-all duration-300"
+                className="bg-gradient-to-r from-hl to-positive h-2 transition-all duration-300"
                 style={{ width: `${uploadProgress}%` }}
               />
             </div>
@@ -134,20 +137,20 @@ export function DCEUploader({ projectId, criteria = [], onCriteriaExtracted }: D
       </div>
 
       {/* Extracted Criteria Table */}
-      <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-6 shadow-2xl space-y-4">
-        <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+      <div className="card-modern p-6 sm:p-7 space-y-5 rounded-2xl">
+        <div className="flex items-center justify-between pb-3 border-b border-line">
           <div>
-            <h3 className="text-sm font-bold text-white flex items-center gap-2">
-              <Layers className="w-5 h-5 text-emerald-400" />
-              Grille de Pondération & Critères de Notation (Extrait RC)
+            <h3 className="text-[14px] font-bold text-foreground flex items-center gap-2 font-heading">
+              <Layers className="w-4 h-4 text-positive" />
+              {t('dce.uploader.criteria_title')}
             </h3>
-            <p className="text-xs text-slate-400">
-              L'intelligence artificielle s'assure que 100% de ces exigences sont couvertes et chiffrées dans votre mémoire technique.
+            <p className="text-[12px] text-muted-foreground mt-0.5">
+              {t('dce.uploader.criteria_subtitle')}
             </p>
           </div>
 
-          <span className="text-xs font-mono font-bold bg-emerald-500/10 text-emerald-300 border border-emerald-500/30 px-3 py-1 rounded-full">
-            Valeur Technique : 60% • Prix : 40%
+          <span className="badge-pill-emerald text-[10px]">
+            {t('dce.uploader.weight_badge')}
           </span>
         </div>
 
@@ -155,27 +158,27 @@ export function DCEUploader({ projectId, criteria = [], onCriteriaExtracted }: D
           {criteria.map((c, idx) => (
             <div
               key={c.id || idx}
-              className="p-4 rounded-xl bg-slate-950/80 border border-slate-800 hover:border-slate-700 transition-all flex flex-col justify-between space-y-3"
+              className="p-4 rounded-xl card-inset hover:border-hl/40 transition-all flex flex-col justify-between space-y-3"
             >
               <div className="space-y-2">
                 <div className="flex items-start justify-between gap-2">
-                  <h4 className="text-xs font-bold text-slate-200">{c.criterion_title}</h4>
-                  <span className="shrink-0 px-2 py-0.5 rounded bg-sky-500/20 text-sky-300 text-[11px] font-mono font-bold border border-sky-500/30">
+                  <h4 className="text-[13px] font-bold text-foreground font-heading">{c.criterion_title}</h4>
+                  <span className="shrink-0 badge-pill text-[10px] font-mono font-bold">
                     {c.weight_percentage}%
                   </span>
                 </div>
-                <p className="text-[11px] text-slate-400 leading-relaxed">{c.description}</p>
+                <p className="text-[12px] text-muted-foreground leading-relaxed">{c.description}</p>
               </div>
 
-              <div className="space-y-1.5 pt-2 border-t border-slate-900">
-                <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
-                  Preuves & Éléments attendus :
+              <div className="space-y-1.5 pt-2 border-t border-line">
+                <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  {t('dce.uploader.expectations_label')}
                 </p>
                 <div className="flex flex-wrap gap-1.5">
                   {c.key_expectations.map((exp, eIdx) => (
                     <span
                       key={eIdx}
-                      className="text-[10px] bg-slate-900 border border-slate-800 text-slate-300 px-2 py-0.5 rounded"
+                      className="text-[10px] badge-pill-slate"
                     >
                       ✓ {exp}
                     </span>

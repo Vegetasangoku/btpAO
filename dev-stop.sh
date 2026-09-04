@@ -14,6 +14,14 @@ else
   echo "[celery] rien à arrêter"
 fi
 
+# Celery Beat (planificateur)
+if pgrep -f "celery -A app.core.celery_app beat" >/dev/null 2>&1; then
+  pkill -f "celery -A app.core.celery_app beat" 2>/dev/null
+  echo "[beat]   arrêté"
+else
+  echo "[beat]   rien à arrêter"
+fi
+
 # Backend API (port 8000)
 API_PIDS=$(lsof -ti :8000 2>/dev/null)
 if [ -n "$API_PIDS" ]; then

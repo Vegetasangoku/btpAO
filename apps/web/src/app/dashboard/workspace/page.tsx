@@ -38,15 +38,16 @@ import {
   AlertCircle,
 } from 'lucide-react';
 
-
 import { TiptapEditor } from '@/components/editor/tiptap-editor';
 import { GeneratedSection, Project, GoNoGoAnalysis, ProjectDecisionsForm, DCECriterion } from '@/lib/types';
-import { api } from '@/lib/api';
+import { api, fetchAuthenticatedBlobUrl } from '@/lib/api';
 import { supabase } from '@/lib/supabase/client';
+import { useTranslation } from '@/components/i18n-provider';
 
 function WorkspaceContent() {
   const searchParams = useSearchParams();
   const queryProjectId = searchParams.get('projectId');
+  const { t } = useTranslation();
 
   const [activeDeliverable, setActiveDeliverable] = useState<'gonogo' | 'planning' | 'editor' | 'download'>('gonogo');
   const [showNewAOWizard, setShowNewAOWizard] = useState(false);
@@ -61,8 +62,7 @@ function WorkspaceContent() {
   const [isSubmittingWizard, setIsSubmittingWizard] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-
-  // Real Project & Deliverables State (Starts EMPTY / NULL - No fake default numbers)
+  // Real Project & Deliverables State
   const [project, setProject] = useState<Project | null>(null);
   const [goNoGo, setGoNoGo] = useState<GoNoGoAnalysis | null>(null);
   const [sections, setSections] = useState<GeneratedSection[]>([]);
@@ -158,7 +158,6 @@ function WorkspaceContent() {
           const analysis = await api.getGoNoGo(projectId);
           setGoNoGo(analysis);
         } catch (err: any) {
-          // If 404, trigger runGoNoGo automatically to provide the first real score
           setIsEvaluatingGoNoGo(true);
           const analysis = await api.runGoNoGo(projectId);
           setGoNoGo(analysis);
@@ -229,16 +228,15 @@ function WorkspaceContent() {
         err?.message?.toLowerCase()?.includes('unauthorized');
 
       if (isAuthError) {
-        setWizardError('session expirée, reconnecte-toi');
+        setWizardError(t('dashboard.workspace.session_expired'));
       } else {
-        setWizardError(err?.message || "Une erreur est survenue lors de la création de l'Appel d'Offres.");
+        setWizardError(err?.message || t('dashboard.workspace.wizard_generic_error'));
       }
     } finally {
       setIsSubmittingWizard(false);
       setIsGenerating(false);
     }
   }
-
 
   async function handleAddSelectedToMemory() {
     if (!selectedTextRule) return;
@@ -257,7 +255,7 @@ function WorkspaceContent() {
         setTimeout(() => setMemorySavedMsg(false), 3000);
       }
     } catch (err: any) {
-      alert('Erreur enregistrement mémoire: ' + err.message);
+      alert(t('dashboard.workspace.memory_save_error_prefix') + err.message);
     }
   }
 
@@ -266,26 +264,26 @@ function WorkspaceContent() {
     const rec = (recommendation || '').toUpperCase();
     if (rec.includes('GO') && !rec.includes('NO')) {
       return {
-        label: 'GO — Opportunité Qualifiée',
-        color: 'text-emerald-400',
-        bg: 'bg-emerald-500/10',
-        border: 'border-emerald-500/30',
+        label: t('dashboard.workspace.badge_go'),
+        color: 'text-positive',
+        bg: 'bg-positive/10',
+        border: 'border-positive/20',
         icon: CheckCircle2,
       };
     } else if (rec.includes('RESERVE') || rec.includes('RÉSERVE')) {
       return {
-        label: 'RÉSERVES — Exigences à Compléter',
-        color: 'text-amber-400',
-        bg: 'bg-amber-500/10',
-        border: 'border-amber-500/30',
+        label: t('dashboard.workspace.badge_reserves'),
+        color: 'text-hl',
+        bg: 'bg-hl/10',
+        border: 'border-hl/20',
         icon: AlertTriangle,
       };
     } else {
       return {
-        label: 'NO-GO — Non Conforme / Risque Élevé',
-        color: 'text-rose-400',
-        bg: 'bg-rose-500/10',
-        border: 'border-rose-500/30',
+        label: t('dashboard.workspace.badge_nogo'),
+        color: 'text-danger',
+        bg: 'bg-danger/10',
+        border: 'border-danger/20',
         icon: XCircle,
       };
     }
@@ -294,9 +292,9 @@ function WorkspaceContent() {
   // Loading Screen
   if (loadingProject) {
     return (
-      <div className="flex flex-col items-center justify-center min-h-[50vh] space-y-4">
-        <Loader2 className="w-8 h-8 animate-spin text-sky-400" />
-        <p className="text-sm font-bold text-slate-300">Chargement de votre espace de travail BTP...</p>
+      <div className="flex flex-col items-center justify-center min-h-[50vh] space-y-3 text-[13px] text-muted-foreground font-mono">
+        <Loader2 className="w-8 h-8 animate-spin text-hl" />
+        <p>{t('dashboard.workspace.loading')}</p>
       </div>
     );
   }
@@ -304,31 +302,31 @@ function WorkspaceContent() {
   // Empty State when no project exists in the workspace
   if (!project) {
     return (
-      <div className="max-w-4xl mx-auto py-12 space-y-8">
-        <div className="p-8 sm:p-12 rounded-3xl bg-slate-900/90 border border-slate-800 text-center space-y-6 shadow-2xl">
-          <div className="w-16 h-16 rounded-2xl bg-sky-500/10 border border-sky-500/30 flex items-center justify-center mx-auto text-sky-400">
+      <div className="page-container max-w-4xl mx-auto py-12 space-y-6 font-sans">
+        <div className="card-elevated p-8 sm:p-12 text-center space-y-6 rounded-2xl animate-fade-in-up">
+          <div className="w-16 h-16 rounded-2xl bg-hl/10 border border-hl/20 flex items-center justify-center mx-auto text-hl shadow-xs">
             <FolderPlus className="w-8 h-8" />
           </div>
           <div className="space-y-2 max-w-md mx-auto">
-            <h1 className="text-2xl font-black text-white">Aucun Appel d'Offres Sélectionné</h1>
-            <p className="text-xs text-slate-400 leading-relaxed">
-              Sélectionnez un projet existant ou créez une nouvelle réponse à un appel d'offres pour lancer l'analyse décisionnelle Go/No-Go et générer le mémoire technique.
+            <h1 className="text-2xl font-extrabold text-foreground font-heading">{t('dashboard.workspace.empty_title')}</h1>
+            <p className="text-[13px] text-muted-foreground leading-relaxed">
+              {t('dashboard.workspace.empty_desc')}
             </p>
           </div>
           <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
             <button
               onClick={() => setShowNewAOWizard(true)}
-              className="flex items-center gap-2 px-5 py-3 rounded-2xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-bold shadow-glow hover:shadow-sky-500/40 transition-all"
+              className="btn-primary cursor-pointer"
             >
               <Plus className="w-4 h-4" />
-              <span>Créer une Réponse à Appel d'Offres</span>
+              <span>{t('dashboard.workspace.empty_create_btn')}</span>
             </button>
             <Link
               href="/dashboard/projects"
-              className="flex items-center gap-2 px-5 py-3 rounded-2xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold border border-slate-700 transition-all"
+              className="btn-secondary cursor-pointer"
             >
-              <Building className="w-4 h-4" />
-              <span>Voir mes dossiers existants</span>
+              <Building className="w-4 h-4 text-muted-foreground" />
+              <span>{t('dashboard.workspace.empty_view_existing_btn')}</span>
             </Link>
           </div>
         </div>
@@ -344,65 +342,64 @@ function WorkspaceContent() {
   const currentSection = sections[currentSectionIndex] || null;
 
   return (
-    <div className="space-y-6 pb-16 max-w-5xl">
+    <div className="page-container max-w-5xl mx-auto font-sans space-y-5">
       {/* Fil d'Ariane / Breadcrumbs */}
-      <nav className="flex items-center gap-2 text-xs text-slate-400">
+      <nav className="flex items-center gap-2 text-[12px] text-muted-foreground">
         <Link
           href="/dashboard/projects"
-          className="hover:text-sky-400 transition-colors flex items-center gap-1.5 font-medium"
+          className="hover:text-hl transition-colors flex items-center gap-1.5 font-medium cursor-pointer"
         >
-          <Building className="w-3.5 h-3.5 text-slate-500" />
-          <span>Mes Appels d'Offres</span>
+          <Building className="w-3.5 h-3.5" />
+          <span>{t('dashboard.workspace.breadcrumb_my_tenders')}</span>
         </Link>
-        <ChevronRight className="w-3.5 h-3.5 text-slate-600 shrink-0" />
-        <span className="text-slate-200 font-bold truncate max-w-md">
+        <ChevronRight className="w-3.5 h-3.5 opacity-50 shrink-0" />
+        <span className="text-foreground font-semibold truncate max-w-md">
           {project.title}
         </span>
       </nav>
 
       {/* Top Banner with Real Project Metadata */}
-      <div className="p-6 rounded-3xl bg-slate-900/90 border border-slate-800 shadow-xl space-y-4">
-
+      <div className="card-elevated p-6 sm:p-7 space-y-5 rounded-2xl">
         <div className="flex flex-wrap items-center justify-between gap-4">
-          <div className="space-y-1">
-            <div className="flex items-center gap-2">
-              <span className="text-[10px] font-mono font-bold px-2.5 py-0.5 rounded bg-sky-500/10 text-sky-400 border border-sky-500/20">
-                {project.reference_code || 'AO-EN-COURS'}
+          <div className="space-y-1.5 min-w-0 flex-1">
+            <div className="flex items-center gap-2.5">
+              <span className="badge-pill text-[9px]">
+                {project.reference_code || t('dashboard.workspace.ref_fallback')}
               </span>
-              <span className="text-xs text-slate-500">Marché Public BTP</span>
+              <span className="text-[11px] text-muted-foreground">{t('dashboard.workspace.public_market_badge')}</span>
             </div>
-            <h1 className="text-xl sm:text-2xl font-black text-white">{project.title}</h1>
-            <p className="text-xs text-slate-400">
-              Maître d'Ouvrage : <strong>{project.client_name}</strong> • {project.location || 'France'}
+            <h1 className="text-xl sm:text-2xl font-extrabold text-foreground font-heading tracking-tight truncate">{project.title}</h1>
+            <p className="text-[12px] text-muted-foreground">
+              {t('dashboard.workspace.client_line_prefix')}<strong className="text-foreground">{project.client_name}</strong> • {project.location || t('dashboard.workspace.france_fallback')}
             </p>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 shrink-0">
             <button
               onClick={() => setShowNewAOWizard(true)}
-              className="flex items-center gap-2 px-5 py-3 rounded-2xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-bold shadow-glow hover:shadow-sky-500/40 transition-all group"
+              className="btn-primary cursor-pointer"
             >
-              <Plus className="w-4 h-4 group-hover:scale-110 transition-transform" />
-              <span>Nouveau Projet</span>
+              <Plus className="w-4 h-4" />
+              <span>{t('dashboard.workspace.new_project_btn')}</span>
             </button>
           </div>
         </div>
 
         {/* Live Generation Progress Bar */}
         {isGenerating && (
-          <div className="p-4 rounded-2xl bg-slate-950/80 border border-sky-500/30 space-y-3 animate-in fade-in">
-            <div className="flex items-center justify-between text-xs font-bold text-sky-400">
+          <div className="card-inset p-4 space-y-3 rounded-xl animate-fade-in-up">
+            <div className="flex items-center justify-between text-[12px] font-semibold text-hl">
               <span className="flex items-center gap-2">
-                <Loader2 className="w-4 h-4 animate-spin text-sky-400" />
-                {generationStep === 1 && '1. Création du projet & initialisation...'}
-                {generationStep === 2 && '2. Analyse du DCE & extraction des critères de notation...'}
-                {generationStep === 3 && '3. Évaluation matricielle Go/No-Go et qualifications...'}
+                <Loader2 className="w-4 h-4 animate-spin text-hl" />
+                {generationStep === 1 && t('dashboard.workspace.gen_step1')}
+                {generationStep === 2 && t('dashboard.workspace.gen_step2')}
+                {generationStep === 3 && t('dashboard.workspace.gen_step3')}
               </span>
-              <span className="font-mono text-[11px] text-slate-400">Étape {generationStep}/3</span>
+              <span className="font-mono text-[11px] text-muted-foreground">{t('dashboard.workspace.gen_step_counter', { step: String(generationStep) })}</span>
             </div>
-            <div className="w-full h-2 bg-slate-900 rounded-full overflow-hidden">
+            <div className="w-full h-2 bg-slate-200 dark:bg-raised rounded-full overflow-hidden">
               <div
-                className="h-full bg-gradient-to-r from-sky-500 to-emerald-500 rounded-full transition-all duration-500"
+                className="h-full bg-gradient-to-r from-hl to-positive rounded-full transition-all duration-500"
                 style={{ width: `${(generationStep / 3) * 100}%` }}
               />
             </div>
@@ -410,12 +407,12 @@ function WorkspaceContent() {
         )}
 
         {/* 4 Deliverables Tabs Navigation */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2 border-t border-slate-800">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-3 border-t border-line">
           {[
-            { id: 'gonogo', title: '1. Décision (Go/No-Go)', desc: 'Matrice & Qualifications', icon: ShieldCheck },
-            { id: 'planning', title: '2. Planning Chantier', desc: 'Phasage & Jalons clés', icon: Calendar },
-            { id: 'editor', title: '3. Mémoire Technique', desc: 'Éditeur & Relecture métier', icon: FileText },
-            { id: 'download', title: '4. Téléchargement Final', desc: 'Fichiers Word & PDF prêts', icon: Download },
+            { id: 'gonogo', title: t('dashboard.workspace.tab1_title'), desc: t('dashboard.workspace.tab1_desc'), icon: ShieldCheck },
+            { id: 'planning', title: t('dashboard.workspace.tab2_title'), desc: t('dashboard.workspace.tab2_desc'), icon: Calendar },
+            { id: 'editor', title: t('dashboard.workspace.tab3_title'), desc: t('dashboard.workspace.tab3_desc'), icon: FileText },
+            { id: 'download', title: t('dashboard.workspace.tab4_title'), desc: t('dashboard.workspace.tab4_desc'), icon: Download },
           ].map((tab) => {
             const Icon = tab.icon;
             const isCurrent = activeDeliverable === tab.id;
@@ -423,22 +420,22 @@ function WorkspaceContent() {
               <button
                 key={tab.id}
                 onClick={() => setActiveDeliverable(tab.id as any)}
-                className={`p-3 rounded-2xl text-left border transition-all flex items-start gap-2.5 ${
+                className={`p-3 rounded-xl text-left border transition-all duration-200 flex items-start gap-2.5 cursor-pointer ${
                   isCurrent
-                    ? 'bg-sky-600/20 border-sky-500 text-white shadow-lg'
-                    : 'bg-slate-950/40 border-slate-800 text-slate-400 hover:text-slate-200'
+                    ? 'bg-hl/10 border-hl text-foreground font-bold shadow-xs'
+                    : 'card-inset text-muted-foreground hover:text-foreground hover:border-hl/40'
                 }`}
               >
                 <div
                   className={`w-6 h-6 rounded-lg flex items-center justify-center font-bold text-xs shrink-0 ${
-                    isCurrent ? 'bg-sky-500 text-white' : 'bg-slate-800 text-slate-400'
+                    isCurrent ? 'bg-hl text-hl-contrast shadow-xs' : 'bg-slate-200 dark:bg-raised text-muted-foreground'
                   }`}
                 >
                   <Icon className="w-3.5 h-3.5" />
                 </div>
                 <div className="min-w-0">
-                  <p className="text-xs font-bold truncate">{tab.title}</p>
-                  <p className="text-[10px] text-slate-400 truncate">{tab.desc}</p>
+                  <p className="text-[12px] font-bold truncate font-heading">{tab.title}</p>
+                  <p className="text-[10px] text-muted-foreground truncate">{tab.desc}</p>
                 </div>
               </button>
             );
@@ -446,85 +443,85 @@ function WorkspaceContent() {
         </div>
       </div>
 
-      {/* DELIVERABLE 1: GO/NO-GO DECISION MATRIX */}
+      {/* ═══ DELIVERABLE 1: GO/NO-GO DECISION MATRIX ═══ */}
       {activeDeliverable === 'gonogo' && (
-        <div className="space-y-6">
+        <div className="space-y-5 animate-fade-in-up">
           <div className="flex flex-wrap items-center justify-between gap-4">
-            <div>
-              <h2 className="text-base font-bold text-white">Livrable 1 : Analyse Décisionnelle & Score d'Opportunité (Go/No-Go)</h2>
-              <p className="text-xs text-slate-400">
-                Croisement automatisé des critères du DCE, des qualifications de l'entreprise, de la date limite et de la charge active.
+            <div className="section-header">
+              <h2 className="section-title text-[15px]">{t('dashboard.workspace.d1_title')}</h2>
+              <p className="section-desc text-[12px]">
+                {t('dashboard.workspace.d1_desc')}
               </p>
             </div>
             <div className="flex items-center gap-2">
               <button
                 onClick={() => loadGoNoGoAnalysis(project.id, true)}
                 disabled={loadingGoNoGo || isEvaluatingGoNoGo}
-                className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold border border-slate-700 transition-all disabled:opacity-50"
+                className="btn-secondary !py-2 !text-[12px] cursor-pointer"
               >
-                <RefreshCw className={`w-3.5 h-3.5 ${isEvaluatingGoNoGo ? 'animate-spin text-sky-400' : ''}`} />
-                <span>Recalculer Go/No-Go</span>
+                <RefreshCw className={`w-3.5 h-3.5 ${isEvaluatingGoNoGo ? 'animate-spin text-hl' : ''}`} />
+                <span>{t('dashboard.workspace.recalc_btn')}</span>
               </button>
               <button
                 onClick={() => setActiveDeliverable('planning')}
-                className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-bold shadow-glow transition-all"
+                className="btn-primary !py-2 !text-[12px] cursor-pointer"
               >
-                <span>Consulter le Planning</span>
+                <span>{t('dashboard.workspace.view_planning_btn')}</span>
                 <ArrowRight className="w-3.5 h-3.5" />
               </button>
             </div>
           </div>
 
           {loadingGoNoGo ? (
-            <div className="p-12 rounded-3xl bg-slate-900/90 border border-slate-800 flex flex-col items-center justify-center space-y-3">
-              <Loader2 className="w-8 h-8 animate-spin text-sky-400" />
-              <p className="text-xs font-bold text-slate-300">Évaluation de la matrice Go/No-Go en cours...</p>
+            <div className="card-modern p-12 flex flex-col items-center justify-center space-y-3 text-[13px] text-muted-foreground rounded-2xl">
+              <Loader2 className="w-8 h-8 animate-spin text-hl" />
+              <p className="font-semibold">{t('dashboard.workspace.gonogo_evaluating')}</p>
             </div>
           ) : !goNoGo ? (
-            <div className="p-8 rounded-3xl bg-slate-900/90 border border-slate-800 text-center space-y-4">
-              <AlertCircle className="w-8 h-8 text-amber-400 mx-auto" />
+            <div className="card-modern p-8 text-center space-y-4 rounded-2xl">
+              <AlertCircle className="w-8 h-8 text-hl mx-auto" />
               <div className="space-y-1">
-                <p className="text-sm font-bold text-white">Aucune analyse Go/No-Go enregistrée</p>
-                <p className="text-xs text-slate-400">Lancez l'évaluation pour obtenir la recommandation du moteur.</p>
+                <p className="text-[14px] font-bold text-foreground font-heading">{t('dashboard.workspace.no_analysis_title')}</p>
+                <p className="text-[12px] text-muted-foreground">{t('dashboard.workspace.no_analysis_desc')}</p>
               </div>
               <button
                 onClick={() => loadGoNoGoAnalysis(project.id, true)}
-                className="px-4 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-bold transition-all"
+                className="btn-primary cursor-pointer"
               >
-                Évaluer l'Appel d'Offres
+                {t('dashboard.workspace.evaluate_btn')}
               </button>
             </div>
           ) : (
             <>
               {/* Top Decision Summary & Score Cards */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <div className="p-6 rounded-3xl bg-slate-900/90 border border-slate-800 space-y-4 md:col-span-2 shadow-xl">
+                <div className="card-modern p-6 space-y-4 md:col-span-2 rounded-2xl">
                   <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-white flex items-center gap-1.5">
-                      <FileText className="w-4 h-4 text-sky-400" />
-                      Synthèse Argumentée de la Décision
+                    <span className="text-[13px] font-bold text-foreground flex items-center gap-2 font-heading">
+                      <FileText className="w-4 h-4 text-hl" />
+                      {t('dashboard.workspace.synthesis_title')}
                     </span>
-                    <span className="text-[10px] font-mono text-slate-400 bg-slate-800 px-2.5 py-0.5 rounded border border-slate-700">
-                      Évalué le {new Date(goNoGo.created_at).toLocaleDateString('fr-FR')}
+                    <span className="badge-pill-slate font-mono text-[10px]">
+                      {t('dashboard.workspace.evaluated_on', { date: new Date(goNoGo.created_at).toLocaleDateString('fr-FR') })}
                     </span>
                   </div>
 
-                  <p className="text-xs text-slate-300 leading-relaxed bg-slate-950/60 p-3.5 rounded-2xl border border-slate-800">
+                  <p className="text-[13px] text-foreground/90 leading-relaxed card-inset p-4 rounded-xl">
                     {goNoGo.summary}
                   </p>
 
-                  <div className="pt-2 border-t border-slate-800 flex items-center justify-between text-xs">
-                    <span className="text-slate-400">Conformité des critères éliminatoires :</span>
-                    <span className={`font-bold flex items-center gap-1.5 ${goNoGo.mandatory_criteria_met ? 'text-emerald-400' : 'text-rose-400'}`}>
+                  <div className="pt-3 border-t border-line flex items-center justify-between text-[12px]">
+                    <span className="text-muted-foreground">{t('dashboard.workspace.mandatory_criteria_label')}</span>
+                    <span className={`font-bold flex items-center gap-1.5 ${goNoGo.mandatory_criteria_met ? 'text-positive' : 'text-danger'}`}>
                       {goNoGo.mandatory_criteria_met ? (
                         <>
                           <CheckCircle2 className="w-4 h-4" />
-                          <span>Exigences obligatoires satisfaites</span>
+                          <span>{t('dashboard.workspace.mandatory_met')}</span>
                         </>
                       ) : (
                         <>
                           <AlertTriangle className="w-4 h-4" />
-                          <span>Critères éliminatoires non satisfaits</span>
+                          <span>{t('dashboard.workspace.mandatory_not_met')}</span>
                         </>
                       )}
                     </span>
@@ -533,28 +530,28 @@ function WorkspaceContent() {
 
                 {/* Score and Recommendation Box */}
                 {badge && (
-                  <div className={`p-6 rounded-3xl ${badge.bg} border ${badge.border} space-y-4 shadow-xl`}>
+                  <div className={`p-6 rounded-2xl card-inset ${badge.border} space-y-4`}>
                     <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold text-slate-300">Score d'Opportunité</span>
-                      <span className={`text-3xl font-black ${badge.color}`}>{Math.round(goNoGo.score)} / 100</span>
+                      <span className="text-[12px] font-bold text-foreground font-heading">{t('dashboard.workspace.opportunity_score')}</span>
+                      <span className={`text-3xl font-extrabold font-heading ${badge.color}`}>{Math.round(goNoGo.score)} / 100</span>
                     </div>
 
-                    <div className={`p-3.5 rounded-2xl bg-slate-950/80 border ${badge.border}`}>
+                    <div className={`p-4 rounded-xl bg-white dark:bg-raised border border-line shadow-xs`}>
                       <div className="flex items-center gap-2 mb-1">
                         <BadgeIcon className={`w-4 h-4 ${badge.color} shrink-0`} />
-                        <p className={`text-xs font-black ${badge.color}`}>{badge.label}</p>
+                        <p className={`text-[13px] font-bold font-heading ${badge.color}`}>{badge.label}</p>
                       </div>
-                      <p className="text-[11px] text-slate-400">
+                      <p className="text-[11px] text-muted-foreground leading-relaxed">
                         {goNoGo.score >= 70
-                          ? 'Les qualifications et la capacité de l\'entreprise justifient un dépôt d\'offre prioritaire.'
+                          ? t('dashboard.workspace.score_msg_high')
                           : goNoGo.score >= 45
-                          ? 'Dépôt envisageable sous réserve de lever les alertes techniques ou administratives.'
-                          : 'Risque de rejet ou de pénalités élevé. Mobilisation non recommandée.'}
+                          ? t('dashboard.workspace.score_msg_mid')
+                          : t('dashboard.workspace.score_msg_low')}
                       </p>
                     </div>
 
-                    <div className="text-[10px] text-slate-400 text-center font-mono">
-                      Calculé sur {goNoGo.factors?.length || 0} facteurs pondérés
+                    <div className="text-[10px] text-muted-foreground text-center font-mono">
+                      {t('dashboard.workspace.factors_weighted', { count: String(goNoGo.factors?.length || 0) })}
                     </div>
                   </div>
                 )}
@@ -562,12 +559,12 @@ function WorkspaceContent() {
 
               {/* Blocking Issues Alert Box (if any) */}
               {goNoGo.blocking_issues && goNoGo.blocking_issues.length > 0 && (
-                <div className="p-5 rounded-3xl bg-rose-950/30 border border-rose-500/40 space-y-2.5 shadow-xl">
-                  <div className="flex items-center gap-2 text-rose-400 text-xs font-bold">
+                <div className="p-4 rounded-2xl bg-danger/8 border border-danger/20 space-y-2">
+                  <div className="flex items-center gap-2 text-danger text-[12px] font-bold font-heading">
                     <AlertTriangle className="w-4 h-4" />
-                    <span>Points de Blocage Identifiés ({goNoGo.blocking_issues.length})</span>
+                    <span>{t('dashboard.workspace.blocking_title', { count: String(goNoGo.blocking_issues.length) })}</span>
                   </div>
-                  <ul className="space-y-1 text-xs text-rose-200/90 pl-6 list-disc">
+                  <ul className="space-y-1 text-[12px] text-danger pl-6 list-disc">
                     {goNoGo.blocking_issues.map((issue, idx) => (
                       <li key={idx}>{issue}</li>
                     ))}
@@ -577,9 +574,9 @@ function WorkspaceContent() {
 
               {/* Detailed Decision Factors Grid */}
               <div className="space-y-3">
-                <h3 className="text-xs font-bold text-white flex items-center gap-2">
-                  <Sliders className="w-4 h-4 text-sky-400" />
-                  Facteurs d'Évaluation Détaillés
+                <h3 className="section-title text-[14px]">
+                  <Sliders className="w-4 h-4 text-hl" />
+                  <span>{t('dashboard.workspace.factors_detail_title')}</span>
                 </h3>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -589,39 +586,39 @@ function WorkspaceContent() {
                     return (
                       <div
                         key={idx}
-                        className={`p-4 rounded-2xl border space-y-2 transition-all ${
+                        className={`p-4 rounded-xl border space-y-2 transition-all duration-200 ${
                           isPassed
-                            ? 'bg-slate-900/80 border-slate-800 hover:border-slate-700'
+                            ? 'card-modern hover:border-hl/40'
                             : isWarning
-                            ? 'bg-amber-950/20 border-amber-500/30'
-                            : 'bg-rose-950/20 border-rose-500/30'
+                            ? 'bg-hl/5 border-hl/20'
+                            : 'bg-danger/5 border-danger/20'
                         }`}
                       >
                         <div className="flex items-start justify-between gap-2">
-                          <div className="space-y-0.5">
-                            <span className="text-[10px] font-mono text-slate-500 uppercase">
+                          <div className="space-y-0.5 min-w-0">
+                            <span className="text-[10px] font-mono text-muted-foreground uppercase">
                               {factor.category}
                             </span>
-                            <h4 className="text-xs font-bold text-white">{factor.title}</h4>
+                            <h4 className="text-[13px] font-bold text-foreground truncate font-heading">{factor.title}</h4>
                           </div>
                           <span
-                            className={`text-[10px] font-bold px-2 py-0.5 rounded uppercase font-mono ${
+                            className={`badge-pill text-[9px] font-mono uppercase ${
                               isPassed
-                                ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                                ? 'bg-positive/10 text-positive border-positive/20'
                                 : isWarning
-                                ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
-                                : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
+                                ? 'bg-hl/10 text-hl border-hl/20'
+                                : 'bg-danger/10 text-danger border-danger/20'
                             }`}
                           >
                             {factor.status}
                           </span>
                         </div>
 
-                        <p className="text-xs text-slate-300 leading-relaxed">{factor.detail}</p>
+                        <p className="text-[12px] text-muted-foreground leading-relaxed">{factor.detail}</p>
 
                         {factor.recommendation && (
-                          <div className="pt-2 border-t border-slate-800/80 text-[11px] text-sky-400">
-                            <strong>Conseil :</strong> {factor.recommendation}
+                          <div className="pt-2 border-t border-line text-[11px] text-hl">
+                            <strong>{t('dashboard.workspace.recommendation_prefix')}</strong> {factor.recommendation}
                           </div>
                         )}
                       </div>
@@ -634,21 +631,21 @@ function WorkspaceContent() {
         </div>
       )}
 
-      {/* DELIVERABLE 2: PLANNING CHANTIER */}
+      {/* ═══ DELIVERABLE 2: PLANNING CHANTIER ═══ */}
       {activeDeliverable === 'planning' && (
-        <div className="space-y-6">
+        <div className="space-y-5 animate-fade-in-up">
           <div className="flex items-center justify-between">
-            <div>
-              <h2 className="text-base font-bold text-white">Livrable 2 : Phasage Prévisionnel du Chantier</h2>
-              <p className="text-xs text-slate-400">
-                Planning d'exécution issu du formulaire conducteur de travaux et des contraintes du DCE.
+            <div className="section-header">
+              <h2 className="section-title text-[15px]">{t('dashboard.workspace.d2_title')}</h2>
+              <p className="section-desc text-[12px]">
+                {t('dashboard.workspace.d2_desc')}
               </p>
             </div>
             <button
               onClick={() => setActiveDeliverable('editor')}
-              className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-bold shadow-glow transition-all"
+              className="btn-primary !py-2 !text-[12px] cursor-pointer"
             >
-              <span>Relire le Mémoire Technique</span>
+              <span>{t('dashboard.workspace.review_memo_btn')}</span>
               <ArrowRight className="w-3.5 h-3.5" />
             </button>
           </div>
@@ -656,24 +653,24 @@ function WorkspaceContent() {
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             {decisions?.phasage_travaux && decisions.phasage_travaux.length > 0 ? (
               decisions.phasage_travaux.map((p: any, idx: number) => (
-                <div key={idx} className="p-6 rounded-3xl bg-slate-900/90 border border-slate-800 space-y-3 shadow-xl">
+                <div key={idx} className="card-modern p-5 space-y-3 rounded-2xl">
                   <div className="flex items-center justify-between">
-                    <h3 className="text-sm font-bold text-white">{p.phase || `Phase ${idx + 1}`}</h3>
-                    <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-sky-500/10 text-sky-400 border border-sky-500/20">
-                      {p.duree_semaines ? `${p.duree_semaines} semaines` : 'Phase'}
+                    <h3 className="text-[14px] font-bold text-foreground font-heading">{p.phase || t('dashboard.workspace.phase_fallback', { n: String(idx + 1) })}</h3>
+                    <span className="badge-pill text-[9px]">
+                      {p.duree_semaines ? t('dashboard.workspace.duree_semaines', { n: String(p.duree_semaines) }) : t('dashboard.workspace.phase_label_short')}
                     </span>
                   </div>
-                  <p className="text-xs text-slate-300">
-                    <strong>Jalon contractuel :</strong> {p.jalon || 'Livraison des ouvrages'}
+                  <p className="text-[12px] text-muted-foreground">
+                    <strong>{t('dashboard.workspace.jalon_prefix')}</strong> {p.jalon || t('dashboard.workspace.jalon_fallback')}
                   </p>
                 </div>
               ))
             ) : (
-              <div className="p-8 rounded-3xl bg-slate-900/90 border border-slate-800 sm:col-span-2 text-center space-y-2">
-                <Calendar className="w-8 h-8 text-slate-500 mx-auto" />
-                <p className="text-xs font-bold text-slate-300">Aucun découpage de phasage spécifique renseigné</p>
-                <p className="text-[11px] text-slate-500">
-                  Le délai contractuel global de ce dossier est de {decisions?.delai_mois || 6} mois.
+              <div className="card-modern p-8 sm:col-span-2 text-center space-y-2.5 rounded-2xl">
+                <Calendar className="w-8 h-8 text-slate-400 mx-auto" />
+                <p className="text-[13px] font-bold text-foreground font-heading">{t('dashboard.workspace.no_phasage_title')}</p>
+                <p className="text-[11px] text-muted-foreground">
+                  {t('dashboard.workspace.no_phasage_desc', { months: String(decisions?.delai_mois || 6) })}
                 </p>
               </div>
             )}
@@ -681,23 +678,23 @@ function WorkspaceContent() {
         </div>
       )}
 
-      {/* DELIVERABLE 3: RICH TEXT EDITOR */}
+      {/* ═══ DELIVERABLE 3: RICH TEXT EDITOR ═══ */}
       {activeDeliverable === 'editor' && (
-        <div className="space-y-6">
+        <div className="space-y-5 animate-fade-in-up">
           <div className="flex flex-wrap items-center justify-between gap-4">
-            <div>
-              <h2 className="text-base font-bold text-white">Livrable 3 : Relecture & Validation Métier du Mémoire Technique</h2>
-              <p className="text-xs text-slate-400">
-                Éditez les chapitres générés. L'historique des versions est conservé à chaque sauvegarde.
+            <div className="section-header">
+              <h2 className="section-title text-[15px]">{t('dashboard.workspace.d3_title')}</h2>
+              <p className="section-desc text-[12px]">
+                {t('dashboard.workspace.d3_desc')}
               </p>
             </div>
 
             <div className="flex items-center gap-2">
               <button
                 onClick={() => setActiveDeliverable('download')}
-                className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow-glow transition-all"
+                className="btn-primary !py-2 !text-[12px] cursor-pointer"
               >
-                <span>Finaliser & Télécharger</span>
+                <span>{t('dashboard.workspace.finalize_btn')}</span>
                 <ArrowRight className="w-3.5 h-3.5" />
               </button>
             </div>
@@ -705,31 +702,27 @@ function WorkspaceContent() {
 
           {/* Section Selector if multiple sections */}
           {sections.length > 1 && (
-            <div className="flex flex-wrap gap-2">
+            <div className="tab-group !p-1.5 flex-wrap">
               {sections.map((sec, idx) => (
                 <button
                   key={sec.id}
                   onClick={() => setCurrentSectionIndex(idx)}
-                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all ${
-                    currentSectionIndex === idx
-                      ? 'bg-sky-600 text-white shadow-md'
-                      : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
-                  }`}
+                  className={currentSectionIndex === idx ? 'tab-item-active !bg-hl !text-hl-contrast' : 'tab-item'}
                 >
-                  {sec.title || `Section ${idx + 1}`}
+                  {sec.title || t('dashboard.workspace.section_fallback', { n: String(idx + 1) })}
                 </button>
               ))}
             </div>
           )}
 
           {/* Floating Learning Loop helper */}
-          <div className="p-4 rounded-2xl bg-sky-950/20 border border-sky-500/30 flex flex-wrap items-center justify-between gap-3">
+          <div className="p-4 rounded-2xl card-inset border-hl/20 bg-hl/5 flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-2.5">
-              <BrainCircuit className="w-5 h-5 text-sky-400 shrink-0" />
+              <BrainCircuit className="w-5 h-5 text-hl shrink-0" />
               <div>
-                <p className="text-xs font-bold text-white">Boucle d'Apprentissage Entreprise</p>
-                <p className="text-[11px] text-slate-400">
-                  Saisissez une consigne technique pour qu'elle soit capitalisée lors des prochains mémoires.
+                <p className="text-[13px] font-bold text-foreground font-heading">{t('dashboard.workspace.learning_loop_title')}</p>
+                <p className="text-[11px] text-muted-foreground">
+                  {t('dashboard.workspace.learning_loop_desc')}
                 </p>
               </div>
             </div>
@@ -739,28 +732,28 @@ function WorkspaceContent() {
                 type="text"
                 value={selectedTextRule}
                 onChange={(e) => setSelectedTextRule(e.target.value)}
-                placeholder="Ex : Toujours majorer de 5% les prix en zone urbaine..."
-                className="px-3 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-white placeholder:text-slate-600 focus:outline-none w-full sm:w-80"
+                placeholder={t('dashboard.workspace.rule_placeholder')}
+                className="input-field !py-1.5 !text-[12px] w-full sm:w-80"
               />
               <button
                 type="button"
                 onClick={handleAddSelectedToMemory}
-                className="px-3 py-1.5 rounded-xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-bold shrink-0 transition-colors"
+                className="btn-primary !py-1.5 !px-3 !text-[12px] shrink-0 cursor-pointer"
               >
-                Ajouter à la mémoire
+                {t('dashboard.workspace.add_to_memory_btn')}
               </button>
             </div>
           </div>
 
           {memorySavedMsg && (
-            <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-bold flex items-center gap-2 animate-in fade-in">
-              <CheckCircle2 className="w-4 h-4" />
-              <span>Règle ajoutée avec succès au comportement permanent de l'entreprise !</span>
+            <div className="p-3.5 rounded-xl bg-positive/8 border border-positive/20 text-positive text-[13px] font-semibold flex items-center gap-2 animate-fade-in-up">
+              <CheckCircle2 className="w-4 h-4 text-positive shrink-0" />
+              <span>{t('dashboard.workspace.memory_saved_msg')}</span>
             </div>
           )}
 
           {currentSection ? (
-            <div className="rounded-3xl overflow-hidden border border-slate-800 bg-slate-950/40 shadow-xl">
+            <div className="card-modern overflow-hidden rounded-2xl">
               <TiptapEditor
                 projectId={project.id}
                 section={currentSection}
@@ -770,25 +763,25 @@ function WorkspaceContent() {
               />
             </div>
           ) : (
-            <div className="p-12 rounded-3xl bg-slate-900/90 border border-slate-800 text-center space-y-3">
-              <FileText className="w-8 h-8 text-slate-500 mx-auto" />
-              <p className="text-xs font-bold text-slate-300">Aucune section générée pour le moment</p>
-              <p className="text-[11px] text-slate-500">Lancez la génération des chapitres depuis l'étape d'analyse.</p>
+            <div className="card-modern p-12 text-center space-y-3 rounded-2xl">
+              <FileText className="w-8 h-8 text-slate-400 mx-auto" />
+              <p className="text-[13px] font-bold text-foreground font-heading">{t('dashboard.workspace.no_sections_title')}</p>
+              <p className="text-[11px] text-muted-foreground">{t('dashboard.workspace.no_sections_desc')}</p>
             </div>
           )}
         </div>
       )}
 
-      {/* DELIVERABLE 4: FINAL WORD & PDF DOWNLOADS */}
+      {/* ═══ DELIVERABLE 4: FINAL WORD & PDF DOWNLOADS ═══ */}
       {activeDeliverable === 'download' && (
-        <div className="p-8 rounded-3xl bg-slate-900/90 border border-slate-800 space-y-8 text-center max-w-2xl mx-auto shadow-2xl">
+        <div className="card-elevated p-8 space-y-7 text-center max-w-2xl mx-auto shadow-floating rounded-2xl animate-fade-in-up">
           <div className="space-y-2">
-            <div className="w-16 h-16 rounded-full bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center mx-auto text-emerald-400">
+            <div className="w-16 h-16 rounded-2xl bg-positive/10 border border-positive/20 flex items-center justify-center mx-auto text-positive shadow-xs">
               <CheckCircle2 className="w-8 h-8" />
             </div>
-            <h2 className="text-xl font-black text-white">Votre Mémoire Technique est Prêt !</h2>
-            <p className="text-xs text-slate-400">
-              Le dossier complet pour <strong>{project.title}</strong> est assemblé selon la charte graphique de votre entreprise.
+            <h2 className="text-xl font-extrabold text-foreground font-heading">{t('dashboard.workspace.d4_title')}</h2>
+            <p className="text-[13px] text-muted-foreground">
+              {t('dashboard.workspace.d4_desc_prefix')}<strong className="text-foreground">{project.title}</strong>{t('dashboard.workspace.d4_desc_suffix')}
             </p>
           </div>
 
@@ -812,44 +805,64 @@ function WorkspaceContent() {
                   a.click();
                   URL.revokeObjectURL(url);
                 } catch (err: any) {
-                  alert('Erreur export Word : ' + err.message);
+                  alert(t('dashboard.workspace.export_word_error_prefix') + err.message);
                 }
               }}
-              className="flex flex-col items-center justify-center p-6 rounded-2xl bg-sky-600 hover:bg-sky-500 text-white shadow-xl hover:shadow-sky-500/40 transition-all group cursor-pointer"
+              className="flex flex-col items-center justify-center p-6 rounded-2xl bg-hl hover:bg-hl-strong text-hl-contrast shadow-xs transition-all duration-200 group cursor-pointer"
             >
-              <FileText className="w-8 h-8 mb-2 group-hover:scale-110 transition-transform" />
-              <span className="text-sm font-black">Télécharger le Mémoire Word</span>
-              <span className="text-[11px] opacity-80 mt-0.5">Format .docx modifiable</span>
+              <FileText className="w-8 h-8 mb-2 group-hover:scale-105 transition-transform" />
+              <span className="text-[14px] font-extrabold font-heading">{t('dashboard.workspace.download_word_title')}</span>
+              <span className="text-[11px] opacity-80 mt-0.5">{t('dashboard.workspace.download_word_desc')}</span>
             </button>
 
             <button
               onClick={async () => {
                 try {
-                  const res = await api.exportProject(project.id, { format: 'pdf' });
-                  if (res.pdf_url) {
-                    const a = document.createElement('a');
-                    a.href = res.pdf_url;
-                    a.download = res.filename || `Memoire_Technique_${project.title.replace(/[^a-zA-Z0-9]/g, '_')}.pdf`;
-                    a.target = '_blank';
-                    a.click();
-                  } else {
-                    window.location.href = `/projects/${project.id}/export`;
+                  // Correctif (02/09, découvert en corrigeant la tâche #66) : res.pdf_url
+                  // n'a jamais existé sur la vraie réponse backend, donc ce bouton
+                  // redirigeait systématiquement vers la page d'export complète au lieu de
+                  // jamais livrer de PDF directement. On interroge maintenant le job
+                  // jusqu'à complétion et on télécharge via un blob authentifié.
+                  const job = await api.exportProject(project.id, { format: 'pdf' });
+                  let attempts = 0;
+                  let finalJob = job;
+                  while (finalJob.status !== 'completed' && finalJob.status !== 'failed' && attempts < 30) {
+                    await new Promise((resolve) => setTimeout(resolve, 2000));
+                    finalJob = await api.getExportJob(job.id);
+                    attempts += 1;
                   }
+                  if (finalJob.status === 'failed') {
+                    throw new Error(finalJob.error_message || 'Échec de la génération du PDF.');
+                  }
+                  if (!finalJob.s3_docx_url) {
+                    window.location.href = `/projects/${project.id}/export`;
+                    return;
+                  }
+                  const apiBase = (process.env.NEXT_PUBLIC_API_URL || '').replace(/\/$/, '');
+                  const blobUrl = await fetchAuthenticatedBlobUrl(`${apiBase}${finalJob.s3_docx_url}`);
+                  const ext = finalJob.format === 'pdf' && finalJob.s3_pdf_url ? 'pdf' : 'docx';
+                  const a = document.createElement('a');
+                  a.href = blobUrl;
+                  a.download = `Memoire_Technique_${project.title.replace(/[^a-zA-Z0-9]/g, '_')}.${ext}`;
+                  document.body.appendChild(a);
+                  a.click();
+                  document.body.removeChild(a);
+                  setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
                 } catch (err: any) {
-                  alert('Erreur export PDF : ' + (err.message || 'Erreur inconnue'));
+                  alert(t('dashboard.workspace.export_pdf_error_prefix') + (err.message || t('dashboard.workspace.unknown_error')));
                 }
               }}
-              className="flex flex-col items-center justify-center p-6 rounded-2xl bg-slate-800 hover:bg-slate-700 text-white border border-slate-700 hover:border-slate-600 shadow-xl transition-all group cursor-pointer"
+              className="flex flex-col items-center justify-center p-6 rounded-2xl card-inset hover:border-slate-300 dark:hover:border-line text-foreground transition-all duration-200 group cursor-pointer"
             >
-              <Download className="w-8 h-8 mb-2 group-hover:scale-110 transition-transform text-rose-400" />
-              <span className="text-sm font-black">Télécharger le Mémoire PDF</span>
-              <span className="text-[11px] text-slate-400 mt-0.5">Document final prêt à déposer</span>
+              <Download className="w-8 h-8 mb-2 group-hover:scale-105 transition-transform text-danger" />
+              <span className="text-[14px] font-extrabold font-heading">{t('dashboard.workspace.download_pdf_title')}</span>
+              <span className="text-[11px] text-muted-foreground mt-0.5">{t('dashboard.workspace.download_pdf_desc')}</span>
             </button>
           </div>
 
-          <div className="pt-4 border-t border-slate-800 flex items-center justify-center gap-2 text-xs text-slate-500">
-            <ShieldCheck className="w-4 h-4 text-emerald-400" />
-            <span>Document construit avec citations internes et profil réglementaire du tenant</span>
+          <div className="pt-4 border-t border-line flex items-center justify-center gap-2 text-[12px] text-muted-foreground">
+            <ShieldCheck className="w-4 h-4 text-positive" />
+            <span>{t('dashboard.workspace.built_with_disclaimer')}</span>
           </div>
         </div>
       )}
@@ -862,63 +875,63 @@ function WorkspaceContent() {
 
   function renderWizardModal() {
     return (
-      <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-        <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 sm:p-8 max-w-lg w-full shadow-2xl space-y-6">
+      <div className="fixed inset-0 bg-slate-950/60 backdrop-blur-md z-50 flex items-center justify-center p-4 animate-in fade-in">
+        <div className="bg-card border border-line rounded-2xl p-6 sm:p-8 max-w-lg w-full shadow-floating space-y-6 animate-scale-in">
           <div className="flex items-center justify-between">
             <div className="space-y-0.5">
-              <h3 className="text-lg font-black text-white">Nouvelle Réponse à un Appel d'Offres</h3>
-              <p className="text-xs text-slate-400">
-                Indiquez les coordonnées du marché et déposez les pièces du DCE.
+              <h3 className="text-lg font-bold text-foreground font-heading">{t('dashboard.workspace.wizard_title')}</h3>
+              <p className="text-[12px] text-muted-foreground">
+                {t('dashboard.workspace.wizard_subtitle')}
               </p>
             </div>
             <button
               onClick={() => setShowNewAOWizard(false)}
-              className="p-2 rounded-xl text-slate-500 hover:text-white hover:bg-slate-800 transition-colors"
+              className="p-2 rounded-lg text-slate-400 hover:text-foreground hover:bg-slate-100 dark:hover:bg-raised transition-colors cursor-pointer"
             >
               <X className="w-5 h-5" />
             </button>
           </div>
 
           {wizardError && (
-            <div className="p-3.5 rounded-2xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs flex items-start gap-2.5">
-              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-400" />
+            <div className="p-3.5 rounded-xl bg-danger/8 border border-danger/20 text-danger text-[13px] flex items-start gap-2.5">
+              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
               <div className="space-y-0.5">
-                <p className="font-bold text-rose-200">Erreur lors de la création</p>
+                <p className="font-bold">{t('dashboard.workspace.wizard_error_title')}</p>
                 <p>{wizardError}</p>
               </div>
             </div>
           )}
 
           <form onSubmit={handleLaunchGeneration} className="space-y-4">
-            <div>
-              <label className="block text-xs font-bold text-slate-300 mb-1">Nom / Intitulé du Marché</label>
+            <div className="space-y-1.5">
+              <label className="text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">{t('dashboard.workspace.field_title_label')}</label>
               <input
                 type="text"
                 required
                 disabled={isSubmittingWizard}
                 value={aoTitle}
                 onChange={(e) => setAoTitle(e.target.value)}
-                placeholder="Ex : Réhabilitation thermique de 40 logements..."
-                className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 focus:border-sky-500 text-white text-xs focus:outline-none disabled:opacity-50"
+                placeholder={t('dashboard.workspace.field_title_placeholder')}
+                className="input-field disabled:opacity-50"
               />
             </div>
 
-            <div>
-              <label className="block text-xs font-bold text-slate-300 mb-1">Maître d'Ouvrage / Acheteur Public</label>
+            <div className="space-y-1.5">
+              <label className="text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">{t('dashboard.workspace.field_client_label')}</label>
               <input
                 type="text"
                 required
                 disabled={isSubmittingWizard}
                 value={aoClient}
                 onChange={(e) => setAoClient(e.target.value)}
-                placeholder="Ex : Mairie de Saint-Denis, Région IDF..."
-                className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 focus:border-sky-500 text-white text-xs focus:outline-none disabled:opacity-50"
+                placeholder={t('dashboard.workspace.field_client_placeholder')}
+                className="input-field disabled:opacity-50"
               />
             </div>
 
             <div className="space-y-2">
-              <label className="block text-xs font-bold text-slate-300">
-                Déposer les pièces du DCE (CCTP, RC, DPGF en PDF/Word/Zip)
+              <label className="text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">
+                {t('dashboard.workspace.field_files_label')}
               </label>
               <input
                 ref={fileInputRef}
@@ -938,27 +951,27 @@ function WorkspaceContent() {
                   handleFileSelect(e.dataTransfer.files);
                 }}
                 onClick={() => !isSubmittingWizard && fileInputRef.current?.click()}
-                className={`p-6 rounded-2xl border-2 border-dashed text-center cursor-pointer transition-all ${
+                className={`p-6 rounded-2xl border-2 border-dashed text-center cursor-pointer transition-all duration-200 ${
                   isDragging
-                    ? 'border-sky-400 bg-sky-500/10'
-                    : 'border-slate-800 hover:border-slate-700 bg-slate-950/40'
+                    ? 'border-hl bg-hl/10'
+                    : 'card-inset border-slate-300 dark:border-line hover:border-hl/60'
                 } ${isSubmittingWizard ? 'opacity-50 cursor-not-allowed' : ''}`}
               >
-                <FileUp className="w-8 h-8 text-sky-400 mx-auto mb-2" />
-                <p className="text-xs font-bold text-slate-200">Glissez-déposez vos fichiers ici</p>
-                <p className="text-[10px] text-slate-500 mt-0.5">ou cliquez pour parcourir votre ordinateur</p>
+                <FileUp className="w-8 h-8 text-hl mx-auto mb-2" />
+                <p className="text-[13px] font-bold text-foreground font-heading">{t('dashboard.workspace.dropzone_text')}</p>
+                <p className="text-[11px] text-muted-foreground mt-0.5">{t('dashboard.workspace.dropzone_subtext')}</p>
               </div>
 
               {selectedFiles.length > 0 && (
                 <div className="space-y-1.5 max-h-32 overflow-y-auto">
                   {selectedFiles.map((file, idx) => (
-                    <div key={idx} className="flex items-center justify-between p-2 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-300">
+                    <div key={idx} className="flex items-center justify-between p-2.5 rounded-lg card-inset text-[12px] text-foreground">
                       <span className="truncate">{file.name}</span>
                       <button
                         type="button"
                         disabled={isSubmittingWizard}
                         onClick={() => handleRemoveFile(idx)}
-                        className="text-slate-500 hover:text-rose-400 ml-2 disabled:opacity-40"
+                        className="text-slate-400 hover:text-danger ml-2 disabled:opacity-40 cursor-pointer"
                       >
                         <X className="w-4 h-4" />
                       </button>
@@ -972,17 +985,17 @@ function WorkspaceContent() {
               <button
                 type="submit"
                 disabled={isSubmittingWizard}
-                className="w-full py-3 rounded-2xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-bold shadow-glow hover:shadow-sky-500/40 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+                className="btn-primary w-full !py-3 !text-[14px] cursor-pointer"
               >
                 {isSubmittingWizard ? (
                   <>
                     <Loader2 className="w-4 h-4 animate-spin" />
-                    <span>Création du dossier en cours...</span>
+                    <span>{t('dashboard.workspace.wizard_submitting')}</span>
                   </>
                 ) : (
                   <>
                     <Sparkles className="w-4 h-4" />
-                    <span>Créer et Lancer l'Évaluation Go/No-Go</span>
+                    <span>{t('dashboard.workspace.wizard_submit_btn')}</span>
                   </>
                 )}
               </button>
@@ -998,8 +1011,8 @@ function WorkspaceContent() {
 export default function BTPWorkspacePage() {
   return (
     <Suspense fallback={
-      <div className="flex items-center justify-center min-h-[50vh]">
-        <Loader2 className="w-8 h-8 animate-spin text-sky-400" />
+      <div className="flex items-center justify-center min-h-[50vh] text-[13px] text-muted-foreground font-mono">
+        <Loader2 className="w-8 h-8 animate-spin text-hl" />
       </div>
     }>
       <WorkspaceContent />

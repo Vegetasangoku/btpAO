@@ -188,7 +188,7 @@ def test_admin_routes_accessible_by_platform_admin():
         "/api/admin/model-routing",
         json={
             "tenant_id": TENANT_ID,
-            "extraction_gonogo": {"provider": "Anthropic", "model": "claude-3-5-sonnet-20241022"},
+            "extraction_gonogo": {"provider": "Anthropic", "model": "claude-sonnet-5"},
         },
         headers=headers,
     )

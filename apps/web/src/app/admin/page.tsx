@@ -651,7 +651,11 @@ function SuperAdminPageContent() {
       await api.updatePlatformLLMKeys({
         default_llm_tier: platformDefaultTier,
         default_fallback_tier: platformFallbackTier,
-        custom_providers: customProviders,
+        // 03/09 : ce bouton ne gere plus les cles -- seul "Tester et enregistrer
+        // la cle" sur chaque fournisseur peut en ecrire une (voir admin.py). On ne
+        // renvoie meme plus le champ api_key ici, pour que ce soit vrai aussi cote
+        // ecran : ce formulaire ne peut plus, par construction, ecraser une cle.
+        custom_providers: customProviders.map(({ api_key, ...rest }) => rest),
         model_tier_overrides: tierOverrides,
       });
       setSaveSuccess(true);
@@ -1202,6 +1206,15 @@ function SuperAdminPageContent() {
                   cet écran ne déplace un traitement d’un pays à l’autre. Pour qu’un dossier reste
                   dans l’Union européenne, choisissez un fournisseur qui y héberge — Mistral&nbsp;AI
                   aujourd’hui. La zone affichée sert à décider si l’avertissement RGPD apparaît.
+                </p>
+
+                <p className="text-[12.5px] leading-relaxed text-[hsl(var(--muted-foreground))] border-s-2 border-corten/50 ps-3">
+                  <strong className="text-foreground">Deux boutons, deux rôles distincts.</strong> « Tester et
+                  enregistrer la clé » sur chaque fournisseur ci-dessous teste ET sauvegarde cette clé
+                  immédiatement, indépendamment du reste — c’est le seul endroit qui écrit une clé.
+                  Le bouton « Enregistrer » en bas de page ne concerne que le modèle par défaut, le
+                  modèle de repli et les réglages des fournisseurs (nom, zone, activation) : il ne touche plus
+                  jamais aux clés, même si vous le cliquez juste après un test.
                 </p>
 
                 <div className="grid grid-cols-1 gap-4">
