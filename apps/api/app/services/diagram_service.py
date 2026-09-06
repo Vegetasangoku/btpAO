@@ -61,6 +61,36 @@ def _boxstyle_for(shape_style: Optional[str], pad: float, height: float, default
     return f"round,pad={pad},rounding_size={default_rounding}"
 
 
+def _accent_palette(accent: str, count: int) -> List[str]:
+    """Petite palette derivee d'une couleur de marque : meme teinte, luminosite variee.
+
+    Objectif : rester dans la charte du client sans rendre les encadres indistinguables.
+    On travaille en HLS et on echelonne la luminosite autour de celle de la couleur
+    d'origine, en la bornant pour que le trait reste visible sur fond blanc.
+    """
+    import colorsys
+
+    fallback = ["#0d9488", "#4f46e5", "#d97706", "#059669"]
+    hexv = (accent or "").strip().lstrip("#")
+    if len(hexv) != 6:
+        return fallback[:count] if count <= 4 else (fallback * count)[:count]
+    try:
+        r, g, b = (int(hexv[i:i + 2], 16) / 255 for i in (0, 2, 4))
+    except ValueError:
+        return fallback[:count] if count <= 4 else (fallback * count)[:count]
+
+    h, l, s = colorsys.rgb_to_hls(r, g, b)
+    out: List[str] = []
+    for i in range(count):
+        # Luminosites reparties dans une bande lisible (0.28 a 0.58).
+        li = 0.28 + (0.30 * (i / max(1, count - 1)))
+        # Legere variation de teinte pour distinguer sans quitter la famille de couleur.
+        hi = (h + (i - (count - 1) / 2) * 0.035) % 1.0
+        ri, gi, bi = colorsys.hls_to_rgb(hi, li, max(0.35, min(1.0, s)))
+        out.append("#%02x%02x%02x" % (round(ri * 255), round(gi * 255), round(bi * 255)))
+    return out
+
+
 class DiagramService:
     def generate_organigramme_png(
         self,
@@ -140,7 +170,11 @@ class DiagramService:
         n_subs = len(sub_cadres)
         x_positions = [18 + i * (64 / max(1, n_subs - 1)) for i in range(n_subs)] if n_subs > 1 else [50]
 
-        colors = ["#0d9488", "#4f46e5", "#d97706", "#059669"]
+        # Les encadres de sous-cadres suivaient une palette codee en dur, sans rapport
+        # avec la charte du client (04/09). On la derive desormais de sa couleur primaire :
+        # meme teinte, luminosite echelonnee, ce qui garde les roles distinguables tout en
+        # restant dans sa charte. Repli sur la palette historique si la couleur est illisible.
+        colors = _accent_palette(accent, 4)
 
         for i, cadre in enumerate(sub_cadres):
             x = x_positions[i]

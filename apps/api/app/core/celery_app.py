@@ -72,6 +72,12 @@ celery_app.conf.beat_schedule = {
         "task": "tasks.sync_llm_catalog_daily_task",
         "schedule": crontab(hour=4, minute=0),  # Everyday at 4:00 AM Paris time
     },
+    "daily-regulatory-watch": {
+        # 04/09 : veille des portails officiels par pays. A 5h00, apres la purge RGPD (3h)
+        # et la synchro du catalogue LLM (4h), pour ne pas empiler les taches longues.
+        "task": "tasks.regulatory_watch_daily_task",
+        "schedule": crontab(hour=5, minute=0),
+    },
     "sharepoint-delta-sync": {
         # 03/09 : toutes les 6h -- assez frequent pour que "les nouveaux fichiers"
         # deposes par le client apparaissent vite dans son RAG, assez espace pour que
@@ -102,14 +108,55 @@ def check_celery_broker_health() -> dict:
         }
 
     try:
-        # Check broker reachability using Celery connection
+        # 1. Joignabilite du broker.
         with celery_app.connection_for_read() as conn:
             conn.ensure_connection(max_retries=1, interval_start=0.1)
+
+        # 2. Presence d'un worker (04/09). Avant ce correctif, ce controle ne testait QUE
+        # Redis et renvoyait "healthy" meme sans aucun worker : la file pouvait n'etre
+        # consommee par personne -- generation de sections, synchro SharePoint, purge RGPD
+        # et veille reglementaire toutes a l'arret -- pendant que le tableau de bord
+        # affichait un voyant vert. Un broker joignable ne dit rien de l'execution.
+        workers: dict = {}
+        try:
+            workers = celery_app.control.ping(timeout=1.0) or {}
+        except Exception as ping_exc:  # noqa: BLE001
+            logger.warning("Celery worker ping failed: %s", ping_exc)
+
+        worker_count = len(workers)
+        if worker_count == 0:
+            return {
+                "status": "degraded",
+                "broker": configured_broker,
+                "mode": "distributed_broker",
+                "workers": 0,
+                "message": (
+                    "Broker joignable mais AUCUN worker Celery ne repond. Les taches de fond "
+                    "(generation de sections, synchro SharePoint, veille reglementaire, purge RGPD) "
+                    "sont mises en file mais ne s'executent pas."
+                ),
+            }
+
+        # Taches reellement enregistrees par les workers. Un worker demarre avant l'ajout
+        # d'une tache ne la connait pas (Celery n'enregistre pas a chaud) : la tache part
+        # en file et n'est jamais executee, sans erreur visible cote appelant. Ce champ
+        # rend ce cas diagnosticable au lieu de le laisser deviner.
+        registered: list = []
+        try:
+            reg = celery_app.control.inspect(timeout=1.0).registered() or {}
+            for task_names in reg.values():
+                registered.extend(task_names or [])
+            registered = sorted(set(registered))
+        except Exception as reg_exc:  # noqa: BLE001
+            logger.warning("Celery registered-tasks inspect failed: %s", reg_exc)
+
         return {
             "status": "healthy",
             "broker": configured_broker,
             "mode": "distributed_broker",
-            "message": "Celery broker connected successfully.",
+            "workers": worker_count,
+            "registered_tasks": registered,
+            "message": f"Broker connecte, {worker_count} worker(s) actif(s).",
         }
     except Exception as e:
         logger.error(f"Celery broker healthcheck failed for {configured_broker}: {e}")

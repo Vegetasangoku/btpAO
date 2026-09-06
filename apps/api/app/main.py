@@ -254,6 +254,11 @@ async def cluster_health_check():
         "redis_celery": {
             "status": redis_status,
             "broker_url": celery_res.get("broker_url", "redis://localhost:6379/0"),
+            # 04/09 : le nombre de workers qui repondent au ping est remonte ici. Un broker
+            # joignable sans worker signifie que toutes les taches de fond sont en file mais
+            # ne s'executent pas -- il faut que le tableau de bord le montre.
+            "workers": celery_res.get("workers"),
+            "message": celery_res.get("message"),
             "ping": celery_res.get("ping"),
             "error": celery_res.get("error"),
         },

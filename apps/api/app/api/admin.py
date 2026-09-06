@@ -96,6 +96,10 @@ class CustomProviderInput(BaseModel):
 
 class LLMKeysPayload(BaseModel):
     anthropic_api_key: Optional[str] = None
+    # 04/09 : fournisseurs de recherche web configurables depuis l'admin (liste
+    # extensible, meme logique que custom_providers pour les LLM), au lieu d'exiger des
+    # variables d'environnement et un redemarrage. Cles chiffrees dans le meme coffre.
+    web_search_providers: Optional[List[Dict[str, Any]]] = None
     openai_api_key: Optional[str] = None
     mistral_api_key: Optional[str] = None
     default_llm_tier: Optional[str] = None
@@ -762,7 +766,27 @@ async def get_llm_keys(
         ip_address=request.client.host if request.client else None,
     )
 
+    # Fournisseurs de recherche web : la resolution (y compris la compatibilite avec les
+    # anciens champs et l'environnement) est faite par le service, pour qu'admin et moteur
+    # voient exactement la meme chose.
+    from app.services.web_search_service import SUPPORTED_SEARCH_TYPES, resolve_search_providers
+
+    search_providers = [
+        {
+            "id": p["id"],
+            "name": p["name"],
+            "type": p["type"],
+            "enabled": p["enabled"],
+            "priority": p["priority"],
+            "api_key_configured": bool(p["api_key"]),
+            "api_key_masked": mask_api_key(p["api_key"]),
+        }
+        for p in resolve_search_providers(ps_dict)
+    ]
+
     return {
+        "web_search_providers": search_providers,
+        "supported_search_types": SUPPORTED_SEARCH_TYPES,
         "anthropic_api_key_configured": bool(anthropic_raw),
         "anthropic_api_key_masked": mask_api_key(anthropic_raw),
         "openai_api_key_configured": bool(openai_raw),
@@ -828,6 +852,42 @@ async def update_llm_keys(
                 "monthly_budget_usd": prov_input.monthly_budget_usd,
             })
         current_settings["custom_providers"] = saved_providers
+
+    # Fournisseurs de recherche web (04/09). Meme regle de securite que les cles LLM :
+    # une valeur masquee renvoyee telle quelle par le formulaire ne doit JAMAIS ecraser la
+    # cle stockee -- c'est ce piege qui avait fait disparaitre une cle Gemini le 03/09.
+    if payload.web_search_providers is not None:
+        existing_by_id = {
+            p.get("id"): p
+            for p in (current_settings.get("web_search_providers") or [])
+            if p.get("id")
+        }
+        saved = []
+        for i, prov in enumerate(payload.web_search_providers):
+            pid = (prov.get("id") or prov.get("type") or f"provider_{i}").strip()
+            incoming_key = (prov.get("api_key") or "").strip()
+            previous = existing_by_id.get(pid, {})
+            if incoming_key and "•••" not in incoming_key and "***" not in incoming_key:
+                key_enc = encrypt_api_key(incoming_key)
+            else:
+                key_enc = previous.get("api_key", "")
+            saved.append({
+                "id": pid,
+                "name": (prov.get("name") or pid).strip(),
+                "type": (prov.get("type") or "serper").strip().lower(),
+                "api_key": key_enc,
+                "enabled": bool(prov.get("enabled", True)),
+                "priority": int(prov.get("priority") or (i + 1)),
+            })
+        current_settings["web_search_providers"] = saved
+
+    # Le service garde les cles en cache 60 s : on l'invalide pour que la nouvelle valeur
+    # soit prise en compte immediatement apres l'enregistrement.
+    try:
+        from app.services.web_search_service import web_search_service
+        web_search_service.invalidate_config_cache()
+    except Exception:  # noqa: BLE001
+        pass
 
     # 2. Update legacy key fields with application-level AES encryption
     if payload.anthropic_api_key is not None:
@@ -903,6 +963,86 @@ async def update_llm_keys(
     )
     await db.commit()
     return {"success": True, "message": "Master API keys, custom providers and platform settings successfully updated."}
+
+
+class TestSearchProviderPayload(BaseModel):
+    provider: str  # type d'adaptateur : "serper" | "brave" | ... (voir SUPPORTED_SEARCH_TYPES)
+    provider_id: Optional[str] = None  # pour rejouer la cle deja enregistree d'une entree
+    api_key: Optional[str] = None
+
+
+@router.post("/llm-keys/test-search-provider")
+async def test_search_provider_connection(
+    payload: TestSearchProviderPayload,
+    request: Request,
+    admin_user: CurrentTenantUser = Depends(require_platform_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Teste une cle de recherche web par un VRAI appel au fournisseur (04/09).
+
+    Meme principe que le test des fournisseurs LLM : on ne se contente pas de verifier
+    que la cle est renseignee, on execute une requete minimale et on renvoie le nombre
+    de resultats, la latence et l'erreur reelle le cas echeant. Une cle acceptee sans
+    test est une panne silencieuse a la premiere generation.
+    """
+    import time as _time
+    import httpx as _httpx
+
+    from app.services.web_search_service import SUPPORTED_SEARCH_TYPES, web_search_service
+
+    provider = (payload.provider or "").strip().lower()
+    known = {t["type"] for t in SUPPORTED_SEARCH_TYPES}
+    if provider not in known:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Type de moteur inconnu : '{provider}'. Types pris en charge : {', '.join(sorted(known))}.",
+        )
+
+    raw_key = (payload.api_key or "").strip()
+    # Cle masquee ou absente : on rejoue celle deja enregistree pour cette entree.
+    if not raw_key or "•••" in raw_key or "***" in raw_key:
+        from app.services.web_search_service import resolve_search_providers
+
+        stmt = select(PlatformSettings).where(PlatformSettings.id == "global")
+        res = await db.execute(stmt)
+        ps = res.scalar_one_or_none()
+        conf = (ps.settings if ps and ps.settings else {}) or {}
+        resolved = resolve_search_providers(conf)
+        match = next(
+            (p for p in resolved if p["id"] == (payload.provider_id or "")),
+            next((p for p in resolved if p["type"] == provider), None),
+        )
+        raw_key = (match or {}).get("api_key") or ""
+
+    if not raw_key:
+        return {"success": False, "provider": provider, "error": "Aucune cle configuree pour ce fournisseur."}
+
+    started = _time.monotonic()
+    try:
+        # On rejoue exactement l'adaptateur utilise en production, plutot que de
+        # reimplementer l'appel HTTP ici : ajouter un moteur ne demande donc qu'un
+        # adaptateur dans web_search_service, jamais une seconde implementation de test.
+        adapter = web_search_service._ADAPTERS.get(provider)
+        if not adapter:
+            return {"success": False, "provider": provider,
+                    "error": f"Aucun adaptateur implemente pour '{provider}'."}
+        results = await adapter(web_search_service, "marches publics BTP", 2, raw_key)
+        latency_ms = round((_time.monotonic() - started) * 1000)
+        if not results:
+            return {
+                "success": False, "provider": provider, "latency_ms": latency_ms,
+                "error": "Le moteur a repondu mais n'a rendu aucun resultat (cle invalide, quota atteint, ou requete filtree).",
+            }
+        return {
+            "success": True,
+            "provider": provider,
+            "results_count": len(results),
+            "latency_ms": latency_ms,
+            "message": f"{len(results)} resultat(s) en {latency_ms} ms — cle valide.",
+        }
+    except Exception as e:  # noqa: BLE001
+        return {"success": False, "provider": provider, "error": f"{type(e).__name__} : {str(e)[:200]}"}
 
 
 @router.post("/llm-keys/test-provider")

@@ -33,6 +33,7 @@ import {
 } from 'lucide-react';
 import { supabase } from '@/lib/supabase/client';
 import { api } from '@/lib/api';
+import { WebSearchKeysCard } from '@/components/admin/web-search-keys-card';
 import { LLM_MODEL_TIERS } from '@/lib/types';
 import type { LlmCatalogResponse } from '@/lib/types';
 import { useTranslation } from '@/components/i18n-provider';
@@ -1535,6 +1536,10 @@ function SuperAdminPageContent() {
               </div>
             </form>
           </div>
+
+          {/* Clés de recherche web (04/09) : sert la veille et la génération sur les
+              sites officiels déclarés par pays. */}
+          <WebSearchKeysCard />
 
           {/* Suivi de la consommation LLM (Tokens & Coûts ce mois-ci) */}
           <div id="llm-consumption" className="p-6 rounded-2xl bg-card border border-line shadow-xs space-y-4">

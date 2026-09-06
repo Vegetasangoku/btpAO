@@ -15,6 +15,48 @@ from app.models.entities import CountryOfficialSource, CountryRegulatoryProfile
 
 logger = logging.getLogger("regulatory_watch_service")
 
+# Les portails d'Etat rejettent tres frequemment le User-Agent par defaut d'un client
+# HTTP Python (403, page de challenge, ou reponse vide). On se presente donc comme un
+# navigateur reel, avec les en-tetes qui vont avec -- c'est de la simple consultation de
+# pages publiques, a la frequence d'une fois par jour.
+_WATCH_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
+}
+
+
+# Marqueurs de pages de blocage / challenge renvoyees avec un code 200. La liste est
+# volontairement courte et sans ambiguite : un faux positif ferait passer une vraie page
+# officielle pour un mur.
+_BLOCK_MARKERS = (
+    "request rejected",
+    "access denied",
+    "just a moment...",
+    "attention required!",
+    "checking your browser",
+    "enable javascript and cookies to continue",
+    "captcha",
+)
+
+
+class _BlockedPage(Exception):
+    """Contenu de blocage servi avec un code HTTP de succes."""
+
+
+def _detect_block_page(content: str) -> Optional[str]:
+    lowered = content[:4000].lower()
+    for marker in _BLOCK_MARKERS:
+        if marker in lowered:
+            return marker
+    # Une reponse 200 quasiment vide n'est pas une page officielle exploitable.
+    if len(content.strip()) < 300:
+        return "reponse vide ou tronquee"
+    return None
+
 
 class RegulatoryWatchService:
     @staticmethod
@@ -42,11 +84,22 @@ class RegulatoryWatchService:
         last_summary_text: Optional[str] = None
 
         try:
-            async with httpx.AsyncClient(timeout=12.0, follow_redirects=True) as client:
+            async with httpx.AsyncClient(
+                timeout=12.0, follow_redirects=True, headers=_WATCH_HEADERS
+            ) as client:
                 response = await client.get(portal_url)
                 response.raise_for_status()
                 # Hash first 50KB of real response body only
                 content_sample = response.text[:50000]
+
+                # Un portail protege repond frequemment 200 avec une page de blocage
+                # ("Request Rejected", challenge Cloudflare, captcha) : le code HTTP dit
+                # succes, le contenu ne vaut rien. Sans ce controle la veille enregistre
+                # l'empreinte du mur et se croit a jour -- constate le 06/09 sur qiwa.sa.
+                blocked_by = _detect_block_page(content_sample)
+                if blocked_by:
+                    raise _BlockedPage(blocked_by)
+
                 new_hash = self.compute_sha256(content_sample)
                 has_changed = source.last_known_hash is None or source.last_known_hash != new_hash
                 # Real summary = first 200 chars of meaningful text, not a generic message
@@ -55,6 +108,12 @@ class RegulatoryWatchService:
                     f"Contenu réel récupéré le {now.strftime('%d/%m/%Y à %H:%M UTC')} "
                     f"(HTTP {response.status_code}) — Extrait : {stripped}..."
                 )
+        except _BlockedPage as blocked:
+            fetch_error = (
+                f"Portail joignable mais protege : {blocked} (HTTP 200 mais contenu de blocage) "
+                f"le {now.strftime('%d/%m/%Y a %H:%M UTC')} — URL: {portal_url}"
+            )
+            logger.warning("[RegulatoryWatch] Page de blocage sur %s (%s)", portal_url, blocked)
         except httpx.TimeoutException:
             fetch_error = f"Portail inaccessible (timeout) le {now.strftime('%d/%m/%Y à %H:%M UTC')} — URL: {portal_url}"
             logger.warning("[RegulatoryWatch] Timeout fetching %s", portal_url)

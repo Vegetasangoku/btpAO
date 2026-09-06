@@ -37,6 +37,25 @@ export interface ProjectCountryState {
   available_countries: CountryOption[];
 }
 
+/** Un moteur de recherche configure. La cle n'est jamais renvoyee en clair. */
+export interface SearchProviderConfig {
+  id: string;
+  name: string;
+  type: string;
+  enabled: boolean;
+  priority: number;
+  api_key_configured: boolean;
+  api_key_masked: string;
+}
+
+/** Type de moteur pour lequel un adaptateur existe cote serveur. */
+export interface SupportedSearchType {
+  type: string;
+  label: string;
+  cost_per_query_usd: number;
+  key_hint?: string;
+}
+
 export interface TenantBranding {
   primary_color: string;
   secondary_color: string;
@@ -335,6 +354,10 @@ export interface PlatformLLMKeys {
   mistral_api_key_configured: boolean;
   mistral_api_key_masked: string;
   custom_providers?: CustomLLMProvider[];
+  // 04/09 : moteurs de recherche web, geres comme une liste extensible en admin
+  // (meme logique que custom_providers). L'ordre porte la priorite de repli.
+  web_search_providers?: SearchProviderConfig[];
+  supported_search_types?: SupportedSearchType[];
   encryption_status?: string;
   embedding_model: string;
   default_llm_tier: string;

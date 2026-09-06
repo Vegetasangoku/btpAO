@@ -52,6 +52,21 @@ const API_BASE_URL = rawApiUrl.endsWith('/api') ? rawApiUrl : `${rawApiUrl}/api`
 const DEMO_TENANT_ID = '11111111-1111-1111-1111-111111111111';
 
 
+/**
+ * URL absolue vers une route de l'API, a partir d'un chemin SANS le prefixe "/api".
+ *
+ * Corrige une classe de bug constatee le 04/09 : NEXT_PUBLIC_API_URL contient deja "/api"
+ * dans ce deploiement, et les composants qui concatenaient "/api/visuals/file/..." a la
+ * main produisaient "/api/api/visuals/file/..." -> 404. Le PNG etait pourtant bien genere
+ * (179 Ko ecrits, cle de stockage correcte) : seule l'URL de relecture etait fausse, ce qui
+ * faisait croire a une panne de stockage. Le meme defaut touchait l'organigramme ET le Gantt.
+ * Passer par ce helper garantit une seule facon de composer ces URLs.
+ */
+export function buildApiUrl(path: string): string {
+  const clean = path.startsWith('/') ? path : `/${path}`;
+  return `${API_BASE_URL}${clean}`;
+}
+
 async function fetcher<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers || {});
   
@@ -635,6 +650,14 @@ export const api = {
     default_fallback_tier?: string;
     custom_providers?: any[];
     model_tier_overrides?: Record<string, string>;
+    web_search_providers?: Array<{
+      id: string;
+      name: string;
+      type: string;
+      enabled: boolean;
+      priority: number;
+      api_key?: string;
+    }>;
   }) =>
     fetcher<any>('/admin/llm-keys', {
       method: 'POST',
@@ -658,6 +681,21 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(data),
     }),
+  // Test réel d'une clé de recherche web : exécute une vraie requête et renvoie le
+  // nombre de résultats ou l'erreur du fournisseur (04/09).
+  testSearchProvider: (data: { provider: string; provider_id?: string; api_key?: string }) =>
+    fetcher<{
+      success: boolean;
+      provider: string;
+      results_count?: number;
+      latency_ms?: number;
+      message?: string;
+      error?: string;
+    }>('/admin/llm-keys/test-search-provider', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
   // ── Plafonds de dépense IA (fournisseur / forfait / client) ──────────────
   getCostLimits: () => fetcher<CostLimitsOverview>('/admin/cost-limits'),
   updateCostLimitSettings: (data: {

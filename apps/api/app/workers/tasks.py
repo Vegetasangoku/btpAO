@@ -370,7 +370,7 @@ def generate_section_task(
                 # Pays du MARCHE (Project.country_code) et non plus du tenant -- voir
                 # regulatory_service.get_project_regulatory_profile et migration 00037.
                 reg_profile = await regulatory_service.get_project_regulatory_profile(
-                    db=db, tenant_id=tenant_uuid, project_id=project_uuid
+                    db=db, tenant_id=tenant_uuid, project_id=proj_uuid
                 )
                 reg_dict = {
                     "country_code": reg_profile.country_code,
@@ -394,36 +394,64 @@ def generate_section_task(
                 # dilution du corpus interne par une source externe moins autorisee). Les extraits
                 # DCE (dce_chunks) restent hors de cette condition : ce sont les pieces du marche
                 # EN COURS, pas le "corpus historique" du tenant, donc toujours independants ici.
-                if company_assets or tenant_learnings_payload:
-                    logger.info(
-                        "[GenerateSectionTask] Corpus client suffisant (%d savoir-faire, %d enseignements) "
-                        "-- recherche web sautee (priorite RAG absolue).",
-                        len(company_assets), len(tenant_learnings_payload),
+                # 06/09 - CORRECTION DE FOND. L'ancienne version sautait ENTIEREMENT la
+                # recherche des que le tenant avait le moindre savoir-faire en base
+                # ("priorite RAG absolue"). Deux consequences graves :
+                #   1. Le corpus client existant => les sources officielles de l'Etat
+                #      n'etaient JAMAIS consultees. Or c'est precisement la promesse du
+                #      produit : repondre en s'appuyant sur les sites officiels declares.
+                #   2. La demande explicite est "recherche sur sa doc ET le web", pas
+                #      l'une OU l'autre.
+                # La recherche reste strictement bornee a la whitelist officielle du pays
+                # du MARCHE : ce n'est pas de l'internet ouvert, c'est la verification de
+                # conformite. Zero domaine whitelist => zero recherche (jamais de repli
+                # vers l'internet ouvert).
+                from app.services.web_search_service import web_search_service
+                from app.models.entities import CountryOfficialSource
+                from urllib.parse import urlparse
+                whitelist_res = await db.execute(
+                    select(CountryOfficialSource).where(
+                        CountryOfficialSource.country_code == reg_profile.country_code,
+                        CountryOfficialSource.status == "active",
+                    )
+                )
+                whitelist_domains = sorted({
+                    urlparse(s.portal_url).netloc for s in whitelist_res.scalars().all() if s.portal_url
+                })
+                if not whitelist_domains:
+                    logger.warning(
+                        "[GenerateSectionTask] Aucune source officielle active pour le pays %s "
+                        "-- recherche web desactivee (jamais de repli vers l'internet ouvert).",
+                        reg_profile.country_code,
                     )
                     web_sources_payload = []
                 else:
-                    from app.services.web_search_service import web_search_service
-                    from app.models.entities import CountryOfficialSource
-                    from urllib.parse import urlparse
-                    whitelist_res = await db.execute(
-                        select(CountryOfficialSource).where(
-                            CountryOfficialSource.country_code == reg_profile.country_code,
-                            CountryOfficialSource.status == "active",
-                        )
-                    )
-                    whitelist_domains = sorted({
-                        urlparse(s.portal_url).netloc for s in whitelist_res.scalars().all() if s.portal_url
-                    })
-                    search_query = f"{project.title} {section_key} BTP normes {reg_profile.technical_standards_reference[:25]}"
+                    # reg_profile.technical_standards_reference peut etre NULL tant que le
+                    # profil pays n'est pas rempli : l'ancien [:25] levait alors un
+                    # TypeError ('NoneType' object is not subscriptable) en pleine tache.
+                    standards_hint = (reg_profile.technical_standards_reference or "")[:25].strip()
+                    search_query = f"{project.title} {section_key} BTP normes {standards_hint}".strip()
                     if custom_instructions:
                         search_query += f" {custom_instructions[:60]}"
-                    web_results = await web_search_service.search(
-                        tenant_id=tenant_id,
-                        query=search_query,
-                        num_results=3,
-                        project_id=project_id,
-                        allowed_sites=whitelist_domains,
+                    logger.info(
+                        "[GenerateSectionTask] Recherche sources officielles %s sur %d domaine(s) "
+                        "(corpus client : %d savoir-faire, %d enseignements -- les deux sont fournis au modele).",
+                        reg_profile.country_code, len(whitelist_domains),
+                        len(company_assets), len(tenant_learnings_payload),
                     )
+                    try:
+                        web_results = await web_search_service.search(
+                            tenant_id=tenant_id,
+                            query=search_query,
+                            num_results=3,
+                            project_id=project_id,
+                            allowed_sites=whitelist_domains,
+                        )
+                    except Exception as exc:
+                        # Une recherche indisponible ne doit jamais faire echouer la
+                        # generation : on continue avec le seul corpus client.
+                        logger.warning("[GenerateSectionTask] Recherche officielle indisponible : %s", exc)
+                        web_results = []
                     web_sources_payload = [
                         {"title": r.title, "url": r.url, "snippet": r.snippet}
                         for r in web_results
@@ -914,6 +942,66 @@ def bootstrap_company_task(
             run_id=run_id,
         )
     )
+
+
+@celery_app.task(name="tasks.regulatory_watch_daily_task")
+def regulatory_watch_daily_task() -> Dict[str, Any]:
+    """
+    Veille reglementaire quotidienne (04/09) : interroge chaque portail officiel declare
+    et detecte les modifications par empreinte SHA-256.
+
+    Pourquoi une tache planifiee et non l'endpoint : `country_official_sources` porte une
+    politique RLS "lecture pour tous, ecriture reservee a is_superadmin()". Declenchee
+    depuis la session d'un utilisateur normal, la veille lisait bien les sources mais son
+    UPDATE ne matchait aucune ligne -> StaleDataError, et AUCUN resultat n'a jamais pu
+    etre enregistre depuis la mise en service. La veille est de l'infrastructure, pas une
+    action de tenant : elle tourne donc ici sur AsyncSessionLocal(), comme
+    sync_llm_catalog_daily_task et les autres taches inter-tenants.
+
+    Second interet : 55 sources a 12 s de timeout, c'est jusqu'a 11 minutes. Inacceptable
+    dans une requete HTTP, sans importance dans une tache de nuit.
+    """
+    async def _async_watch():
+        from app.services.regulatory_watch_service import regulatory_watch_service
+        from app.models.entities import CountryOfficialSource
+
+        summary: Dict[str, Any] = {"checked": 0, "changed": 0, "failed": 0, "by_country": {}}
+
+        async with AsyncSessionLocal() as db:
+            res = await db.execute(
+                select(CountryOfficialSource).where(CountryOfficialSource.status == "active")
+            )
+            sources = res.scalars().all()
+
+            for source in sources:
+                try:
+                    out = await regulatory_watch_service.check_source_for_updates(db, source)
+                except Exception as exc:  # une source cassee ne doit jamais stopper la veille
+                    logger.warning("[RegulatoryWatch] %s a echoue : %s", source.portal_url, exc)
+                    summary["failed"] += 1
+                    continue
+
+                summary["checked"] += 1
+                code = source.country_code
+                bucket = summary["by_country"].setdefault(code, {"ok": 0, "failed": 0, "changed": 0})
+                if out.get("fetch_error"):
+                    summary["failed"] += 1
+                    bucket["failed"] += 1
+                else:
+                    bucket["ok"] += 1
+                    if out.get("has_changed"):
+                        summary["changed"] += 1
+                        bucket["changed"] += 1
+
+            await db.commit()
+
+        logger.info(
+            "[RegulatoryWatch] %d sources verifiees, %d modifiees, %d en echec",
+            summary["checked"], summary["changed"], summary["failed"],
+        )
+        return summary
+
+    return asyncio.run(_async_watch())
 
 
 @celery_app.task(name="tasks.sync_llm_catalog_daily_task")

@@ -2,7 +2,7 @@
 
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { Users, RefreshCw, AlertTriangle, Plus, Trash2 } from 'lucide-react';
-import { api, fetchAuthenticatedBlobUrl } from '@/lib/api';
+import { api, buildApiUrl, fetchAuthenticatedBlobUrl } from '@/lib/api';
 import { OrganigrammeNode } from '@/lib/types';
 import { useTranslation } from '@/components/i18n-provider';
 
@@ -20,7 +20,7 @@ export function OrganigrammePreview({ projectId, projectTitle = 'Projet BTP', in
   const [rawPath, setRawPath] = useState<string>(
     // Pas de tenant hardcodé ici : "self/" est résolu côté backend depuis le token
     // d'auth réel de l'utilisateur courant (voir get_visual_file).
-    initialImageUrl || `${apiBase}/api/visuals/file/self/visuals/${projectId}/organigramme_chantier.png`
+    initialImageUrl || buildApiUrl(`/visuals/file/self/visuals/${projectId}/organigramme_chantier.png`)
   );
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
   const [loadState, setLoadState] = useState<'loading' | 'ready' | 'missing' | 'error'>('loading');
@@ -310,7 +310,7 @@ export function OrganigrammePreview({ projectId, projectTitle = 'Projet BTP', in
       // persistes s'ils existent (voir generate_project_organigramme) -- ce payload
       // ne sert plus que de repli pour un projet sans aucun noeud persiste.
       const res = await api.generateOrganigramme(projectId, projectTitle, []);
-      setRawPath(`${apiBase}/api/visuals/file/${res.s3_key}?t=${Date.now()}`);
+      setRawPath(buildApiUrl(`/visuals/file/${res.s3_key}?t=${Date.now()}`));
     } catch (err) {
       console.error('Failed to generate organigramme', err);
       setLoadState('error');

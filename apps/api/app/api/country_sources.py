@@ -69,14 +69,37 @@ async def check_official_sources_updates(
     res = await db.execute(stmt)
     sources = res.scalars().all()
 
-    results = []
-    for s in sources:
-        check_res = await regulatory_watch_service.check_source_for_updates(db, s)
-        results.append(check_res)
+    # La veille NE s'execute PLUS dans la requete HTTP (04/09). Deux raisons :
+    #   1. `country_official_sources` reserve l'ecriture a is_superadmin() par RLS : lancee
+    #      depuis la session d'un utilisateur normal, la veille lisait les sources mais son
+    #      UPDATE ne matchait aucune ligne (StaleDataError) -- aucun resultat n'a jamais pu
+    #      etre enregistre.
+    #   2. 55 sources a 12 s de timeout, c'est jusqu'a 11 minutes : intenable en HTTP.
+    # Le travail part donc dans la tache planifiee tasks.regulatory_watch_daily_task, qui
+    # tourne sur une session non soumise au role tenant. Ici on se contente de la declencher
+    # et de rendre l'etat connu des sources.
+    from app.workers.tasks import regulatory_watch_daily_task
+
+    task = regulatory_watch_daily_task.delay()
 
     return {
-        "checked_sources_count": len(results),
-        "results": results,
+        "status": "scheduled",
+        "task_id": str(task.id),
+        "sources_count": len(sources),
+        "message": (
+            "Veille lancee en arriere-plan sur les sources officielles. "
+            "Les resultats apparaitront au fur et a mesure sur chaque source."
+        ),
+        "sources": [
+            {
+                "country_code": s.country_code,
+                "portal_name": s.portal_name,
+                "portal_url": s.portal_url,
+                "last_checked_at": s.last_checked_at.isoformat() if s.last_checked_at else None,
+                "has_verified_content": s.last_known_hash is not None,
+            }
+            for s in sources
+        ],
     }
 
 

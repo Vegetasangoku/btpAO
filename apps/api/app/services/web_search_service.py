@@ -26,16 +26,146 @@ class WebSearchResult(BaseModel):
     provider: str = "serper"
 
 
+# Types de moteurs pris en charge, exposes tels quels a l'administration.
+SUPPORTED_SEARCH_TYPES = [
+    {"type": "serper", "label": "Serper (Google)", "cost_per_query_usd": SERPER_COST_PER_QUERY_USD,
+     "key_hint": "Cle API Serper (serper.dev)"},
+    {"type": "brave", "label": "Brave Search", "cost_per_query_usd": BRAVE_COST_PER_QUERY_USD,
+     "key_hint": "Jeton d'abonnement Brave Search API"},
+]
+
+
+def resolve_search_providers(conf: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Construit la liste effective des fournisseurs a partir de la configuration plateforme.
+
+    Cles dechiffrees ici. Compatibilite ascendante assuree : une installation qui n'a que
+    les anciens champs serper_api_key / brave_search_api_key, ou seulement des variables
+    d'environnement, obtient la meme liste sans aucune migration.
+    """
+    from app.core.crypto_vault import decrypt_api_key
+
+    raw = conf.get("web_search_providers")
+    providers: List[Dict[str, Any]] = []
+
+    if isinstance(raw, list) and raw:
+        for i, p in enumerate(raw):
+            key_enc = p.get("api_key") or ""
+            try:
+                key = decrypt_api_key(key_enc) if key_enc else ""
+            except Exception:  # noqa: BLE001
+                key = ""
+            providers.append({
+                "id": p.get("id") or p.get("type") or f"provider_{i}",
+                "name": p.get("name") or p.get("type") or "Fournisseur",
+                "type": p.get("type") or "serper",
+                "api_key": key,
+                "enabled": bool(p.get("enabled", True)),
+                "priority": int(p.get("priority", i + 1)),
+            })
+        return providers
+
+    # Repli : anciens champs, puis environnement.
+    legacy = [
+        ("serper", "Serper (Google)", conf.get("serper_api_key"), settings.SERPER_API_KEY),
+        ("brave", "Brave Search", conf.get("brave_search_api_key"), settings.BRAVE_SEARCH_API_KEY),
+    ]
+    preferred = conf.get("web_search_provider") or settings.WEB_SEARCH_PROVIDER or "serper"
+    for i, (ptype, label, enc, env_val) in enumerate(legacy):
+        key = ""
+        if enc:
+            try:
+                key = decrypt_api_key(enc) or ""
+            except Exception:  # noqa: BLE001
+                key = ""
+        key = key or (env_val or "")
+        providers.append({
+            "id": ptype, "name": label, "type": ptype, "api_key": key,
+            "enabled": bool(key), "priority": 1 if ptype == preferred else i + 2,
+        })
+    return providers
+
+
 class WebSearchService:
+    """
+    Recherche web bornee a une whitelist de sites officiels.
+
+    Les cles d'API sont configurables depuis l'administration (04/09) et non plus
+    seulement par variable d'environnement : elles sont lues dans PlatformSettings
+    (chiffrees au repos, meme coffre que les cles LLM), avec repli sur l'environnement.
+    Un petit cache memoire evite un aller-retour base a chaque recherche.
+    """
+
+    _CACHE_TTL_SECONDS = 60
+
     def __init__(self):
         self.provider = settings.WEB_SEARCH_PROVIDER
+        self._providers: List[Dict[str, Any]] = []
+        self._resolved_at: float = 0.0
+
+    async def _resolve_config(self) -> None:
+        """
+        Recharge la liste des fournisseurs de recherche depuis PlatformSettings.
+
+        Format attendu (cle `web_search_providers`), une entree par fournisseur :
+            {"id", "name", "type", "api_key" (chiffre), "enabled", "priority"}
+
+        `type` designe l'adaptateur a utiliser (voir _ADAPTERS) : c'est ce qui rend la
+        liste extensible sans redeploiement de schema -- ajouter un moteur revient a
+        ecrire un adaptateur et a declarer une entree, pas a modifier la base.
+        Compatibilite ascendante : si la liste est absente, on reconstruit deux entrees a
+        partir des anciens champs serper_api_key / brave_search_api_key, ou de
+        l'environnement. Aucune configuration existante n'est perdue.
+        """
+        import time as _time
+
+        if self._providers and (_time.monotonic() - self._resolved_at) < self._CACHE_TTL_SECONDS:
+            return
+
+        conf: Dict[str, Any] = {}
+        try:
+            from sqlalchemy import select as _select
+            from app.core.db import AsyncSessionLocal
+            from app.models.entities import PlatformSettings
+
+            # Session non filtree par le role tenant : la configuration plateforme est
+            # globale, comme pour les taches inter-tenants.
+            async with AsyncSessionLocal() as db:
+                res = await db.execute(
+                    _select(PlatformSettings).where(PlatformSettings.id == "global")
+                )
+                ps = res.scalar_one_or_none()
+                conf = (ps.settings if ps and ps.settings else {}) or {}
+        except Exception as exc:  # noqa: BLE001
+            # La configuration en base est un confort : en cas d'echec on garde l'env.
+            logger.warning("[WebSearch] Lecture de la configuration en base impossible : %s", exc)
+
+        self._providers = resolve_search_providers(conf)
+        self._resolved_at = _time.monotonic()
+
+    @property
+    def _resolved(self) -> Dict[str, Optional[str]]:
+        """Compatibilite : expose les cles resolues par type, pour les proprietes ci-dessous."""
+        out: Dict[str, Optional[str]] = {}
+        for p in self._providers:
+            out.setdefault(p.get("type"), p.get("api_key"))
+        return out
+
+    def invalidate_config_cache(self) -> None:
+        """Appelee apres une sauvegarde en admin pour reprendre la nouvelle config aussitot."""
+        self._providers = []
+        self._resolved_at = 0.0
 
     @property
     def serper_api_key(self) -> Optional[str]:
+        if self._resolved:
+            return self._resolved.get("serper")
         return settings.SERPER_API_KEY
 
     @property
     def brave_api_key(self) -> Optional[str]:
+        if self._resolved:
+            return self._resolved.get("brave")
         return settings.BRAVE_SEARCH_API_KEY
 
     async def search(
@@ -61,6 +191,8 @@ class WebSearchService:
         (the default) preserves the original unrestricted behavior for existing callers
         (project DCE assistant, section generation, company bootstrap scan).
         """
+        # Recharge cles et fournisseur depuis l'administration (cache memoire 60 s).
+        await self._resolve_config()
         logger.info(
             f"[WebSearch] Tenant {tenant_id} | Project {project_id} | Query: '{query}' | "
             f"Provider Config: {self.provider} (prefer: {prefer_provider}) | "
@@ -81,30 +213,38 @@ class WebSearchService:
             effective_query = f"{query} ({site_filter})"
 
         # Provider determination
-        active_provider = prefer_provider or self.provider
+        # Cascade pilotee par la configuration (04/09) et non plus par deux cas codes en
+        # dur : on parcourt les fournisseurs actifs dans l'ordre de priorite defini en
+        # administration, et on s'arrete au premier qui rend des resultats. `prefer_provider`
+        # (utilise par certains appelants) fait simplement passer ce type en tete.
+        candidates = [p for p in self._providers if p.get("enabled") and p.get("api_key")]
+        if prefer_provider:
+            candidates.sort(key=lambda p: (p.get("type") != prefer_provider, p.get("priority", 99)))
+        else:
+            candidates.sort(key=lambda p: p.get("priority", 99))
 
-        # 1. Try Brave Search if requested/configured
-        if active_provider == "brave" or (active_provider == "auto" and self.brave_api_key):
-            brave_res = await self._search_brave(effective_query, num_results)
-            if brave_res:
-                return self._filter_by_allowed_sites(brave_res, allowed_sites)
-            logger.info("[WebSearch] Brave search returned 0 results or failed, attempting Serper fallback.")
-
-        # 2. Try Serper (Google Search API)
-        if self.serper_api_key:
-            serper_res = await self._search_serper(effective_query, num_results)
-            if serper_res:
-                return self._filter_by_allowed_sites(serper_res, allowed_sites)
-
-        # 3. If primary was Serper and failed, try Brave as fallback
-        if self.brave_api_key and active_provider != "brave":
-            brave_res = await self._search_brave(effective_query, num_results)
-            if brave_res:
-                return self._filter_by_allowed_sites(brave_res, allowed_sites)
+        for prov in candidates:
+            adapter = self._ADAPTERS.get(prov.get("type"))
+            if not adapter:
+                logger.warning(
+                    "[WebSearch] Type de fournisseur inconnu '%s' (id=%s) -- ignore. "
+                    "Ajouter un adaptateur dans _ADAPTERS pour le prendre en charge.",
+                    prov.get("type"), prov.get("id"),
+                )
+                continue
+            try:
+                res = await adapter(self, effective_query, num_results, prov.get("api_key"))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[WebSearch] %s a echoue : %s", prov.get("id"), exc)
+                continue
+            if res:
+                return self._filter_by_allowed_sites(res, allowed_sites)
+            logger.info("[WebSearch] %s : 0 resultat, passage au fournisseur suivant.", prov.get("id"))
 
         logger.warning(
-            f"[WebSearch] No active search provider API keys configured or queries failed. "
-            f"Returning 0 results to prevent fake citations."
+            "[WebSearch] Aucun fournisseur de recherche actif n'a rendu de resultat "
+            "(%d configure(s)). Zero resultat renvoye plutot que des citations inventees.",
+            len(candidates),
         )
         return []
 
@@ -126,12 +266,13 @@ class WebSearchService:
                 kept.append(r)
         return kept
 
-    async def _search_serper(self, query: str, num_results: int) -> List[WebSearchResult]:
-        if not self.serper_api_key:
+    async def _search_serper(self, query: str, num_results: int, api_key: Optional[str] = None) -> List[WebSearchResult]:
+        key = api_key or self.serper_api_key
+        if not key:
             return []
         try:
             headers = {
-                "X-API-KEY": self.serper_api_key,
+                "X-API-KEY": key,
                 "Content-Type": "application/json",
             }
             payload = {
@@ -160,13 +301,14 @@ class WebSearchService:
             logger.error(f"[WebSearch] Serper API error: {e}")
         return []
 
-    async def _search_brave(self, query: str, num_results: int) -> List[WebSearchResult]:
-        if not self.brave_api_key:
+    async def _search_brave(self, query: str, num_results: int, api_key: Optional[str] = None) -> List[WebSearchResult]:
+        key = api_key or self.brave_api_key
+        if not key:
             return []
         try:
             headers = {
                 "Accept": "application/json",
-                "X-Subscription-Token": self.brave_api_key,
+                "X-Subscription-Token": key,
             }
             params = {
                 "q": query,
@@ -194,6 +336,14 @@ class WebSearchService:
         except Exception as e:
             logger.error(f"[WebSearch] Brave Search API error: {e}")
         return []
+
+    # Registre type -> adaptateur. Ajouter un moteur = ecrire une methode _search_xxx
+    # (signature : query, num_results, api_key) et l'inscrire ici. Rien d'autre a changer :
+    # l'administration liste automatiquement les types disponibles.
+    _ADAPTERS = {
+        "serper": lambda self, q, n, k: self._search_serper(q, n, k),
+        "brave": lambda self, q, n, k: self._search_brave(q, n, k),
+    }
 
     def _generate_mock_results(self, query: str, num_results: int) -> List[WebSearchResult]:
         """

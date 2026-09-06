@@ -2,7 +2,7 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import { BarChart3, RefreshCw, Calendar, CheckCircle2, AlertTriangle } from 'lucide-react';
-import { api, fetchAuthenticatedBlobUrl } from '@/lib/api';
+import { api, buildApiUrl, fetchAuthenticatedBlobUrl } from '@/lib/api';
 import { useTranslation } from '@/components/i18n-provider';
 
 interface GanttPreviewProps {
@@ -17,7 +17,7 @@ export function GanttPreview({ projectId, projectTitle = 'Projet BTP', initialIm
   const [rawPath, setRawPath] = useState<string>(
     // Même correctif que organigramme-preview.tsx : "self/" est résolu côté backend
     // depuis le tenant authentifié réel, plus de tenant de démo hardcodé ici.
-    initialImageUrl || `${apiBase}/api/visuals/file/self/visuals/${projectId}/gantt_planning.png`
+    initialImageUrl || buildApiUrl(`/visuals/file/self/visuals/${projectId}/gantt_planning.png`)
   );
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
   const [loadState, setLoadState] = useState<'loading' | 'ready' | 'missing' | 'error'>('loading');
@@ -61,7 +61,7 @@ export function GanttPreview({ projectId, projectTitle = 'Projet BTP', initialIm
       setLastGenerated(t('visuals.gantt_static.completion_summary', { weeks: res.total_weeks, date: res.completion_date }));
       // Cache-bust via un nouveau chemin s3_key + timestamp, puis recharge en tant qu'image
       // authentifiée (plus jamais un <img src> direct vers une route protégée).
-      setRawPath(`${apiBase}/api/visuals/file/${res.s3_key}?t=${Date.now()}`);
+      setRawPath(buildApiUrl(`/visuals/file/${res.s3_key}?t=${Date.now()}`));
     } catch (err) {
       console.error('Failed to generate gantt', err);
       setLoadState('error');

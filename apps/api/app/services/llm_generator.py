@@ -17,6 +17,47 @@ from app.core.config import settings
 # gabarits). Rien a faire ici, `settings` importe juste au-dessus suffit a l'activer.
 
 
+# ---------------------------------------------------------------------------
+# 06/09 - Bug "conformement au cadre reglementaire applicable (None)"
+#
+# dict.get(cle, defaut) ne renvoie le defaut que si la CLE est absente. Or les
+# profils pays existent en base avec toutes leurs colonnes a NULL tant que
+# personne ne les a remplies : la cle est donc presente, sa valeur vaut None,
+# et c'est la chaine "None" qui partait dans le prompt ET dans le HTML livre
+# au client ("... cadre reglementaire applicable (None)").
+#
+# Consequence directe sur la qualite : le modele recevait cinq lignes "None"
+# en guise de cadre reglementaire. Soit il les ignorait, soit -- pire -- il
+# comblait le vide en inventant des normes. Les deux cassent le principe de
+# reponse sans invention.
+#
+# On ne remplace donc PAS un champ vide par une formule generique (ce serait
+# deja une invention deguisee) : on dit explicitement au modele que le point
+# n'est pas documente et qu'il lui est interdit de citer une norme dessus.
+# ---------------------------------------------------------------------------
+REG_NON_DOCUMENTE = (
+    "NON DOCUMENTÉ dans le profil pays — n'invente et ne cite aucune norme, "
+    "aucun texte ni aucun sigle sur ce point"
+)
+
+
+def reg_value(regulatory_profile: Optional[Dict[str, Any]], key: str, default: Any = None) -> Any:
+    """Lit un champ du profil pays en traitant NULL et chaine vide comme absents."""
+    raw = (regulatory_profile or {}).get(key)
+    if raw is None:
+        return default
+    if isinstance(raw, str) and not raw.strip():
+        return default
+    if isinstance(raw, (list, tuple, dict)) and len(raw) == 0:
+        return default
+    return raw
+
+
+def reg_documented(regulatory_profile: Optional[Dict[str, Any]], *keys: str) -> List[str]:
+    """Renvoie la liste des champs pays reellement renseignes (pour tracabilite)."""
+    return [k for k in keys if reg_value(regulatory_profile, k) is not None]
+
+
 def build_btp_system_prompt(
     regulatory_profile: Dict[str, Any],
     tenant_system_prompt: Optional[str] = None,
@@ -30,14 +71,14 @@ def build_btp_system_prompt(
     if not regulatory_profile:
         raise ValueError("regulatory_profile est requis pour construire le prompt système — aucun défaut silencieux autorisé")
 
-    country_name = regulatory_profile.get("country_name", "National")
-    standards_ref = regulatory_profile.get("technical_standards_reference", "Normes techniques et Eurocodes")
-    env_reg = regulatory_profile.get("environmental_regulation", "Réglementation environnementale en vigueur")
-    proc_regime = regulatory_profile.get("public_procurement_regime", "Régime des marchés publics et privés")
-    safety_reg = regulatory_profile.get("safety_plan_regime", "Plan de sécurité et de santé chantier")
-    waste_reg = regulatory_profile.get("waste_tracking_regime", "Traçabilité des déchets de chantier")
-    recognized_quals = regulatory_profile.get("recognized_qualifications", [])
-    quals_str = ", ".join(recognized_quals) if recognized_quals else "Certifications professionnelles reconnues"
+    country_name = reg_value(regulatory_profile, "country_name", "National")
+    standards_ref = reg_value(regulatory_profile, "technical_standards_reference", REG_NON_DOCUMENTE)
+    env_reg = reg_value(regulatory_profile, "environmental_regulation", REG_NON_DOCUMENTE)
+    proc_regime = reg_value(regulatory_profile, "public_procurement_regime", REG_NON_DOCUMENTE)
+    safety_reg = reg_value(regulatory_profile, "safety_plan_regime", REG_NON_DOCUMENTE)
+    waste_reg = reg_value(regulatory_profile, "waste_tracking_regime", REG_NON_DOCUMENTE)
+    recognized_quals = reg_value(regulatory_profile, "recognized_qualifications", []) or []
+    quals_str = ", ".join(recognized_quals) if recognized_quals else REG_NON_DOCUMENTE
 
     base_prompt = f"""Tu es un Ingénieur Principal Méthodes & Études de Prix BTP et un Rédacteur expert de Mémoires Techniques pour les Appels d'Offres de marchés publics et privés en {country_name}.
 
@@ -204,12 +245,12 @@ class LLMGeneratorService:
 PROJET : {project_title} (Réf : {reference_code})
 SECTION À RÉDIGER : {section_title} (Clé : {section_key})
 
-1. CADRE RÉGLEMENTAIRE DU PAYS DU TENANT ({reg.get('country_name', 'National')}) :
-- Normes techniques applicables : {reg.get('technical_standards_reference')}
-- Réglementation environnementale : {reg.get('environmental_regulation')}
-- Régime de la commande publique : {reg.get('public_procurement_regime')}
-- Traçabilité des déchets : {reg.get('waste_tracking_regime')}
-- Plan de sécurité chantier : {reg.get('safety_plan_regime')}
+1. CADRE RÉGLEMENTAIRE DU PAYS DU MARCHÉ ({reg_value(reg, 'country_name', 'National')}) :
+- Normes techniques applicables : {reg_value(reg, 'technical_standards_reference', REG_NON_DOCUMENTE)}
+- Réglementation environnementale : {reg_value(reg, 'environmental_regulation', REG_NON_DOCUMENTE)}
+- Régime de la commande publique : {reg_value(reg, 'public_procurement_regime', REG_NON_DOCUMENTE)}
+- Traçabilité des déchets : {reg_value(reg, 'waste_tracking_regime', REG_NON_DOCUMENTE)}
+- Plan de sécurité chantier : {reg_value(reg, 'safety_plan_regime', REG_NON_DOCUMENTE)}
 
 2. DONNÉES DU FORMULAIRE CONDUCTEUR DE TRAVAUX :
 {json.dumps(decision_form, ensure_ascii=False, indent=2)}
@@ -514,8 +555,8 @@ le dire explicitement plutôt que d'affirmer une conformité non prouvée.
         materiel = decision_form.get("materiel_principal", "Grue à tour Potain 50m, 2 pelles 22t")
         dechets = decision_form.get("gestion_dechets", "Tri sélectif 5 flux avec 88% de valorisation")
         cadres = decision_form.get("equipe_cadres", [])
-        securite = decision_form.get("mesures_securite", f"Respect strict du {reg.get('safety_plan_regime')}")
-        rse = decision_form.get("demarche_rse_environnement", f"Conformité {reg.get('environmental_regulation')} et béton bas carbone")
+        securite = decision_form.get("mesures_securite", f"Respect strict du {reg_value(reg, 'safety_plan_regime', 'plan de sécurité chantier applicable')}")
+        rse = decision_form.get("demarche_rse_environnement", f"Conformité {reg_value(reg, 'environmental_regulation', 'à la réglementation environnementale applicable')} et béton bas carbone")
 
         phases = decision_form.get("phasage_travaux", [])
 
@@ -672,7 +713,7 @@ le dire explicitement plutôt que d'affirmer une conformité non prouvée.
             {internal_cite}
             <p><strong>Plan de gestion et valorisation des déchets :</strong> {dechets}.</p>
             <h3>Traçabilité des déchets et filières agréées</h3>
-            <p>Chaque rotation de benne fait l'objet d'un suivi strict sous le régime : <strong>{reg.get('waste_tracking_regime', 'BSD dématérialisé')}</strong>.</p>
+            <p>Chaque rotation de benne fait l'objet d'un suivi strict sous le régime : <strong>{reg_value(reg, 'waste_tracking_regime', 'bordereau de suivi des déchets applicable')}</strong>.</p>
             {missing_data_alert}
             {learnings_html}
             {web_cites_html}
@@ -684,7 +725,7 @@ le dire explicitement plutôt que d'affirmer une conformité non prouvée.
         elif section_key == "securite_ppsps":
             html = f"""
             <h2>{section_title}</h2>
-            <p>La politique Zéro Accident constitue l'engagement fondamental de notre encadrement sous le régime : <strong>{reg.get('safety_plan_regime')}</strong>.</p>
+            <p>La politique Zéro Accident constitue l'engagement fondamental de notre encadrement sous le régime : <strong>{reg_value(reg, 'safety_plan_regime', 'plan de sécurité chantier applicable')}</strong>.</p>
             <p><strong>Mesures de sécurité opérationnelles :</strong> {securite}.</p>
             {internal_cite}
             {missing_data_alert}
@@ -704,7 +745,7 @@ le dire explicitement plutôt que d'affirmer une conformité non prouvée.
             # s'exécute que si l'appel LLM réel (Claude/Mistral/OpenAI) a échoué au-dessus.
             html = f"""
             <h2>{section_title}</h2>
-            <p>Cette section est rédigée pour le projet <strong>{project_title}</strong>, conformément au cadre réglementaire applicable ({reg.get('technical_standards_reference', 'normes en vigueur')}).</p>
+            <p>Cette section est rédigée pour le projet <strong>{project_title}</strong>, conformément au cadre réglementaire applicable ({reg_value(reg, 'technical_standards_reference', 'normes en vigueur')}).</p>
             {internal_cite}
             {missing_data_alert or (
                 "<p style='color: #b91c1c; background: #fef2f2; padding: 8px; border-left: 4px solid #ef4444;'>"

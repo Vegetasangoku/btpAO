@@ -941,9 +941,15 @@ async def get_suggested_template(
             CompanyAsset.status != "obsolete",
         )
         .order_by(CompanyAsset.created_at.desc())
+        # 04/09 : .limit(1) + .first() au lieu de scalar_one_or_none(). L'intention est
+        # "le document de reference le plus recent" (d'ou le order_by desc), mais
+        # scalar_one_or_none() leve MultipleResultsFound des que le tenant possede plus
+        # d'un document eligible -- ce qui est le cas normal. La suggestion de template
+        # plantait donc en 500 pour tout client ayant deux references ou plus.
+        .limit(1)
     )
     asset_res = await db.execute(stmt_asset)
-    asset = asset_res.scalar_one_or_none()
+    asset = asset_res.scalars().first()
 
     if asset:
         return {

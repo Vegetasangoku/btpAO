@@ -174,6 +174,39 @@ LLM_MODEL_TIERS: Dict[str, Dict[str, Any]] = {
 DEFAULT_PLATFORM_TIER = "equilibre"
 
 
+def _apply_legacy_or_env_key(item: Dict[str, Any], builtin_id: str, ps_dict: Dict[str, Any], settings) -> None:
+    """
+    Complete la cle d'un fournisseur integre depuis les champs historiques ou l'environnement.
+
+    Bug corrige le 04/09 : ce repli n'etait applique QUE dans la branche "fournisseur absent
+    de la base". Or les fournisseurs integres SONT presents dans custom_providers (crees a
+    l'initialisation) avec une api_key vide tant que personne ne l'a collee dans l'admin.
+    Ils prenaient donc l'autre branche, conservaient leur cle vide, et n'etaient jamais
+    retenus comme secours -- alors qu'ANTHROPIC_API_KEY existe bel et bien dans .env et que
+    /health les declare "operational".
+
+    Consequence concrete et repetee : Gemini (palier gratuit) tombe en 503 UNAVAILABLE,
+    aucun repli n'est propose, et la generation retombe sur le moteur de gabarits degrade.
+    C'est ce qui a fait echouer toutes les generations reelles depuis le 03/09.
+
+    Ne jamais ecraser une cle deja renseignee en base : l'environnement ne sert que de repli.
+    """
+    if item.get("api_key"):
+        return
+    mapping = {
+        "anthropic": ("anthropic_api_key", "ANTHROPIC_API_KEY"),
+        "openai": ("openai_api_key", "OPENAI_API_KEY"),
+        "mistral": ("mistral_api_key", "MISTRAL_API_KEY"),
+    }
+    entry = mapping.get(builtin_id)
+    if not entry:
+        return
+    legacy_field, env_attr = entry
+    resolved = ps_dict.get(legacy_field) or getattr(settings, env_attr, "") or ""
+    if resolved:
+        item["api_key"] = resolved
+
+
 class ModelRoutingService:
     @staticmethod
     def get_available_tiers() -> Dict[str, Dict[str, Any]]:
@@ -236,16 +269,11 @@ class ModelRoutingService:
                     item["litellm_id"] = builtin_defaults[b_id]["litellm_id"]
                 if not item.get("name"):
                     item["name"] = builtin_defaults[b_id]["name"]
+                _apply_legacy_or_env_key(item, b_id, ps_dict, settings)
                 final_list.append(item)
             else:
                 item = dict(builtin_defaults[b_id])
-                # Check if legacy key is present in settings
-                if b_id == "anthropic" and (ps_dict.get("anthropic_api_key") or settings.ANTHROPIC_API_KEY):
-                    item["api_key"] = ps_dict.get("anthropic_api_key") or settings.ANTHROPIC_API_KEY
-                elif b_id == "openai" and (ps_dict.get("openai_api_key") or settings.OPENAI_API_KEY):
-                    item["api_key"] = ps_dict.get("openai_api_key") or settings.OPENAI_API_KEY
-                elif b_id == "mistral" and (ps_dict.get("mistral_api_key") or settings.MISTRAL_API_KEY):
-                    item["api_key"] = ps_dict.get("mistral_api_key") or settings.MISTRAL_API_KEY
+                _apply_legacy_or_env_key(item, b_id, ps_dict, settings)
                 final_list.append(item)
 
         # Append custom providers created by user
