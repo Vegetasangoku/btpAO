@@ -77,6 +77,21 @@ class Settings(BaseSettings):
     # LLM & AI (LiteLLM abstraction)
     DEFAULT_LLM_MODEL: str = Field(default="anthropic/claude-sonnet-5")
     FALLBACK_LLM_MODEL: str = Field(default="mistral/mistral-large-3-25-12")
+    # Plafond de tokens EN SORTIE d'une generation de section (10/09).
+    # Etait code en dur a 2500 dans llm_generator.py : le modele devait y faire tenir
+    # le HTML de la section ET la grille de conformite, dans un JSON echappe. Il etait
+    # coupe en plein milieu d'une chaine, json.loads echouait, et tout partait au
+    # moteur de gabarits degrade -- d'ou des sections quasi vides pour un cout d'entree
+    # plein. 12000 laisse la place a une section redigee complete.
+    LLM_MAX_OUTPUT_TOKENS: int = Field(default=12000)
+    # Effort de raisonnement demande aux modeles qui en acceptent un (famille GPT-5,
+    # o-series, Claude "thinking"...). Mesure du 10/09 sur une section reelle avec
+    # gpt-5.6-sol-pro : 19 513 tokens de sortie facturee pour ~4 000 tokens de texte
+    # reellement livre -- le reste est du raisonnement interne, facture au tarif de
+    # sortie (10 $/M). Baisser cet effort est le levier de cout le plus direct.
+    # Valeurs usuelles : "minimal", "low", "medium", "high". Vide = on ne transmet
+    # rien et le modele applique son propre defaut.
+    LLM_REASONING_EFFORT: str = Field(default="medium")
     EMBEDDING_MODEL: str = Field(default="text-embedding-3-small")
     ANTHROPIC_API_KEY: Optional[str] = Field(default=None)
     MISTRAL_API_KEY: Optional[str] = Field(default=None)

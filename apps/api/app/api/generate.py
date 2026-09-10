@@ -5,7 +5,7 @@ Zero mock fallbacks, zero local memory cache.
 Guarantees 100% tenant isolation for LLM prompt context injection.
 """
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func, select
@@ -85,6 +85,38 @@ async def get_project_sections(
     result = await db.execute(stmt)
     sections = result.scalars().all()
 
+    # 10/09 - UNE SECTION NE RESTE PLUS "EN COURS" INDEFINIMENT.
+    #
+    # Si le worker Celery est redemarre pendant une generation, la tache en vol est
+    # perdue sans notification : la ligne restait sur "processing" pour toujours.
+    # L'interface affichait donc un sablier eternel, et l'utilisateur ne savait ni
+    # que c'etait fini, ni que ca avait echoue. Passe un delai large (le double du
+    # temps d'une generation longue), on requalifie l'etat en echec explicite.
+    # La mutation est laissee au commit automatique de get_db a la sortie de la
+    # route -- surtout pas de db.commit() ici, qui fermerait la transaction avant
+    # la construction de la reponse ci-dessous.
+    DELAI_ABANDON = timedelta(minutes=15)
+    maintenant = datetime.utcnow()
+    for s in sections:
+        if s.status != "processing":
+            continue
+        depuis = s.updated_at
+        if depuis is None:
+            continue
+        if depuis.tzinfo is not None:
+            depuis = depuis.replace(tzinfo=None)
+        if maintenant - depuis > DELAI_ABANDON:
+            s.status = "failed"
+            s.compliance_notes = (
+                "Génération interrompue : aucune réponse du moteur de rédaction après "
+                f"{int(DELAI_ABANDON.total_seconds() // 60)} minutes. Le worker a "
+                "probablement été redémarré pendant la rédaction. Relancez la section."
+            )
+            s.compliance_score = 0
+
+    # 10/09 : une section sans score enregistre etait renvoyee a 100 % et
+    # "Conforme". Une section jamais generee s'affichait donc verte et conforme
+    # dans l'interface. Un score absent vaut 0 et le dit : il n'a pas ete evalue.
     return [
         GeneratedSectionOut(
             id=str(s.id),
@@ -96,8 +128,8 @@ async def get_project_sections(
             content_html=s.content_html,
             content_json=s.content_json or {},
             visual_placeholders=s.visual_placeholders or [],
-            compliance_score=float(s.compliance_score) if s.compliance_score is not None else 100.0,
-            compliance_notes=s.compliance_notes or "Conforme",
+            compliance_score=float(s.compliance_score) if s.compliance_score is not None else 0.0,
+            compliance_notes=s.compliance_notes or "Conformité non évaluée",
             status=s.status,
             locked_for_export=str(s.locked_for_export).lower() in ("true", "1"),
             updated_at=s.updated_at,
@@ -220,7 +252,7 @@ async def generate_single_section(
             content_html=saved_sec.content_html,
             content_json=saved_sec.content_json or {},
             visual_placeholders=saved_sec.visual_placeholders or [],
-            compliance_score=float(saved_sec.compliance_score) if saved_sec.compliance_score is not None else 100.0,
+            compliance_score=float(saved_sec.compliance_score) if saved_sec.compliance_score is not None else 0.0,
             compliance_notes=saved_sec.compliance_notes or "Pré-remplissage",
             status=saved_sec.status,
             prefill_source=saved_sec.prefill_source or [],
@@ -255,6 +287,98 @@ async def generate_single_section(
         is_prefilled=bool(saved_sec.is_prefilled),
         locked_for_export=bool(saved_sec.locked_for_export),
         updated_at=saved_sec.updated_at,
+    )
+
+
+@router.post("/section/sync", response_model=GeneratedSectionOut)
+async def generate_single_section_sync(
+    payload: GenerateSectionRequest,
+    current_user: CurrentTenantUser = Depends(get_current_tenant_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Rédige une section DANS le processus API, sans passer par le worker Celery.
+
+    Pourquoi cette route existe (10/09). La génération passe normalement par le
+    worker : c'est la bonne architecture, elle rend la main tout de suite et laisse
+    le travail long en tâche de fond. Mais quand le worker est arrêté — ou qu'il
+    exécute une version périmée du code, ce que Celery ne signale jamais — l'utilisateur
+    est totalement bloqué : ses demandes partent en file et n'en ressortent pas, sans
+    le moindre message. Cette route est la porte de secours : même moteur, même
+    contexte, même code (on appelle la fonction de la tâche directement), mais exécuté
+    ici et maintenant.
+
+    Contrepartie assumée : la requête HTTP reste ouverte le temps de la rédaction,
+    soit jusqu'à trois minutes. C'est un repli, pas le chemin normal.
+
+    La fonction de tâche appelle `asyncio.run()` en interne : on l'exécute donc dans
+    un thread séparé, où aucune boucle d'événements ne tourne. Et on ne touche PAS
+    à la ligne `generated_sections` avant de l'appeler — une écriture non committée
+    ici et une écriture depuis le thread sur la même ligne se bloqueraient l'une
+    l'autre, et la requête ne se terminerait jamais.
+    """
+    from starlette.concurrency import run_in_threadpool
+
+    try:
+        p_uuid = uuid.UUID(payload.project_id)
+        t_uuid = uuid.UUID(current_user.tenant_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Identifiant de projet ou de tenant invalide")
+
+    await billing_service.check_and_enforce_quota(current_user.tenant_id, action="section", db=db)
+    await billing_service.check_and_enforce_cost_cap(current_user.tenant_id, db=db)
+
+    proj_res = await db.execute(select(Project).where(Project.id == p_uuid, Project.tenant_id == t_uuid))
+    if not proj_res.scalar_one_or_none():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dossier introuvable ou accès refusé")
+
+    from app.workers.tasks import generate_section_task
+
+    try:
+        await run_in_threadpool(
+            generate_section_task,
+            tenant_id=current_user.tenant_id,
+            project_id=payload.project_id,
+            section_key=payload.section_key,
+            custom_instructions=payload.custom_instructions,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"La rédaction a échoué : {exc}",
+        )
+
+    sec_res = await db.execute(
+        select(GeneratedSection).where(
+            GeneratedSection.project_id == p_uuid,
+            GeneratedSection.tenant_id == t_uuid,
+            GeneratedSection.section_key == payload.section_key,
+        )
+    )
+    section = sec_res.scalar_one_or_none()
+    if not section:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="La rédaction s'est terminée sans produire de section.",
+        )
+
+    return GeneratedSectionOut(
+        id=str(section.id),
+        tenant_id=str(section.tenant_id),
+        project_id=str(section.project_id),
+        section_key=section.section_key,
+        title=section.title,
+        order_index=int(section.order_index),
+        content_html=section.content_html,
+        content_json=section.content_json or {},
+        visual_placeholders=section.visual_placeholders or [],
+        compliance_score=float(section.compliance_score) if section.compliance_score is not None else 0.0,
+        compliance_notes=section.compliance_notes or "Conformité non évaluée",
+        status=section.status,
+        prefill_source=section.prefill_source or [],
+        is_prefilled=bool(section.is_prefilled),
+        locked_for_export=bool(section.locked_for_export),
+        updated_at=section.updated_at,
     )
 
 
@@ -349,8 +473,8 @@ async def update_section_content(
         content_html=section.content_html,
         content_json=section.content_json or {},
         visual_placeholders=section.visual_placeholders or [],
-        compliance_score=float(section.compliance_score) if section.compliance_score is not None else 100.0,
-        compliance_notes=section.compliance_notes or "Conforme",
+        compliance_score=float(section.compliance_score) if section.compliance_score is not None else 0.0,
+        compliance_notes=section.compliance_notes or "Conformité non évaluée",
         status=section.status,
         prefill_source=section.prefill_source or [],
         is_prefilled=bool(section.is_prefilled),
@@ -425,7 +549,7 @@ async def get_section_version_history(
             title=v.title,
             content_html=v.content_html,
             content_json=v.content_json or {},
-            compliance_score=float(v.compliance_score) if v.compliance_score is not None else 100.0,
+            compliance_score=float(v.compliance_score) if v.compliance_score is not None else 0.0,
             compliance_notes=v.compliance_notes,
             status=v.status,
             created_by=str(v.created_by) if v.created_by else None,
@@ -529,7 +653,7 @@ async def restore_section_version(
         content_html=section.content_html,
         content_json=section.content_json or {},
         visual_placeholders=section.visual_placeholders or [],
-        compliance_score=float(section.compliance_score) if section.compliance_score is not None else 100.0,
+        compliance_score=float(section.compliance_score) if section.compliance_score is not None else 0.0,
         compliance_notes=section.compliance_notes,
         status=section.status,
         locked_for_export=bool(section.locked_for_export),

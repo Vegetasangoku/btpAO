@@ -173,6 +173,54 @@ async def cluster_health_check():
     celery_res = check_celery_broker_health()
     redis_status = "healthy" if celery_res.get("status") == "healthy" else "degraded"
 
+    # 2 bis. Le worker tourne-t-il sur le code actuel ? (10/09)
+    #
+    # Celery ne recharge pas le code a chaud. Un correctif pose sur le disque reste
+    # donc inactif tant que le conteneur n'a pas ete recree, et RIEN ne le signalait :
+    # les generations repartaient sur l'ancien code en silence. On compare ici
+    # l'empreinte du code charge en memoire par le worker a celle du disque.
+    code_worker = {"statut": "inconnu", "message": None, "empreinte_api": None, "empreinte_worker": None}
+    try:
+        from app.workers.tasks import calculer_empreinte_code, worker_code_fingerprint_task
+
+        empreinte_api = calculer_empreinte_code()
+        code_worker["empreinte_api"] = empreinte_api
+        if celery_res.get("workers"):
+            # Court delai volontaire : /health ne doit jamais se bloquer sur le worker.
+            resultat = worker_code_fingerprint_task.apply_async(expires=10).get(timeout=6)
+            empreinte_worker = (resultat or {}).get("empreinte_chargee")
+            code_worker["empreinte_worker"] = empreinte_worker
+            code_worker["demarre_a"] = (resultat or {}).get("demarre_a")
+            if empreinte_worker == empreinte_api:
+                code_worker["statut"] = "a_jour"
+                code_worker["message"] = "Le worker exécute bien le code actuel."
+            else:
+                code_worker["statut"] = "perime"
+                code_worker["message"] = (
+                    "Le worker exécute une version périmée du code : les correctifs posés "
+                    "depuis son démarrage sont INACTIFS. Lancer `docker compose up -d worker`."
+                )
+        else:
+            code_worker["statut"] = "aucun_worker"
+            code_worker["message"] = "Aucun worker ne répond : les tâches restent en file sans jamais s'exécuter."
+    except Exception as exc:
+        # NotRegistered est une preuve DIRECTE : le worker ne connait meme pas la
+        # tache de verification, donc il a demarre avant qu'elle existe. Inutile de
+        # rester evasif, c'est exactement le cas "code perime".
+        if type(exc).__name__ == "NotRegistered":
+            code_worker["statut"] = "perime"
+            code_worker["message"] = (
+                "Le worker ne connaît pas la tâche de vérification de version : il a "
+                "donc démarré avant, et exécute une version périmée du code. Les "
+                "correctifs posés depuis sont INACTIFS. Lancer `docker compose up -d worker`."
+            )
+        else:
+            code_worker["statut"] = "indeterminable"
+            code_worker["message"] = (
+                "Impossible de vérifier la version du code du worker "
+                f"({type(exc).__name__}) : dans le doute, le relancer."
+            )
+
     # 3. LLM Providers Check
     providers_status = {}
     
@@ -233,7 +281,8 @@ async def cluster_health_check():
     # Determine overall status
     is_critical = db_status == "unhealthy"
     is_degraded = (
-        redis_status != "healthy"
+        code_worker.get("statut") in ("perime", "aucun_worker")
+        or redis_status != "healthy"
         or not any(p["configured"] for p in providers_status.values())
         or ram_pct > 90
     )
@@ -261,6 +310,7 @@ async def cluster_health_check():
             "message": celery_res.get("message"),
             "ping": celery_res.get("ping"),
             "error": celery_res.get("error"),
+            "code": code_worker,
         },
         "llm_providers": providers_status,
         "system": system_metrics,

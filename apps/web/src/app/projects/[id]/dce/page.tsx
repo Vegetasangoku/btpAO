@@ -3,6 +3,7 @@
 import React from 'react';
 import { useParams } from 'next/navigation';
 import { DCEUploader } from '@/components/dce/dce-uploader';
+import { DceDocumentsStatus } from '@/components/dce/dce-documents-status';
 import { useTranslation } from '@/components/i18n-provider';
 
 export default function DCEPage() {
@@ -19,6 +20,7 @@ export default function DCEPage() {
         </p>
       </div>
       <DCEUploader projectId={projectId} />
+      <DceDocumentsStatus projectId={projectId} />
     </div>
   );
 }

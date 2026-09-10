@@ -281,7 +281,9 @@ export interface GeneratedSection {
   order_index: number;
   content_html: string;
   content_json: Record<string, any>;
-  visual_placeholders: string[];
+  // 10/09 : ne contient plus des noms de schemas mais des blocs de diagnostic
+  // ({type:'lacunes'|'rapport_visuels', ...}) -- voir SectionDiagnostics.
+  visual_placeholders: unknown[];
   compliance_score: number;
   compliance_notes?: string;
   status: 'generating' | 'generated' | 'edited' | 'validated' | 'processing' | 'missing_data' | 'prefilled_draft' | 'restored' | 'failed' | string;

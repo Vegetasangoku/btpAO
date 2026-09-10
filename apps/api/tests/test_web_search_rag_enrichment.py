@@ -111,7 +111,19 @@ async def test_llm_generator_includes_internal_and_web_citations():
     assert "Source web :" in html
     assert "NF DTU 13.3" in html
     assert "https://www.afnor.org/normes/nf-dtu-13-3-dallages-beton" in html
-    assert res["compliance_score"] >= 90.0
+    # 10/09 : ce test exigeait auparavant un score >= 90 sur un contenu produit par le
+    # MOTEUR DE GABARITS (aucune cle LLM dans l'environnement de test). Le score etait une
+    # constante ecrite en dur dans le code -- 97, 98,5 ou 99 selon la section -- alors
+    # qu'aucune exigence du marche n'avait ete lue ni verifiee. C'est exactement le
+    # symptome remonte par le client : "tu annonces 85 % et il n'y a rien dedans".
+    # Le contrat est desormais l'inverse : un gabarit ne prouve aucune conformite, donc
+    # il vaut 0 et le dit. C'est ce que ce test verifie.
+    assert res["compliance_score"] == 0.0, (
+        "Un contenu de gabarit ne doit jamais afficher de score de conformite : "
+        f"recu {res['compliance_score']}"
+    )
+    assert res.get("degraded") is True
+    assert "canevas" in (res.get("compliance_notes") or "").lower()
 
 
 @pytest.mark.anyio

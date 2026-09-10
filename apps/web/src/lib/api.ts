@@ -185,6 +185,21 @@ export const api = {
 
 
   getProfile: () => fetcher<UserProfile>('/auth/me'),
+  // Charte graphique (10/09). Le formulaire de charte n'appelait AUCUNE API : il
+  // simulait un enregistrement avec un setTimeout de 400 ms puis affichait
+  // « enregistré ». Rien n'était jamais écrit.
+  proposerCharte: () => fetcher<{
+    proposition: Record<string, unknown>;
+    provenance: Record<string, string>;
+    champs_non_trouves: Record<string, string>;
+    documents_analyses: string[];
+    logo?: { present: boolean; apercu_data_url?: string; nom?: string };
+  }>('/knowledge/charte/proposition'),
+  appliquerCharte: (charte: Record<string, string>) =>
+    fetcher<{ applique: string[]; branding_config: Record<string, string> }>('/knowledge/charte/appliquer', {
+      method: 'POST',
+      body: JSON.stringify(charte),
+    }),
   getTenant: () => fetcher<Tenant>('/auth/tenant'),
 
   // Pays du marche applique au dossier (04/09) : lecture, detection sur les pieces du DCE,
@@ -227,6 +242,22 @@ export const api = {
   // DCE & Criteria
   getCriteria: (projectId: string) =>
     fetcher<DCECriterion[]>(`/dce/criteria/${projectId}`),
+  // État réel des pièces déposées (10/09) : le seul moyen de voir qu'une pièce est
+  // restée bloquée en analyse et que la rédaction se fait sans le marché.
+  getDceDocuments: (projectId: string) =>
+    fetcher<{
+      documents: {
+        id: string; filename: string; doc_type?: string; statut: string;
+        fragments_indexes: number; message?: string;
+      }[];
+      total_fragments: number;
+      exploitable: boolean;
+      avertissement?: string | null;
+    }>(`/dce/documents/${projectId}`),
+  reanalyserDceDocument: (documentId: string) =>
+    fetcher<{ relance: boolean; document_id: string; filename: string }>(
+      `/dce/documents/${documentId}/reanalyser`, { method: 'POST' },
+    ),
   uploadDCE: async (projectId: string, docType: string, file: File) => {
     const formData = new FormData();
     formData.append('project_id', projectId);
@@ -278,6 +309,22 @@ export const api = {
     fetcher<GeneratedSection[]>(`/generate/sections/${projectId}`),
   generateSection: (projectId: string, sectionKey: string, customInstructions?: string) =>
     fetcher<GeneratedSection>('/generate/section', {
+      method: 'POST',
+      body: JSON.stringify({
+        project_id: projectId,
+        section_key: sectionKey,
+        custom_instructions: customInstructions,
+      }),
+    }),
+  /**
+   * Rédaction en mode de secours : exécutée dans le processus API, sans passer par
+   * le worker Celery. Utilisée quand le worker est arrêté ou exécute une version
+   * périmée du code — sinon l'utilisateur clique dans le vide, ou pire, obtient un
+   * résultat produit par l'ancien code sans le savoir. La requête reste ouverte
+   * pendant toute la rédaction (jusqu'à trois minutes) : l'appelant doit le prévoir.
+   */
+  generateSectionSync: (projectId: string, sectionKey: string, customInstructions?: string) =>
+    fetcher<GeneratedSection>('/generate/section/sync', {
       method: 'POST',
       body: JSON.stringify({
         project_id: projectId,
@@ -450,6 +497,22 @@ export const api = {
   // /export/compile ne fait que déclencher la génération en tâche de fond et répond
   // immédiatement avec status "processing" -- ceci permet d'interroger l'état réel
   // jusqu'à ce que le worker Celery ait fini (ou échoué).
+  /**
+   * Compilation en mode de secours, exécutée dans le processus API. Même raison
+   * d'être que generateSectionSync : quand le worker de fond est arrêté ou périmé,
+   * l'export part en file et n'en revient jamais. La réponse est le job TERMINÉ.
+   */
+  exportProjectSync: (projectId: string, opts: { format: 'docx' | 'pdf'; include_visuals?: boolean; include_cover_page?: boolean }) =>
+    fetcher<ExportJob>('/export/compile/sync', {
+      method: 'POST',
+      body: JSON.stringify({
+        project_id: projectId,
+        format: opts.format,
+        include_gantt: opts.include_visuals ?? true,
+        include_organigramme: opts.include_visuals ?? true,
+        include_cover_page: opts.include_cover_page ?? true,
+      }),
+    }),
   getExportJob: (jobId: string) => fetcher<ExportJob>(`/export/job/${jobId}`),
 
   // Legacy export helper (kept for backward compat)

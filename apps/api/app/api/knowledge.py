@@ -19,6 +19,11 @@ import httpx
 
 logger = logging.getLogger(__name__)
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+# 10/09 : `Response` etait utilise dans download_knowledge_asset sans jamais avoir ete
+# importe -- tout telechargement d'un asset servi depuis sa description levait
+# NameError: name 'Response' is not defined, donc un 500 cote utilisateur.
+from fastapi.responses import Response
+from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -1074,3 +1079,169 @@ async def download_word_template(
     except Exception as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Fichier modèle introuvable : {exc}")
 
+
+
+# ---------------------------------------------------------------------------
+# Charte graphique déduite des dossiers déjà déposés (10/09)
+#
+# Demande client : « les chartes ne se génèrent pas automatiquement [...] soit
+# template déposé, soit derniers dossiers ». La charte était un formulaire à
+# remplir à la main ; en pratique il restait rempli de valeurs de démonstration.
+# Ces deux routes proposent une charte lue dans les .docx du tenant, puis
+# l'appliquent seulement après validation explicite de l'utilisateur.
+# ---------------------------------------------------------------------------
+
+_CATEGORIES_CHARTE = ("memoire_reference", "memoire", "dossier_reference", "reference_chantier", "template")
+
+
+@router.get("/charte/proposition")
+async def proposer_charte_depuis_dossiers(
+    current_user: CurrentTenantUser = Depends(get_current_tenant_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Analyse les .docx déjà déposés par l'entreprise et propose une charte.
+
+    N'écrit RIEN : la proposition doit être validée par l'utilisateur via
+    POST /knowledge/charte/appliquer. Chaque champ proposé indique d'où il vient,
+    et les champs introuvables sont listés tels quels plutôt que comblés par une
+    valeur plausible.
+    """
+    from app.services.brand_extraction_service import (
+        consolider_proposition,
+        extraire_charte_docx,
+    )
+
+    try:
+        t_uuid = uuid.UUID(current_user.tenant_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Identifiant de tenant invalide")
+
+    res = await db.execute(
+        select(CompanyAsset)
+        .where(
+            CompanyAsset.tenant_id == t_uuid,
+            CompanyAsset.s3_url.isnot(None),
+            CompanyAsset.category.in_(_CATEGORIES_CHARTE),
+        )
+        .order_by(CompanyAsset.created_at.desc())
+        .limit(8)
+    )
+    assets = res.scalars().all()
+    if not assets:
+        return {
+            "documents_analyses": [],
+            "proposition": {},
+            "provenance": {},
+            "champs_non_trouves": {
+                "_global": "Aucun document Word déposé dans la base de connaissances : "
+                           "impossible d'en déduire une charte. Déposez un mémoire déjà "
+                           "remis ou votre gabarit d'export, puis relancez l'analyse."
+            },
+            "logo": {"present": False},
+        }
+
+    extractions = []
+    illisibles = []
+    for asset in assets:
+        nom_fichier = (asset.s3_url or "").rsplit("/", 1)[-1]
+        if not nom_fichier.lower().endswith((".docx", ".dotx")):
+            continue
+        # Libelle lisible : le titre saisi par l'utilisateur plutot que la cle de
+        # stockage prefixee d'un UUID, illisible dans un message de provenance.
+        libelle = (asset.title or "").strip() or re.sub(r"^[0-9a-f-]{36}_", "", nom_fichier)
+        try:
+            octets = storage_service.download_file(tenant_id=current_user.tenant_id, s3_key=asset.s3_url)
+        except Exception as exc:
+            logger.warning("Charte : téléchargement impossible pour %s : %s", libelle, exc)
+            illisibles.append(libelle)
+            continue
+        extractions.append(extraire_charte_docx(octets, libelle))
+
+    if not extractions:
+        return {
+            "documents_analyses": [],
+            "proposition": {},
+            "provenance": {},
+            "champs_non_trouves": {
+                "_global": "Aucun fichier Word exploitable parmi les documents déposés"
+                           + (f" ({len(illisibles)} illisible(s))" if illisibles else "")
+                           + "."
+            },
+            "logo": {"present": False},
+        }
+
+    resultat = consolider_proposition(extractions)
+
+    # Le logo est renvoyé en base64 pour un aperçu immédiat, sans être stocké :
+    # tant que l'utilisateur n'a pas validé, rien n'est écrit côté tenant.
+    logo = resultat.get("logo") or {}
+    octets_logo = logo.pop("octets", None)
+    if octets_logo:
+        import base64
+        extension = (logo.get("nom") or "").rsplit(".", 1)[-1].lower()
+        mime = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+                "gif": "image/gif", "svg": "image/svg+xml"}.get(extension, "application/octet-stream")
+        logo["apercu_data_url"] = f"data:{mime};base64," + base64.b64encode(octets_logo).decode("ascii")
+        logo["taille_octets"] = len(octets_logo)
+    resultat["logo"] = logo
+    if illisibles:
+        resultat["documents_illisibles"] = illisibles
+    return resultat
+
+
+class ChartePayload(BaseModel):
+    """Champs de charte validés par l'utilisateur. Seuls ceux fournis sont écrits."""
+    company_name: Optional[str] = None
+    primary_color: Optional[str] = None
+    secondary_color: Optional[str] = None
+    font_family: Optional[str] = None
+    header_text: Optional[str] = None
+    footer_text: Optional[str] = None
+    siret: Optional[str] = None
+    contact_email: Optional[str] = None
+
+
+@router.post("/charte/appliquer")
+async def appliquer_charte(
+    payload: ChartePayload,
+    current_user: CurrentTenantUser = Depends(get_current_tenant_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Écrit dans branding_config les champs de charte validés par l'utilisateur.
+
+    Fusion et non remplacement : un champ absent du corps de la requête garde sa
+    valeur actuelle. Une couleur doit être un code hexadécimal — on refuse plutôt
+    que de stocker une valeur qui casserait silencieusement l'export.
+    """
+    from app.models.entities import Tenant
+
+    try:
+        t_uuid = uuid.UUID(current_user.tenant_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Identifiant de tenant invalide")
+
+    fournis = {k: v for k, v in payload.model_dump().items() if v not in (None, "")}
+    if not fournis:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Aucun champ à appliquer")
+
+    for champ in ("primary_color", "secondary_color"):
+        valeur = fournis.get(champ)
+        if valeur and not re.fullmatch(r"#[0-9A-Fa-f]{6}", str(valeur).strip()):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"{champ} doit être un code hexadécimal de la forme #1A2B3C (reçu : {valeur})",
+            )
+
+    res = await db.execute(select(Tenant).where(Tenant.id == t_uuid))
+    tenant = res.scalar_one_or_none()
+    if not tenant:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entreprise introuvable")
+
+    charte = dict(tenant.branding_config or {})
+    charte.update(fournis)
+    tenant.branding_config = charte
+    # Pas de db.commit() ici : get_db committe a la sortie de la route. Un commit
+    # explicite fermerait la transaction et ferait echouer la lecture ci-dessous.
+    return {"applique": sorted(fournis.keys()), "branding_config": charte}

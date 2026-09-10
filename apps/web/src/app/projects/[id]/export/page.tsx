@@ -32,15 +32,11 @@ import {
 } from 'lucide-react';
 import { api, fetchAuthenticatedBlobUrl } from '@/lib/api';
 import { useTranslation } from '@/components/i18n-provider';
+import { MEMO_SECTIONS } from '@/lib/sections';
+import { WorkerHealthBanner, useWorkerHealth } from '@/components/editor/worker-health-banner';
 import { Project, SuggestedTemplate, GoNoGoAnalysis, GeneratedSection, ExportJob } from '@/lib/types';
 
-const MANDATORY_SECTIONS = [
-  { key: 'moyens_humains', title: '1. Moyens Humains & Encadrement Chantier' },
-  { key: 'moyens_materiels', title: '2. Moyens Matériels & Équipements' },
-  { key: 'methodologie_phasage', title: '3. Méthodologie & Phasage Travaux' },
-  { key: 'qse_environnement', title: '4. Qualité, Sécurité & PPSPS' },
-  { key: 'securite_ppsps', title: '5. RSE, Environnement & SOGED' },
-];
+const MANDATORY_SECTIONS = MEMO_SECTIONS;
 
 export default function ExportPage() {
   const params = useParams();
@@ -57,6 +53,10 @@ export default function ExportPage() {
   // Standard Export States
   const apiBase = (process.env.NEXT_PUBLIC_API_URL || '').replace(/\/$/, '');
   const [exporting, setExporting] = useState<'docx' | 'pdf' | null>(null);
+  // Comme pour la rédaction : si le worker de fond est arrêté ou périmé, la
+  // compilation passe par la route synchrone plutôt que d'attendre un worker qui ne
+  // répondra pas — ou qui répondra avec l'ancien code.
+  const { bloquant: moteurIndisponible } = useWorkerHealth();
   const [result, setResult] = useState<ExportJob | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [includeVisuals, setIncludeVisuals] = useState(true);
@@ -138,6 +138,19 @@ export default function ExportPage() {
     setError(null);
     setResult(null);
     try {
+      if (moteurIndisponible) {
+        // La réponse EST le job terminé : aucun sondage nécessaire.
+        const jobSync = await api.exportProjectSync(projectId, {
+          format,
+          include_visuals: includeVisuals,
+          include_cover_page: includeCoverPage,
+        });
+        setResult(jobSync);
+        if (jobSync.status === 'failed') {
+          setError(jobSync.error_message || t('projects.export.error_export'));
+        }
+        return;
+      }
       const job = await api.exportProject(projectId, {
         format,
         include_visuals: includeVisuals,
@@ -209,9 +222,10 @@ export default function ExportPage() {
     }
   }
 
-  const validatedSectionsCount = sections.filter(
-    (s) => s.status === 'validated' || (s.content_html && s.content_html.length > 50)
-  ).length;
+  const validatedSectionsCount = MANDATORY_SECTIONS.filter((meta) => {
+    const s = sections.find((x) => x.section_key === meta.key);
+    return Boolean(s && (s.status === 'validated' || (s.content_html && s.content_html.length > 50)));
+  }).length;
 
   // Go/No-Go Score color and label helpers
   const score = gonogo ? Math.round(gonogo.score) : null;
@@ -221,6 +235,7 @@ export default function ExportPage() {
 
   return (
     <div className="space-y-8 pb-20 max-w-5xl mx-auto font-sans">
+      <WorkerHealthBanner />
       {/* Breadcrumb Navigation */}
       <div className="flex items-center gap-2 text-xs text-muted-foreground">
         <Link href="/projects" className="hover:text-hl transition-colors flex items-center gap-1">
@@ -407,7 +422,10 @@ export default function ExportPage() {
                 <span>{t('projects.export.sections_status_title')}</span>
               </h2>
               <span className="text-xs font-mono font-bold px-2 py-0.5 rounded-full bg-positive/10 text-positive border border-positive/20">
-                {t('projects.export.sections_ready_count', { n: String(validatedSectionsCount) })}
+                {t('projects.export.sections_ready_count', {
+                  n: String(validatedSectionsCount),
+                  total: String(MANDATORY_SECTIONS.length),
+                })}
               </span>
             </div>
 

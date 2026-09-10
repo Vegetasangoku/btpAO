@@ -342,6 +342,61 @@ def generate_section_task(
                         for a in assets_res.scalars().all()
                     ]
 
+                # 10/09 - LES ANCIENS MEMOIRES SONT GARANTIS DANS LE CONTEXTE.
+                #
+                # La recherche semantique ci-dessus ne retient que 5 fragments, toutes
+                # categories confondues : selon la section demandee, elle pouvait ne
+                # remonter AUCUN ancien memoire de l'entreprise. Or reproduire le style
+                # des dossiers precedents est une exigence produit centrale, pas un bonus
+                # dependant du hasard d'un score de similarite. Et le repli degrade
+                # tronquait chaque contenu a 1200 caracteres, coupant en deux des memoires
+                # de 2400 caracteres.
+                #
+                # On les charge donc explicitement, en plus, et sans troncature agressive.
+                # La deduplication se fait sur le titre : un memoire deja remonte par la
+                # recherche semantique n'est pas compte deux fois.
+                CATEGORIES_MEMOIRES = ("memoire_reference", "memoire", "dossier_reference", "reference_chantier")
+                try:
+                    memoires_stmt = (
+                        select(CompanyAsset)
+                        .where(
+                            CompanyAsset.tenant_id == tenant_uuid,
+                            CompanyAsset.status != "obsolete",
+                            CompanyAsset.validated_by_user == True,
+                            CompanyAsset.category.in_(CATEGORIES_MEMOIRES),
+                        )
+                        .order_by(CompanyAsset.created_at.desc())
+                        .limit(6)
+                    )
+                    memoires_res = await db.execute(memoires_stmt)
+                    titres_deja_la = {str(a.get("title") or "").strip().lower() for a in company_assets}
+                    anciens_ajoutes = 0
+                    for a in memoires_res.scalars().all():
+                        if str(a.title or "").strip().lower() in titres_deja_la:
+                            continue
+                        company_assets.append({
+                            "category": a.category,
+                            "title": a.title,
+                            "content": (a.description or "")[:4000],
+                        })
+                        anciens_ajoutes += 1
+                    if anciens_ajoutes:
+                        logger.info(
+                            "[GenerateSectionTask] %d ancien(s) memoire(s) ajoute(s) au contexte "
+                            "en plus des %d fragments semantiques (reference de style).",
+                            anciens_ajoutes, len(company_assets) - anciens_ajoutes,
+                        )
+                    elif not any(
+                        str(a.get("category") or "").lower() in CATEGORIES_MEMOIRES for a in company_assets
+                    ):
+                        logger.warning(
+                            "[GenerateSectionTask] Aucun ancien memoire disponible pour le tenant %s : "
+                            "le style de l'entreprise ne pourra pas etre reproduit.",
+                            tenant_uuid,
+                        )
+                except Exception as mem_exc:
+                    logger.warning("[GenerateSectionTask] Chargement des anciens memoires ignore : %s", mem_exc)
+
 
                 # 5. Fetch Active Tenant Learnings from Past AO debriefs, scoped to this
                 # project + section per the "boucle d'apprentissage 3 portees" (this AO
@@ -498,15 +553,57 @@ def generate_section_task(
                 fallback_candidate = await model_routing_service.get_fallback_candidate(
                     db=db, exclude_provider=resolved_model_info.get("provider"), tenant_id=tenant_uuid,
                 )
+                # 10/09 : chaine complete plutot qu'un unique secours -- un quota
+                # epuise chez UN fournisseur ne doit plus condamner la generation.
+                fallback_chain = await model_routing_service.get_fallback_chain(
+                    db=db, exclude_provider=resolved_model_info.get("provider"), tenant_id=tenant_uuid, limit=3,
+                )
+                if fallback_chain:
+                    logger.info(
+                        "[GenerateSectionTask] Chaine de replis : %s",
+                        " -> ".join(c.get("model_string", "?") for c in fallback_chain),
+                    )
 
                 # 10. Generate content via LLM with internal + web citations + tenant learnings + regulatory profile + custom prompt + tenant model
+                # 10/09 - dce_criteria etait code en dur a [] : meme quand les criteres de
+                # notation du RC avaient ete extraits en base, le prompt recevait une liste
+                # vide. La section 3 du prompt ("CRITERES DE NOTATION DU RC") etait donc
+                # toujours vide, la grille de conformite n'avait rien a verifier, et le
+                # memoire ne pouvait pas etre aligne sur ce qui est reellement note. C'est
+                # l'une des deux causes -- avec le plafond de tokens -- du "presque vide".
+                crit_res = await db.execute(
+                    select(DCECriterionEntity).where(
+                        DCECriterionEntity.tenant_id == tenant_uuid,
+                        DCECriterionEntity.project_id == proj_uuid,
+                    )
+                )
+                criteres_rows = crit_res.scalars().all()
+                dce_criteria_payload = [
+                    {
+                        "critere": c.criterion_title,
+                        "ponderation_pct": float(c.weight_percentage) if c.weight_percentage is not None else None,
+                        "description": c.description or "",
+                        "attendus_cles": c.key_expectations or [],
+                        "preuves_requises": c.required_evidence or [],
+                        "obligatoire": str(c.mandatory).lower() not in ("false", "0", "none"),
+                    }
+                    for c in criteres_rows
+                ]
+                if not dce_criteria_payload:
+                    logger.warning(
+                        "[GenerateSectionTask] Aucun critere de notation en base pour le projet %s : "
+                        "la grille de conformite s'appuiera sur les seules exigences du CCTP. "
+                        "Charger le Reglement de Consultation ameliorerait nettement la section.",
+                        proj_uuid,
+                    )
+
                 gen_result = await llm_generator_service.generate_memo_section(
                     project_title=project.title,
                     reference_code=project.reference_code,
                     section_key=section_key,
                     section_title=f"Section {section_key}",
                     decision_form=decision_form,
-                    dce_criteria=[],
+                    dce_criteria=dce_criteria_payload,
                     rag_dce_chunks=dce_chunks,
                     rag_company_assets=company_assets,
                     rag_web_sources=web_sources_payload,
@@ -522,6 +619,7 @@ def generate_section_task(
                     fallback_model=fallback_candidate.get("model_string") if fallback_candidate else None,
                     fallback_api_key=fallback_candidate.get("api_key") if fallback_candidate else None,
                     fallback_api_base=fallback_candidate.get("api_base") if fallback_candidate else None,
+                    fallback_chain=fallback_chain,
                 )
 
                 # 11. Journal de consommation LLM (30/08) -- tokens + cout estime, reponse a
@@ -558,8 +656,83 @@ def generate_section_task(
                 except Exception as e:
                     print(f"[Tasks] Journal consommation LLM notice: {e} -- generation non affectee.")
 
+                # 12. Schemas : creation reelle des visuels proposes par le modele.
+                # Jusqu'ici le modele renvoyait des noms de schemas que personne ne
+                # fabriquait ("les graphiques ne se generent pas automatiquement").
+                # Les visuels crees atterrissent dans les tables deja editables par
+                # l'utilisateur, et un visuel existant n'est jamais ecrase.
+                visuels_rapport = {"created": [], "skipped": [], "rejected": []}
+                try:
+                    from app.services.visual_spec_service import materialize_visual_specs
+                    visuels_rapport = await materialize_visual_specs(
+                        db=db, tenant_id=tenant_uuid, project_id=proj_uuid,
+                        visual_specs=gen_result.get("visual_specs"),
+                    )
+                except Exception as vis_exc:
+                    logger.warning("[GenerateSectionTask] Materialisation des schemas ignoree : %s", vis_exc)
+
+                # 13. Tracabilite des manques : le modele signale dans "gaps" ce qui lui a
+                # manque pour faire mieux. C'est ce qui permet a l'utilisateur de savoir si
+                # une section faible vient du modele ou d'un document absent -- au lieu de
+                # devoir le deviner.
+                lacunes = gen_result.get("gaps")
+                lacunes = [g for g in lacunes if isinstance(g, dict)] if isinstance(lacunes, list) else []
+                if not dce_criteria_payload:
+                    lacunes.append({
+                        "missing": "Règlement de consultation (RC) absent du DCE chargé",
+                        "impact": "Aucun critère de notation connu : la grille de conformité "
+                                  "ne peut s'appuyer que sur les exigences du CCTP.",
+                        "how_to_fix": "Charger le RC dans les pièces du marché, puis relancer la génération.",
+                    })
+                # Ces deux constats sont etablis cote serveur, pas demandes au modele :
+                # ce sont des faits sur la base, il n'y a aucune raison de payer des
+                # tokens pour les faire deviner, ni de risquer qu'il les oublie.
+                # Constat le plus grave possible, et jusqu'ici totalement muet : le
+                # memoire a ete redige SANS UNE SEULE LIGNE des pieces du marche.
+                # Observe le 10/09 sur un vrai dossier : l'unique CCTP charge etait
+                # reste bloque en "processing" depuis une semaine, zero fragment
+                # indexe, et la generation se poursuivait comme si de rien n'etait.
+                if not dce_chunks:
+                    lacunes.insert(0, {
+                        "missing": "Aucune pièce du marché analysée pour ce dossier",
+                        "impact": "La section a été rédigée SANS le CCTP ni aucune autre pièce du DCE : "
+                                  "elle ne peut donc répondre à aucune exigence propre à ce marché.",
+                        "how_to_fix": "Vérifier l'onglet Pièces du marché : un document resté en cours "
+                                      "d'analyse doit être relancé, sinon le recharger.",
+                    })
+                if not any(
+                    str(a.get("category") or "").lower() in CATEGORIES_MEMOIRES for a in company_assets
+                ):
+                    lacunes.append({
+                        "missing": "Aucun ancien mémoire de l'entreprise dans la base de connaissances",
+                        "impact": "Le style, le vocabulaire et le niveau de détail des dossiers "
+                                  "précédents ne peuvent pas être reproduits : le texte reste générique.",
+                        "how_to_fix": "Déposer 2 ou 3 mémoires déjà remis dans la base de connaissances "
+                                      "(catégorie « mémoire de référence »), puis relancer la génération.",
+                    })
+                if not tenant_learnings_payload:
+                    lacunes.append({
+                        "missing": "Aucun enseignement capitalisé sur les appels d'offres passés",
+                        "impact": "Les corrections faites sur les dossiers précédents ne sont pas "
+                                  "rejouées automatiquement sur celui-ci.",
+                        "how_to_fix": "Valider les propositions d'apprentissage qui apparaissent "
+                                      "après chaque modification manuelle d'une section.",
+                    })
+
                 now = datetime.utcnow()
+                placeholders_payload = [
+                    {"type": "rapport_visuels", **visuels_rapport},
+                    {"type": "lacunes", "items": lacunes},
+                    {
+                        "type": "consommation",
+                        "contexte": gen_result.get("context_stats") or {},
+                        "usage": gen_result.get("usage") or {},
+                        "modele": gen_result.get("model_used"),
+                        "repli_utilise": bool(gen_result.get("fallback_used")),
+                    },
+                ]
                 if section:
+                    section.visual_placeholders = placeholders_payload
                     section.content_html = gen_result["content_html"]
                     section.compliance_score = gen_result.get("compliance_score", 98.0)
                     section.compliance_notes = gen_result.get("compliance_notes", "Généré en tâche de fond")
@@ -578,6 +751,7 @@ def generate_section_task(
                         compliance_notes=gen_result.get("compliance_notes", "Généré en tâche de fond"),
                         status="generated",
                         locked_for_export=False,
+                        visual_placeholders=placeholders_payload,
                         updated_at=now,
                     )
                     db.add(section)
@@ -671,9 +845,31 @@ def build_export_doc_task(
                     GeneratedSection.tenant_id == tenant_uuid,
                 ).order_by(GeneratedSection.order_index.asc())
                 sec_res = await db.execute(sec_stmt)
+                # 10/09 - LE BUG QUI EMPECHAIT TOUT VISUEL D'APPARAITRE DANS L'EXPORT.
+                #
+                # "section_key" n'etait pas transmis. Or exporter_service insere le
+                # planning et l'organigramme en testant `s.get("section_key")` contre
+                # "moyens_humains" et "methodologie_phasage" : avec la cle absente, le
+                # test valait toujours "" et AUCUN visuel n'a jamais ete insere dans un
+                # export, pour aucun client, depuis toujours. Les images etaient bel et
+                # bien generees -- et jetees.
+                #
+                # Au passage : `float(s.compliance_score or 100)` affichait 100 % de
+                # conformite pour une section dont le score reel etait 0.
+                #
+                # Les sections en echec ou encore en cours sont ecartees du corps : leur
+                # contenu n'est qu'un message d'erreur ou un texte d'attente, et le coller
+                # dans un memoire remis a un acheteur public serait pire que l'absence.
+                # Elles ressortent alors dans la liste des sections manquantes du document.
                 sections = [
-                    {"title": s.title, "content_html": s.content_html, "compliance_score": float(s.compliance_score or 100)}
+                    {
+                        "section_key": s.section_key,
+                        "title": s.title,
+                        "content_html": s.content_html,
+                        "compliance_score": float(s.compliance_score) if s.compliance_score is not None else 0.0,
+                    }
                     for s in sec_res.scalars().all()
+                    if s.status not in ("failed", "processing") and (s.content_html or "").strip()
                 ]
 
                 dec_stmt = select(ProjectDecision).where(
@@ -793,7 +989,16 @@ def build_export_doc_task(
                 job.s3_docx_url = s3_key
                 job.file_size_bytes = len(file_bytes)
                 job.completed_at = now
-                job.error_message = None
+                # 10/09 : un export "reussi" mais sans ses visuels doit le dire. L'echec
+                # de generation d'un planning ou d'un organigramme etait jusqu'ici avale
+                # dans les logs du conteneur, et le client recevait un memoire ampute
+                # sans explication.
+                motifs_visuels = docx_res.get("visual_errors") or []
+                job.error_message = (
+                    "Document généré, mais : " + " | ".join(motifs_visuels)
+                ) if motifs_visuels else None
+                if motifs_visuels:
+                    logger.warning("[BuildExportDocTask] Visuels manquants : %s", motifs_visuels)
 
                 # doc_format == "pdf" (02/09, correctif tâche #66) : le bouton "Export PDF"
                 # ne produisait jusqu'ici jamais qu'un .docx renommé -- convert_docx_to_pdf
@@ -1255,3 +1460,61 @@ def sharepoint_sync_all_tenants_task() -> Dict[str, Any]:
         return {"dispatched": len(tenant_ids)}
 
     return asyncio.run(_async_dispatch())
+
+
+# ---------------------------------------------------------------------------
+# Empreinte du code réellement chargé par le worker (10/09)
+#
+# Le worker Celery ne recharge PAS le code à chaud. Un correctif appliqué sur le
+# disque reste donc inactif tant que le conteneur n'a pas été recréé — et rien,
+# absolument rien, ne le signale : les générations repartent sur l'ancien code
+# en silence. Ce piège a coûté plusieurs heures de diagnostic le 10/09, avec
+# trois générations de test relancées pour rien.
+#
+# Cette tâche renvoie l'empreinte des fichiers tels que le PROCESSUS worker les a
+# importés. L'API calcule la même empreinte depuis le disque : si les deux
+# diffèrent, c'est que le worker tourne sur une version périmée, et /health le dit.
+# ---------------------------------------------------------------------------
+
+_FICHIERS_SUIVIS = (
+    "app/workers/tasks.py",
+    "app/services/llm_generator.py",
+    "app/services/model_routing_service.py",
+    "app/services/visual_spec_service.py",
+)
+
+
+def calculer_empreinte_code(racine: Optional[str] = None) -> str:
+    """Empreinte courte et stable des fichiers qui pilotent la génération."""
+    import hashlib
+    import os
+
+    if racine is None:
+        # tasks.py vit dans <racine>/app/workers/, on remonte de deux niveaux.
+        racine = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    h = hashlib.sha256()
+    for rel in _FICHIERS_SUIVIS:
+        chemin = os.path.join(racine, rel)
+        try:
+            with open(chemin, "rb") as f:
+                h.update(f.read())
+        except OSError:
+            h.update(b"<absent>")
+        h.update(rel.encode("utf-8"))
+    return h.hexdigest()[:16]
+
+
+# Calculée À L'IMPORT : c'est bien la version que ce processus a chargée en
+# mémoire, pas celle qui se trouve sur le disque au moment de l'appel.
+EMPREINTE_CODE_AU_DEMARRAGE = calculer_empreinte_code()
+_DEMARRAGE_WORKER = datetime.utcnow().isoformat() + "Z"
+
+
+@celery_app.task(name="app.workers.tasks.worker_code_fingerprint_task", queue="default")
+def worker_code_fingerprint_task() -> Dict[str, str]:
+    """Renvoie l'empreinte chargée en mémoire par ce worker, et celle du disque."""
+    return {
+        "empreinte_chargee": EMPREINTE_CODE_AU_DEMARRAGE,
+        "empreinte_disque": calculer_empreinte_code(),
+        "demarre_a": _DEMARRAGE_WORKER,
+    }

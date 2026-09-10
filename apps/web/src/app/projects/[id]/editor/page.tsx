@@ -12,26 +12,15 @@ import {
 import { api } from '@/lib/api';
 import { TiptapEditor } from '@/components/editor/tiptap-editor';
 import { InteractiveGanttChart } from '@/components/visuals/interactive-gantt-chart';
+import { SectionDiagnostics } from '@/components/editor/section-diagnostics';
+import { MEMO_SECTIONS, AUTO_FILL_KEYS } from '@/lib/sections';
+import { MemoOverview } from '@/components/editor/memo-overview';
+import { WorkerHealthBanner, useWorkerHealth } from '@/components/editor/worker-health-banner';
 
 import { GeneratedSection, Project } from '@/lib/types';
 import { useTranslation } from '@/components/i18n-provider';
 
-const SECTION_KEYS: { key: string; labelKey: string; mandatory: boolean }[] = [
-  { key: 'presentation_entreprise',   labelKey: 'editor.section.presentation_entreprise',   mandatory: true },
-  { key: 'references_similaires',     labelKey: 'editor.section.references_similaires',     mandatory: true },
-  { key: 'moyens_humains',            labelKey: 'editor.section.moyens_humains',            mandatory: true },
-  { key: 'moyens_materiels',          labelKey: 'editor.section.moyens_materiels',          mandatory: true },
-  { key: 'methodologie_phasage',      labelKey: 'editor.section.methodologie_phasage',      mandatory: true },
-  { key: 'qualite_controle',          labelKey: 'editor.section.qualite_controle',          mandatory: true },
-  { key: 'securite_ppsps',            labelKey: 'editor.section.securite_ppsps',            mandatory: true },
-  { key: 'rse_environnement',         labelKey: 'editor.section.rse_environnement',         mandatory: false },
-  { key: 'sous_traitance',            labelKey: 'editor.section.sous_traitance',            mandatory: false },
-  { key: 'planning_gantt',            labelKey: 'editor.section.planning_gantt',            mandatory: true },
-];
-
-// Sections texte auto-remplies au chargement depuis le corpus RAG. Le Gantt (planning_gantt)
-// n'est pas une section texte : c'est un visuel (PNG) rendu par GanttPreview ci-dessous.
-const AUTO_FILL_KEYS = SECTION_KEYS.filter((s) => s.mandatory && s.key !== 'planning_gantt').map((s) => s.key);
+const SECTION_KEYS = MEMO_SECTIONS;
 
 export default function EditorPage() {
   const params = useParams();
@@ -45,6 +34,17 @@ export default function EditorPage() {
   const [loading, setLoading] = useState(true);
   const autoFillTriggered = useRef(false);
   const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  // File d'attente de l'auto-remplissage (10/09). Voir le commentaire de l'effet
+  // correspondant plus bas : les 9 sections partaient auparavant EN PARALLELE.
+  const [autoQueue, setAutoQueue] = useState<string[]>([]);
+  const [autoStopped, setAutoStopped] = useState(false);
+  // 'section' = navigation pièce par pièce (vue historique)
+  // 'apercu'  = le mémoire entier d'un seul tenant, toujours modifiable en place
+  const [vue, setVue] = useState<'section' | 'apercu'>('section');
+  // On ne lance jamais la rédaction automatique sur un moteur hors service ou
+  // périmé : ce serait dépenser les crédits du client pour un résultat qu'on sait
+  // d'avance faux. Tant que la sonde n'a pas répondu, on attend.
+  const { bloquant: moteurIndisponible, verifie: moteurVerifie } = useWorkerHealth();
 
   useEffect(() => {
     api.getProject(projectId).then(setProject).catch(() => setProject(null));
@@ -67,7 +67,12 @@ export default function EditorPage() {
       return next;
     });
     try {
-      const result = await api.generateSection(projectId, sectionKey);
+      // Mode de secours quand le worker de fond est arrêté ou périmé : la rédaction
+      // s'exécute dans l'API, avec le code à jour. Sans ça, l'utilisateur cliquerait
+      // dans le vide — ou obtiendrait un texte produit par l'ancien code sans le savoir.
+      const result = moteurIndisponible
+        ? await api.generateSectionSync(projectId, sectionKey)
+        : await api.generateSection(projectId, sectionKey);
       setSections((prev) => {
         const existing = prev.findIndex((s) => s.section_key === sectionKey);
         if (existing >= 0) {
@@ -77,6 +82,14 @@ export default function EditorPage() {
         }
         return [...prev, result];
       });
+      if (moteurIndisponible) {
+        // La réponse synchrone EST le résultat final : rien à attendre du worker.
+        setGenerating((prev) => {
+          const next = new Set(prev);
+          next.delete(sectionKey);
+          return next;
+        });
+      }
     } catch (err) {
       console.error('Generation error:', err);
       setGenerating((prev) => {
@@ -98,16 +111,56 @@ export default function EditorPage() {
   // section par section.
   useEffect(() => {
     if (loading || autoFillTriggered.current) return;
+    if (!moteurVerifie) return;  // on attend le verdict de la sonde avant de dépenser
     autoFillTriggered.current = true;
-    for (const key of AUTO_FILL_KEYS) {
+    const aTraiter = AUTO_FILL_KEYS.filter((key) => {
       const sec = findSection(key);
-      const isEmpty = !sec || !sec.content_html || sec.content_html.trim().length === 0;
-      if (isEmpty && sec?.status !== 'processing') {
-        handleGenerate(key);
-      }
+      const estVide = !sec || !sec.content_html || sec.content_html.trim().length === 0;
+      return estVide && sec?.status !== 'processing';
+    });
+    setAutoQueue(aTraiter);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, moteurVerifie, moteurIndisponible]);
+
+  // Consommation de la file UNE SECTION A LA FOIS (10/09).
+  //
+  // L'ancienne version lançait les 9 sections obligatoires en parallèle dès
+  // l'ouverture de l'éditeur. Trois conséquences payées comptant :
+  //   - quota fournisseur explosé d'un coup (Gemini palier gratuit : 20 requêtes
+  //     par jour, donc 429 dès la première ouverture) ;
+  //   - 9 prompts massifs facturés simultanément, sans que personne ne puisse
+  //     interrompre la série en voyant le premier résultat ;
+  //   - impossible de savoir où on en est : tout tournait en même temps.
+  // On enchaîne désormais, et on s'arrête au premier échec plutôt que de brûler
+  // huit appels de plus qui échoueront pour la même raison.
+  useEffect(() => {
+    if (autoStopped || autoQueue.length === 0 || generating.size > 0) return;
+    const [suivante, ...reste] = autoQueue;
+    setAutoQueue(reste);
+    handleGenerate(suivante);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoQueue, generating.size, autoStopped]);
+
+  // Un échec pendant l'enchaînement automatique interrompt la file : la cause est
+  // presque toujours commune (quota, clé, worker arrêté) et les sections suivantes
+  // échoueraient identiquement, en consommant des tokens pour rien.
+  useEffect(() => {
+    if (failedKeys.size > 0 && autoQueue.length > 0 && !autoStopped) {
+      setAutoStopped(true);
+      setAutoQueue([]);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading]);
+  }, [failedKeys.size]);
+
+  function reprendreAutoRemplissage() {
+    const aTraiter = AUTO_FILL_KEYS.filter((key) => {
+      const sec = findSection(key);
+      return !sec || !sec.content_html || sec.content_html.trim().length === 0;
+    });
+    setFailedKeys(new Set());
+    setAutoStopped(false);
+    setAutoQueue(aTraiter);
+  }
 
   // Polling : tant qu'au moins une section est en génération, on réinterroge le backend
   // toutes les 4s pour récupérer le contenu réel dès que le worker Celery a terminé, au
@@ -221,6 +274,54 @@ export default function EditorPage() {
 
   const currentSection = activeSection || fallbackSection;
 
+  const basculeVue = (
+    <div className="inline-flex rounded-xl border border-line bg-sunken p-0.5 shrink-0">
+      {([['section', t('editor.vue_section')], ['apercu', t('editor.vue_apercu')]] as const).map(([v, libelle]) => (
+        <button
+          key={v}
+          onClick={() => setVue(v)}
+          className={`px-3 py-1.5 rounded-[10px] text-[11px] font-semibold transition-all cursor-pointer ${
+            vue === v ? 'bg-hl/10 text-hl shadow-xs' : 'text-muted-foreground hover:text-foreground'
+          }`}
+        >
+          {libelle}
+        </button>
+      ))}
+    </div>
+  );
+
+  if (vue === 'apercu') {
+    return (
+      <div className="h-[calc(100vh-120px)] overflow-y-auto pb-8 space-y-4">
+        <WorkerHealthBanner />
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          {basculeVue}
+          {autoQueue.length > 0 && (
+            <span className="text-[11px] text-hl flex items-center gap-1.5">
+              <Loader2 className="w-3 h-3 animate-spin" />
+              {t('editor.file_attente_court', { n: autoQueue.length })}
+            </span>
+          )}
+        </div>
+        {loading ? (
+          <div className="flex items-center justify-center py-20">
+            <Loader2 className="w-8 h-8 animate-spin text-hl" />
+          </div>
+        ) : (
+          <MemoOverview
+            projectId={projectId}
+            projectTitle={project?.title || t('editor.default_project_title')}
+            sections={sections}
+            generating={generating}
+            failedKeys={failedKeys}
+            onSectionSaved={handleSectionSaved}
+            onRegenerate={handleGenerate}
+          />
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="flex h-[calc(100vh-120px)] gap-4 pb-4">
       {/* Left Panel: Section Navigator */}
@@ -298,6 +399,7 @@ export default function EditorPage() {
           </div>
 
           <div className="flex items-center gap-2">
+            {basculeVue}
             {!isGanttSection && (
               <button
                 onClick={() => handleGenerate(activeKey)}
@@ -312,6 +414,26 @@ export default function EditorPage() {
             )}
           </div>
         </div>
+
+        <WorkerHealthBanner />
+
+        {/* File d'auto-remplissage : l'utilisateur voit où en est l'enchaînement,
+            et surtout ce qu'il reste à consommer comme appels payants. */}
+        {autoQueue.length > 0 && (
+          <div className="p-3 rounded-xl border border-hl/20 bg-hl/8 text-[12px] text-hl flex items-center gap-2.5">
+            <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+            <span>{t('editor.file_attente', { n: autoQueue.length })}</span>
+          </div>
+        )}
+        {autoStopped && (
+          <div className="p-3 rounded-xl border border-danger/20 bg-danger/8 text-[12px] text-danger flex flex-wrap items-center gap-2.5">
+            <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+            <span className="flex-1 min-w-[240px]">{t('editor.file_interrompue')}</span>
+            <button onClick={reprendreAutoRemplissage} className="btn-primary !py-1 !px-2.5 !text-[11px]">
+              {t('editor.reprendre')}
+            </button>
+          </div>
+        )}
 
         {/* Editor Area */}
         {loading ? (
@@ -365,6 +487,8 @@ export default function EditorPage() {
             </div>
           )
         )}
+
+        {!isGanttSection && <SectionDiagnostics placeholders={activeSection?.visual_placeholders} />}
       </div>
 
     </div>

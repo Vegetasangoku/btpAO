@@ -481,6 +481,72 @@ class ModelRoutingService:
             return None
 
     @staticmethod
+    async def get_fallback_chain(
+        db: AsyncSession,
+        exclude_provider: Optional[str] = None,
+        tenant_id: Optional[uuid.UUID] = None,
+        limit: int = 3,
+    ) -> List[Dict[str, Any]]:
+        """
+        Chaine de replis ordonnee (10/09) -- et non plus un repli unique.
+
+        Motif reel : le repli configure par defaut pointait sur le palier "gratuit"
+        (Gemini, 20 requetes par jour en palier gratuit). Des ce quota atteint, le
+        repli renvoyait un 429 et la generation retombait sur le moteur de gabarits,
+        alors qu'un autre fournisseur parfaitement utilisable etait configure. Un
+        seul essai de secours ne suffit pas quand la cause de l'echec est un quota :
+        elle frappe le fournisseur, pas la requete.
+
+        Ordre : le repli explicitement configure d'abord (c'est le choix de l'admin),
+        puis les autres fournisseurs actifs reellement dotes d'une cle. Jamais de
+        doublon, jamais le fournisseur qui vient d'echouer.
+        """
+        chaine: List[Dict[str, Any]] = []
+        vus: set = set()
+
+        premier = await ModelRoutingService.get_fallback_candidate(
+            db, exclude_provider=exclude_provider, tenant_id=tenant_id
+        )
+        if premier:
+            chaine.append(premier)
+            vus.add(premier.get("model_string"))
+
+        try:
+            providers = await ModelRoutingService.get_custom_providers(db, mask_keys=False)
+            for prov in providers or []:
+                if len(chaine) >= limit:
+                    break
+                if not prov.get("enabled", True):
+                    continue
+                litellm_id = (prov.get("litellm_id") or "").strip()
+                prov_id = (prov.get("id") or "").strip()
+                if not litellm_id or litellm_id in vus:
+                    continue
+                if exclude_provider and (
+                    exclude_provider in litellm_id
+                    or exclude_provider == prov_id
+                    or (prov_id and prov_id in exclude_provider)
+                ):
+                    continue
+                brute = prov.get("api_key", "")
+                if not brute:
+                    continue
+                cle = decrypt_api_key(brute)
+                if not (cle and cle.strip()) or "sk-..." in cle:
+                    continue
+                chaine.append({
+                    "model_string": litellm_id,
+                    "provider": prov_id,
+                    "api_key": cle,
+                    "api_base": prov.get("api_base") or None,
+                })
+                vus.add(litellm_id)
+        except Exception as e:
+            print(f"[ModelRoutingService] get_fallback_chain notice: {e}")
+
+        return chaine[:limit]
+
+    @staticmethod
     async def resolve_model_for_tenant(
         db: AsyncSession,
         tenant_id: uuid.UUID,

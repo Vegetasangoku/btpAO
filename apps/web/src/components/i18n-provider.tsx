@@ -11,6 +11,45 @@ interface Translations {
 }
 
 export const dictionary: Translations = {
+
+  // ── Charte déduite des anciens dossiers, aperçu global, diagnostics (10/09) ──
+  'charte.deduire_title': { fr: 'Déduire de mes anciens dossiers', en: 'Derive from my past submissions', ar: 'استنتاج من ملفاتي السابقة' },
+  'charte.deduire_desc': { fr: 'Lit les mémoires Word déjà déposés et en extrait couleurs, police, raison sociale et mentions.', en: 'Reads the Word submissions already uploaded and extracts colours, font, company name and legal mentions.', ar: 'يقرأ ملفات Word المرفوعة ويستخرج الألوان والخط واسم الشركة والبيانات القانونية.' },
+  'charte.analyser': { fr: 'Analyser', en: 'Analyse', ar: 'تحليل' },
+  'charte.analyse_en_cours': { fr: 'Analyse…', en: 'Analysing…', ar: 'جارٍ التحليل…' },
+  'charte.reprendre': { fr: 'Reprendre ces valeurs dans le formulaire', en: 'Copy these values into the form', ar: 'نسخ هذه القيم إلى النموذج' },
+  'charte.rien_trouve': { fr: 'Aucune valeur exploitable trouvée.', en: 'No usable value found.', ar: 'لم يتم العثور على قيمة قابلة للاستخدام.' },
+  'charte.analyse_de': { fr: 'Analysé :', en: 'Analysed:', ar: 'تم تحليل:' },
+  'charte.raison_sociale': { fr: 'Raison sociale', en: 'Company name', ar: 'اسم الشركة' },
+  'charte.couleur_secondaire': { fr: 'Couleur secondaire', en: 'Secondary colour', ar: 'اللون الثانوي' },
+  'charte.police': { fr: 'Police', en: 'Font', ar: 'الخط' },
+  'charte.entete': { fr: 'En-tête du mémoire', en: 'Document header', ar: 'ترويسة المذكرة' },
+  'charte.erreur_lecture': { fr: 'Charte actuelle illisible — vérifiez que vous êtes bien connecté.', en: 'Current branding could not be read — check that you are signed in.', ar: 'تعذّر قراءة الهوية الحالية — تأكد من تسجيل الدخول.' },
+  'charte.erreur_enregistrement': { fr: 'Enregistrement refusé par le serveur', en: 'Save rejected by the server', ar: 'رفض الخادم الحفظ' },
+  'charte.analyse_impossible': { fr: 'Analyse impossible', en: 'Analysis failed', ar: 'تعذّر التحليل' },
+
+  'editor.vue_section': { fr: 'Section par section', en: 'Section by section', ar: 'قسماً بقسم' },
+  'editor.vue_apercu': { fr: 'Aperçu global', en: 'Full preview', ar: 'معاينة كاملة' },
+  'editor.file_attente': { fr: 'Rédaction automatique en cours, une section à la fois — {n} section(s) encore en attente.', en: 'Automatic drafting in progress, one section at a time — {n} section(s) still queued.', ar: 'الصياغة التلقائية جارية، قسم واحد في كل مرة — {n} قسم في الانتظار.' },
+  'editor.file_attente_court': { fr: '{n} section(s) en attente de rédaction', en: '{n} section(s) waiting to be drafted', ar: '{n} قسم بانتظار الصياغة' },
+  'editor.file_interrompue': { fr: 'Enchaînement interrompu après un échec : les sections suivantes échoueraient pour la même raison et consommeraient des tokens pour rien.', en: 'Sequence stopped after a failure: the remaining sections would fail for the same reason and burn tokens for nothing.', ar: 'توقّف التسلسل بعد فشل: ستفشل الأقسام التالية للسبب نفسه وتستهلك الرصيد بلا فائدة.' },
+  'editor.reprendre': { fr: 'Reprendre', en: 'Resume', ar: 'استئناف' },
+
+  'apercu.sous_titre': { fr: 'Mémoire technique — aperçu complet, chaque partie reste modifiable ici même.', en: 'Technical proposal — full preview, every part stays editable right here.', ar: 'المذكرة الفنية — معاينة كاملة، كل جزء قابل للتعديل هنا.' },
+  'apercu.sections_redigees': { fr: 'Sections rédigées', en: 'Sections drafted', ar: 'الأقسام المكتوبة' },
+  'apercu.conformite_moyenne': { fr: 'Conformité moyenne', en: 'Average compliance', ar: 'متوسط المطابقة' },
+  'apercu.points_a_fournir': { fr: 'Points à fournir', en: 'Items to provide', ar: 'عناصر مطلوبة' },
+  'apercu.facultative': { fr: 'Facultative', en: 'Optional', ar: 'اختياري' },
+  'apercu.regenerer': { fr: 'Régénérer', en: 'Regenerate', ar: 'إعادة التوليد' },
+  'apercu.en_cours': { fr: 'En cours', en: 'Running', ar: 'جارٍ' },
+  'apercu.pas_redigee': { fr: 'Section pas encore rédigée. Utilisez « Régénérer » ci-dessus, ou laissez l’enchaînement automatique y arriver.', en: 'Section not drafted yet. Use “Regenerate” above, or let the automatic sequence reach it.', ar: 'لم تُكتب بعد. استخدم «إعادة التوليد» أعلاه أو انتظر التسلسل التلقائي.' },
+
+  'diag.lacunes_titre': { fr: 'Ce qui a manqué pour aller plus loin', en: 'What was missing to go further', ar: 'ما نقص للمضي أبعد' },
+  'diag.lacunes_desc': { fr: 'Ces points limitent la note, et aucun d’eux n’a été inventé pour combler le vide. Fournir les pièces citées ci-dessous puis relancer la section est le levier de qualité le plus direct.', en: 'These points cap the score, and none of them was invented to fill a gap. Providing the documents listed below and re-running the section is the most direct quality lever.', ar: 'هذه النقاط تحدّ من الدرجة، ولم يُختلق أي منها. تقديم الوثائق أدناه ثم إعادة توليد القسم هو أقوى وسيلة لتحسين الجودة.' },
+  'diag.consequence': { fr: 'Conséquence :', en: 'Consequence:', ar: 'الأثر:' },
+  'diag.a_faire': { fr: 'À faire :', en: 'To do:', ar: 'المطلوب:' },
+  'diag.schemas': { fr: 'Schémas', en: 'Diagrams', ar: 'المخططات' },
+  'diag.modifiable_visuels': { fr: 'Modifiable dans l’onglet Visuels.', en: 'Editable in the Visuals tab.', ar: 'قابل للتعديل في تبويب المرئيات.' },
   'layout.admin_sidebar.same_session_notice': { fr: 'Vous restez connecté sous {email} : c’est votre propre espace, pas celui d’un client.', en: 'You stay signed in as {email}: this is your own workspace, not a client’s.', ar: 'تبقى متصلاً باسم {email}: هذه مساحتك أنت، لا مساحة عميل.' },
 
   'admin.super.keys.catalog_verified_only': { fr: 'N’afficher que les modèles au tarif vérifié', en: 'Show only models with a verified price', ar: 'إظهار النماذج ذات السعر المُتحقق فقط' },
@@ -1235,7 +1274,7 @@ export const dictionary: Translations = {
   'projects.export.gonogo_empty_desc': { fr: "Évaluez l'opportunité de répondre à ce marché en croisant les exigences du DCE avec vos moyens disponibles.", en: 'Assess whether to respond to this tender by weighing its requirements against your available resources.', ar: 'قيّم فرصة الرد على هذه المناقصة بمقارنة متطلبات الملف مع الموارد المتاحة لديك.' },
   'projects.export.gonogo_empty_btn': { fr: "Calculer l'analyse Go / No-Go", en: 'Calculate the Go / No-Go analysis', ar: 'احتساب تحليل القرار' },
   'projects.export.sections_status_title': { fr: 'État des Sections', en: 'Section Status', ar: 'حالة الأقسام' },
-  'projects.export.sections_ready_count': { fr: '{n} / 5 Prêtes', en: '{n} / 5 Ready', ar: '{n} / 5 جاهزة' },
+  'projects.export.sections_ready_count': { fr: '{n} / {total} prêtes', en: '{n} / {total} ready', ar: '{n} / {total} جاهزة' },
   'projects.export.section_ready': { fr: 'Prêt', en: 'Ready', ar: 'جاهز' },
   'projects.export.section_pending': { fr: 'À valider', en: 'To validate', ar: 'قيد المراجعة' },
   'projects.export.complete_in_editor': { fr: "Compléter les chapitres dans l'Éditeur →", en: 'Complete the chapters in the Editor →', ar: 'إكمال الفصول في المحرر ←' },

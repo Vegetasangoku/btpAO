@@ -54,7 +54,7 @@ export function TiptapEditor({ section, projectId, onSave, onRegenerate }: Tipta
   const [isAiGenerating, setIsAiGenerating] = useState(false);
   const [aiPrompt, setAiPrompt] = useState('');
   const [showAiModal, setShowAiModal] = useState(false);
-  const [complianceScore, setComplianceScore] = useState(section.compliance_score || 98.5);
+  const [complianceScore, setComplianceScore] = useState(section.compliance_score ?? 0);
   const [learningProposal, setLearningProposal] = useState<{
     section_type: string;
     summary: string;

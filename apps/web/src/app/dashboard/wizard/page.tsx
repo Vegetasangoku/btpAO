@@ -23,6 +23,9 @@ import { api, fetchAuthenticatedBlobUrl } from '@/lib/api';
 import { Project, GeneratedSection, SuggestedTemplate } from '@/lib/types';
 import { TiptapEditor } from '@/components/editor/tiptap-editor';
 import { useTranslation } from '@/components/i18n-provider';
+import { AUTO_FILL_KEYS } from '@/lib/sections';
+import { MemoOverview } from '@/components/editor/memo-overview';
+import { WorkerHealthBanner, useWorkerHealth } from '@/components/editor/worker-health-banner';
 
 function ResponseWizardContent() {
   const router = useRouter();
@@ -48,6 +51,14 @@ function ResponseWizardContent() {
   const [estimatedBudget, setEstimatedBudget] = useState('');
   const [strategicDirectives, setStrategicDirectives] = useState('');
   const [isSavingInfo, setIsSavingInfo] = useState(false);
+
+  // Progression visible de la rédaction séquentielle (10/09)
+  // Même règle que dans l'éditeur : si le worker de fond est arrêté ou périmé, la
+  // rédaction bascule sur la route synchrone plutôt que de partir en file sans retour.
+  const { bloquant: moteurIndisponible } = useWorkerHealth();
+  const [progressionSections, setProgressionSections] = useState<
+    { faites: number; total: number; message: string; enEchec?: boolean } | null
+  >(null);
 
   // Step 3: AI Sections
   const [sections, setSections] = useState<GeneratedSection[]>([]);
@@ -181,31 +192,92 @@ function ResponseWizardContent() {
     }
   }
 
-  // --- Step 3: AI Generation ---
+  // --- Étape 3 : rédaction par l'IA ---
+  //
+  // Réécrit le 10/09. L'ancienne version avait deux défauts coûteux :
+  //   1. malgré son nom, elle régénérait les 9 sections À CHAQUE CLIC, y compris
+  //      celles déjà rédigées et relues à la main — le travail de l'utilisateur
+  //      était écrasé et repayé ;
+  //   2. `await api.generateSection(...)` ne rend la main qu'au moment où la tâche
+  //      est MISE EN FILE, pas quand elle est terminée. Les 9 tâches partaient donc
+  //      en rafale, avec les mêmes conséquences que dans l'éditeur : quota du
+  //      fournisseur épuisé d'un coup, 9 prompts massifs facturés en parallèle,
+  //      et aucun moyen d'arrêter la série en voyant le premier résultat.
+  // On attend désormais la fin réelle de chaque section avant de lancer la
+  // suivante, et on s'arrête au premier échec.
   async function handleGenerateMissingSections() {
     if (!project) return;
     setIsGeneratingSections(true);
+    setProgressionSections(null);
     try {
-      const standardKeys = [
-        'presentation_entreprise',
-        'references_similaires',
-        'moyens_humains',
-        'moyens_materiels',
-        'methodologie_phasage',
-        'qualite_controle',
-        'securite_ppsps',
-        'rse_environnement',
-        'sous_traitance',
-      ];
+      const existantes = (await api.getSections(project.id).catch(() => [])) || [];
+      const estVide = (cle: string) => {
+        const s = existantes.find((x) => x.section_key === cle);
+        return !s || !(s.content_html || '').trim();
+      };
+      const aRediger = AUTO_FILL_KEYS.filter(estVide);
 
-      for (const key of standardKeys) {
-        await api.generateSection(project.id, key).catch(console.warn);
+      if (aRediger.length === 0) {
+        setSections(existantes);
+        setProgressionSections({ faites: 0, total: 0, message: 'Toutes les sections sont déjà rédigées. Rien n\'a été relancé.' });
+        return;
       }
 
-      const generated = await api.getSections(project.id);
-      setSections(generated || []);
-    } catch (err: any) {
+      for (let i = 0; i < aRediger.length; i++) {
+        const cle = aRediger[i];
+        setProgressionSections({ faites: i, total: aRediger.length, message: `Rédaction de la section ${i + 1} sur ${aRediger.length}…` });
+        try {
+          if (moteurIndisponible) {
+            const section = await api.generateSectionSync(project.id, cle);
+            setSections((prev) => {
+              const idx = prev.findIndex((s) => s.section_key === cle);
+              if (idx >= 0) { const n = [...prev]; n[idx] = section; return n; }
+              return [...prev, section];
+            });
+            setProgressionSections({ faites: i + 1, total: aRediger.length, message: `${i + 1} section(s) sur ${aRediger.length} rédigée(s).` });
+            continue;   // réponse déjà finale : pas d'attente du worker
+          }
+          await api.generateSection(project.id, cle);
+        } catch (err) {
+          setProgressionSections({
+            faites: i, total: aRediger.length,
+            message: `Lancement impossible pour « ${cle} » — série interrompue.`,
+            enEchec: true,
+          });
+          break;
+        }
+
+        // Attente de la fin réelle (le worker travaille en tâche de fond).
+        let termine = false;
+        let echec = false;
+        for (let essai = 0; essai < 45 && !termine; essai++) {
+          await new Promise((r) => setTimeout(r, 4000));
+          const fraiches = (await api.getSections(project.id).catch(() => null)) || null;
+          if (!fraiches) continue;
+          setSections(fraiches);
+          const s = fraiches.find((x) => x.section_key === cle);
+          if (s && s.status !== 'processing') {
+            termine = true;
+            echec = s.status === 'failed';
+          }
+        }
+        if (echec || !termine) {
+          setProgressionSections({
+            faites: i, total: aRediger.length,
+            message: echec
+              ? `La section « ${cle} » a échoué — série interrompue pour ne pas consommer les suivantes pour rien.`
+              : `La section « ${cle} » n'a pas répondu à temps — série interrompue.`,
+            enEchec: true,
+          });
+          break;
+        }
+        setProgressionSections({ faites: i + 1, total: aRediger.length, message: `${i + 1} section(s) sur ${aRediger.length} rédigée(s).` });
+      }
+
+      setSections((await api.getSections(project.id).catch(() => sections)) || sections);
+    } catch (err) {
       console.warn('Erreur génération sections:', err);
+      setProgressionSections({ faites: 0, total: 0, message: 'Erreur pendant la rédaction.', enEchec: true });
     } finally {
       setIsGeneratingSections(false);
     }
@@ -224,13 +296,14 @@ function ResponseWizardContent() {
       // de succès s'affichait quand même, inconditionnellement. On interroge maintenant
       // le job jusqu'à complétion puis on télécharge via un blob authentifié (une simple
       // URL directe échouerait en 401, la route exige un Bearer token).
-      const job = await api.exportProject(project.id, {
-        format: 'docx',
-        include_visuals: true,
-      });
+      // Mode de secours quand le worker de fond est indisponible : la compilation
+      // s'exécute dans l'API et la réponse est déjà le job terminé.
+      const job = moteurIndisponible
+        ? await api.exportProjectSync(project.id, { format: 'docx', include_visuals: true })
+        : await api.exportProject(project.id, { format: 'docx', include_visuals: true });
       let attempts = 0;
       let finalJob = job;
-      while (finalJob.status !== 'completed' && finalJob.status !== 'failed' && attempts < 30) {
+      while (!moteurIndisponible && finalJob.status !== 'completed' && finalJob.status !== 'failed' && attempts < 30) {
         await new Promise((resolve) => setTimeout(resolve, 2000));
         finalJob = await api.getExportJob(job.id);
         attempts += 1;
@@ -644,6 +717,23 @@ function ResponseWizardContent() {
                 )}
               </button>
             </div>
+
+            <WorkerHealthBanner />
+
+            {progressionSections && (
+              <div
+                className={`p-3 rounded-xl border text-[12px] flex items-center gap-2.5 ${
+                  progressionSections.enEchec
+                    ? 'border-danger/20 bg-danger/8 text-danger'
+                    : 'border-hl/20 bg-hl/8 text-hl'
+                }`}
+              >
+                {isGeneratingSections && !progressionSections.enEchec && (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                )}
+                <span>{progressionSections.message}</span>
+              </div>
+            )}
           </div>
 
           {/* Chapters Tabs if multiple */}
@@ -812,6 +902,27 @@ function ResponseWizardContent() {
       )}
 
       {/* ═══ STEP 5: EXPORT & FINALIZE ═══ */}
+      {currentStep === 5 && project && (
+        <div className="space-y-5 animate-fade-in-up">
+          {/* Aperçu global éditable avant export (10/09).
+              Demande explicite : « à la fin un aperçu global modifiable, chaque
+              partie ». On relit le mémoire entier dans l'ordre, exactement comme le
+              lira le jury, et chaque partie reste corrigeable ici — y compris le
+              planning et l'organigramme — plutôt que d'exporter à l'aveugle. */}
+          <MemoOverview
+            projectId={project.id}
+            projectTitle={project.title}
+            sections={sections}
+            generating={new Set<string>()}
+            failedKeys={new Set<string>()}
+            onSectionSaved={(maj) =>
+              setSections((prev) => prev.map((s) => (s.id === maj.id ? maj : s)))
+            }
+            onRegenerate={(cle) => { void api.generateSection(project.id, cle); }}
+          />
+        </div>
+      )}
+
       {currentStep === 5 && (
         <div className="card-modern p-6 sm:p-8 space-y-6 rounded-2xl animate-fade-in-up">
           <div className="section-header">

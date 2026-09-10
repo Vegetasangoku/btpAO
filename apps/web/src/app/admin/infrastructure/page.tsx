@@ -37,6 +37,19 @@ interface HealthData {
     broker_url: string;
     ping?: string;
     error?: string | null;
+    workers?: number | null;
+    message?: string | null;
+    /* 10/09 : Celery ne recharge pas le code à chaud. Un correctif posé sur le
+       disque reste inactif tant que le conteneur n'a pas été recréé, et rien ne
+       le signalait — les générations repartaient sur l'ancien code en silence.
+       L'API compare l'empreinte du code chargé par le worker à celle du disque. */
+    code?: {
+      statut: 'a_jour' | 'perime' | 'aucun_worker' | 'indeterminable' | 'inconnu';
+      message?: string | null;
+      empreinte_api?: string | null;
+      empreinte_worker?: string | null;
+      demarre_a?: string | null;
+    };
   };
   llm_providers: Record<string, {
     configured: boolean;
@@ -250,6 +263,29 @@ export default function AdminInfrastructurePage() {
                 <p className="text-[10px] text-hl bg-hl/10 p-2 rounded-lg border border-hl/20 font-mono">
                   {health.redis_celery.error}
                 </p>
+              )}
+
+              {health?.redis_celery.code && health.redis_celery.code.statut !== 'inconnu' && (
+                <div
+                  className={`text-[10px] p-2 rounded-lg border space-y-1 ${
+                    health.redis_celery.code.statut === 'a_jour'
+                      ? 'text-positive bg-positive/10 border-positive/20'
+                      : 'text-danger bg-danger/10 border-danger/20'
+                  }`}
+                >
+                  <p className="font-semibold">{health.redis_celery.code.message}</p>
+                  {health.redis_celery.code.statut !== 'a_jour' && (
+                    <p className="font-mono opacity-80">docker compose up -d worker</p>
+                  )}
+                  {health.redis_celery.code.empreinte_api && (
+                    <p className="font-mono opacity-60">
+                      code disque {health.redis_celery.code.empreinte_api}
+                      {health.redis_celery.code.empreinte_worker
+                        ? ` · worker ${health.redis_celery.code.empreinte_worker}`
+                        : ''}
+                    </p>
+                  )}
+                </div>
               )}
             </div>
 

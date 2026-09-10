@@ -5,10 +5,10 @@ Zero mock fallbacks, zero local memory cache.
 """
 import hashlib
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.db import get_db
@@ -119,6 +119,141 @@ async def upload_dce_document(
         message="Document déposé avec succès. Analyse OCR et indexation vectorielle lancées en arrière-plan (Celery).",
     )
 
+
+
+@router.get("/documents/{project_id}")
+async def list_dce_documents(
+    project_id: str,
+    current_user: CurrentTenantUser = Depends(get_current_tenant_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    État réel des pièces du marché déposées sur un dossier.
+
+    Pourquoi cette route existe (10/09). Il n'existait AUCUN moyen, dans l'interface,
+    de voir si une pièce déposée avait été analysée. Constat sur un vrai dossier :
+    un CCTP déposé le 3 septembre était resté bloqué en « processing » pendant une
+    semaine, zéro fragment indexé — et toutes les sections avaient été rédigées sans
+    une seule ligne du marché, sans que rien ne le signale. L'utilisateur avait
+    fini par redéposer le même fichier sur de NOUVEAUX dossiers, sans comprendre.
+
+    On renvoie donc, pour chaque pièce : son statut réel, le nombre de fragments
+    réellement indexés (la seule preuve qu'elle est exploitable), et un message en
+    clair. Une analyse restée en cours au-delà d'un délai large est requalifiée en
+    échec : mieux vaut un échec explicite qu'un sablier éternel.
+    """
+    try:
+        p_uuid = uuid.UUID(project_id)
+        t_uuid = uuid.UUID(current_user.tenant_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Identifiant invalide")
+
+    res = await db.execute(
+        select(DCEDocument)
+        .where(DCEDocument.tenant_id == t_uuid, DCEDocument.project_id == p_uuid)
+        .order_by(DCEDocument.created_at.desc())
+    )
+    documents = res.scalars().all()
+
+    comptes = {}
+    if documents:
+        cnt_res = await db.execute(
+            select(DCEEmbedding.document_id, func.count())
+            .where(DCEEmbedding.project_id == p_uuid, DCEEmbedding.tenant_id == t_uuid)
+            .group_by(DCEEmbedding.document_id)
+        )
+        comptes = {row[0]: row[1] for row in cnt_res.all()}
+
+    DELAI_ABANDON = timedelta(minutes=20)
+    maintenant = datetime.utcnow()
+    sortie = []
+    for d in documents:
+        nb = comptes.get(d.id, 0)
+        statut = d.ocr_status or "processing"
+        message = None
+        depuis = d.created_at
+        if depuis is not None and depuis.tzinfo is not None:
+            depuis = depuis.replace(tzinfo=None)
+
+        if statut == "processing" and depuis is not None and maintenant - depuis > DELAI_ABANDON:
+            statut = "failed"
+            message = (
+                "Analyse jamais terminée. Le worker a probablement été arrêté ou redémarré "
+                "pendant le traitement. Relancez l'analyse de cette pièce."
+            )
+        elif statut == "completed" and nb == 0:
+            statut = "failed"
+            message = (
+                "Analyse déclarée terminée mais aucun fragment indexé : cette pièce "
+                "n'apporte rien à la rédaction. Relancez l'analyse."
+            )
+        elif statut == "completed":
+            message = f"{nb} fragment(s) indexé(s) et exploitables par la rédaction."
+        elif statut == "failed":
+            message = (d.raw_metadata or {}).get("error") or "Analyse en échec."
+        else:
+            message = "Analyse en cours."
+
+        sortie.append({
+            "id": str(d.id),
+            "filename": d.filename,
+            "doc_type": d.doc_type,
+            "statut": statut,
+            "statut_brut": d.ocr_status,
+            "fragments_indexes": nb,
+            "message": message,
+            "taille_octets": d.file_size_bytes,
+            "created_at": d.created_at,
+        })
+
+    total_fragments = sum(x["fragments_indexes"] for x in sortie)
+    return {
+        "documents": sortie,
+        "total_fragments": total_fragments,
+        "exploitable": total_fragments > 0,
+        "avertissement": None if total_fragments > 0 else (
+            "Aucune pièce du marché n'est exploitable sur ce dossier : la rédaction se fera "
+            "sans le CCTP ni le règlement de consultation."
+        ),
+    }
+
+
+@router.post("/documents/{document_id}/reanalyser")
+async def relancer_analyse_document(
+    document_id: str,
+    current_user: CurrentTenantUser = Depends(get_current_tenant_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Relance l'analyse d'une pièce restée bloquée ou dont l'indexation a échoué."""
+    try:
+        d_uuid = uuid.UUID(document_id)
+        t_uuid = uuid.UUID(current_user.tenant_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Identifiant invalide")
+
+    res = await db.execute(
+        select(DCEDocument).where(DCEDocument.id == d_uuid, DCEDocument.tenant_id == t_uuid)
+    )
+    doc = res.scalar_one_or_none()
+    if not doc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pièce introuvable")
+    if not doc.s3_key:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cette pièce n'a pas de fichier stocké : il faut la redéposer.",
+        )
+
+    doc.ocr_status = "processing"
+    doc.raw_metadata = {**(doc.raw_metadata or {}), "task": "parse_dce_task", "relance_le": datetime.utcnow().isoformat()}
+
+    from app.workers.tasks import parse_dce_task
+    parse_dce_task.delay(
+        tenant_id=current_user.tenant_id,
+        project_id=str(doc.project_id),
+        document_id=str(doc.id),
+        s3_key=doc.s3_key,
+    )
+    return {"relance": True, "document_id": str(doc.id), "filename": doc.filename}
 
 
 @router.get("/criteria/{project_id}", response_model=List[DCECriterion])

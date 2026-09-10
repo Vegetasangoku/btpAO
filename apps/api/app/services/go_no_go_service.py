@@ -342,6 +342,15 @@ class GoNoGoService:
         # ---------------------------------------------------------------------
         real_data_factors = sum(1 for f in factors if f.status != "missing_data")
         has_sufficient_data = real_data_factors >= 1
+        facteurs_sans_donnee = [f.title for f in factors if f.status == "missing_data"]
+        # 10/09 : le score part d'une base de 70 puis s'ajuste. Quand la moitie des
+        # facteurs n'a aucune donnee, ce 70 de depart pese plus lourd que tout ce qui
+        # a ete reellement verifie -- et l'utilisateur lit "85 % GO" alors que rien
+        # n'a ete controle. Sa remarque etait exactement celle-la : "tu dis 85 % de
+        # confirmed go, tu devrais avoir plus de matiere lors de la generation".
+        # On ne truque pas le chiffre : on affiche combien de facteurs reposent sur
+        # une donnee reelle, et on nomme ceux qui manquent.
+        couverture_pct = round(100.0 * real_data_factors / len(factors), 0) if factors else 0.0
 
         # ---------------------------------------------------------------------
         # Final Recommendation & Score Boundaries
@@ -357,10 +366,29 @@ class GoNoGoService:
             )
         elif final_score >= 70.0:
             recommendation = "GO"
-            summary = "Recommandation GO : Excellente adéquation des qualifications, délai maîtrisé et conformité DCE."
+            # L'ancien texte affirmait "Excellente adequation des qualifications, delai
+            # maitrise et conformite DCE" quelle que soit la realite -- y compris sans
+            # un seul critere extrait. On ne cite plus que ce qui a ete verifie.
+            verifies = [f.title for f in factors if f.status == "ok" and f.impact == "positive"]
+            if verifies:
+                summary = "Recommandation GO, sur la base de : " + " ; ".join(verifies[:3]) + "."
+            else:
+                summary = "Recommandation GO : aucun point bloquant identifié."
         else:
             recommendation = "RESERVES"
-            summary = "Recommandation sous RÉSERVES : Candidature possible avec vigilance sur la charge de travail et le délai."
+            summary = "Recommandation sous RÉSERVES : candidature possible, sous vigilance sur les points signalés ci-dessous."
+
+        # Reserve d'interpretation : elle accompagne TOUTES les recommandations, y
+        # compris un GO, parce qu'un score calcule sur des donnees absentes n'est pas
+        # un score fiable et doit se presenter comme tel.
+        if facteurs_sans_donnee:
+            summary += (
+                f" Attention : {len(facteurs_sans_donnee)} facteur(s) sur {len(factors)} "
+                f"n'ont AUCUNE donnée exploitable ({', '.join(facteurs_sans_donnee[:3])})"
+                f"{'…' if len(facteurs_sans_donnee) > 3 else ''}. "
+                f"Le score ne repose donc que sur {int(couverture_pct)} % des critères "
+                "d'évaluation : il indique une tendance, pas une conclusion."
+            )
 
         # ---------------------------------------------------------------------
         # Persist / Upsert in public.project_go_no_go_analyses

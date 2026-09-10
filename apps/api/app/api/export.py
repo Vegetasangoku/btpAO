@@ -9,6 +9,7 @@ import re
 import unicodedata
 import uuid
 from datetime import datetime
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy import select
@@ -73,7 +74,7 @@ async def compile_technical_memo(
             "title": s.title,
             "order_index": int(s.order_index),
             "content_html": s.content_html,
-            "compliance_score": float(s.compliance_score) if s.compliance_score is not None else 100.0,
+            "compliance_score": float(s.compliance_score) if s.compliance_score is not None else 0.0,
         }
         for s in db_sections
     ]
@@ -149,6 +150,105 @@ async def compile_technical_memo(
         completed_at=None,
     )
 
+
+
+@router.post("/compile/sync", response_model=ExportJobOut)
+async def compile_technical_memo_sync(
+    payload: ExportDocumentRequest,
+    current_user: CurrentTenantUser = Depends(get_current_tenant_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Compile le mémoire DANS le processus API, sans passer par le worker Celery.
+
+    Même raison d'être que la route de rédaction synchrone (voir
+    generate.py::generate_single_section_sync) : quand le worker est arrêté ou
+    exécute une version périmée, l'export part en file et n'en revient jamais, ou
+    revient produit par l'ancien code. Ici la compilation s'exécute tout de suite,
+    avec le code à jour.
+
+    La tâche appelle `asyncio.run()` : on l'exécute donc dans un thread séparé. Et
+    on relit le job APRÈS, dans notre propre session, plutôt que d'écrire dessus
+    avant — deux écritures concurrentes sur la même ligne se bloqueraient l'une
+    l'autre et la requête ne se terminerait jamais.
+    """
+    from starlette.concurrency import run_in_threadpool
+    from app.workers.tasks import build_export_doc_task
+
+    try:
+        p_uuid = uuid.UUID(payload.project_id)
+        t_uuid = uuid.UUID(current_user.tenant_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Identifiant invalide")
+
+    proj_res = await db.execute(select(Project).where(Project.id == p_uuid, Project.tenant_id == t_uuid))
+    if not proj_res.scalar_one_or_none():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dossier introuvable ou accès refusé")
+
+    # La ligne de job doit être committée AVANT de lancer la compilation, puisque la
+    # tâche ouvre sa propre session et ne verrait pas une écriture non validée. On ne
+    # peut pas committer la session de `get_db` : elle est ouverte dans un
+    # `session.begin()` et toute requête émise après un commit y lève
+    # « Can't operate on closed transaction inside context manager » — le piège
+    # classique de ce dépôt, dans lequel cette route est d'ailleurs tombée en premier
+    # jet. On utilise donc une session dédiée, et celle de la route reste intacte.
+    # L'appartenance au tenant vient d'être vérifiée ci-dessus.
+    from app.core.db import AsyncSessionLocal
+
+    job_id = uuid.uuid4()
+    async with AsyncSessionLocal() as session_job:
+        session_job.add(ExportJob(
+            id=job_id,
+            tenant_id=t_uuid,
+            project_id=p_uuid,
+            format=payload.format,
+            status="processing",
+            created_at=datetime.utcnow(),
+        ))
+        await session_job.commit()
+
+    try:
+        await run_in_threadpool(
+            build_export_doc_task,
+            tenant_id=current_user.tenant_id,
+            project_id=str(p_uuid),
+            export_job_id=str(job_id),
+            doc_format=payload.format,
+            include_visuals=payload.include_gantt or payload.include_organigramme,
+            include_cover_page=payload.include_cover_page,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"La compilation a échoué : {exc}")
+
+    async with AsyncSessionLocal() as session_lecture:
+        res = await session_lecture.execute(select(ExportJob).where(ExportJob.id == job_id))
+        job = res.scalar_one_or_none()
+        if job is not None:
+            # Copie des valeurs avant fermeture de la session : les attributs d'un
+            # objet détaché déclencheraient un rechargement impossible.
+            job = SimpleNamespace(
+                id=job.id, tenant_id=job.tenant_id, project_id=job.project_id,
+                format=job.format, status=job.status, s3_docx_url=job.s3_docx_url,
+                s3_pdf_url=job.s3_pdf_url, file_size_bytes=job.file_size_bytes,
+                error_message=job.error_message, created_at=job.created_at,
+                completed_at=job.completed_at,
+            )
+    if not job:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Job d'export introuvable après compilation")
+
+    return ExportJobOut(
+        id=str(job.id),
+        tenant_id=str(job.tenant_id),
+        project_id=str(job.project_id),
+        format=job.format,
+        status=job.status,
+        s3_docx_url=f"/api/export/download/{job.id}" if job.s3_docx_url else None,
+        s3_pdf_url=job.s3_pdf_url,
+        file_size_bytes=job.file_size_bytes or 0,
+        error_message=job.error_message,
+        created_at=job.created_at,
+        completed_at=job.completed_at,
+    )
 
 
 @router.get("/job/{job_id}", response_model=ExportJobOut)
@@ -293,14 +393,20 @@ async def stream_project_docx(
     )
     sec_res = await db.execute(sec_stmt)
     db_sections = sec_res.scalars().all()
+    # Meme correctif que dans build_export_doc_task (10/09) : sans "section_key",
+    # exporter_service ne peut inserer ni le planning ni l'organigramme, puisqu'il
+    # reconnait leur emplacement a cette cle. Et une section en echec ne doit pas
+    # deverser son message d'erreur dans un document remis a un acheteur public.
     sections = [
         {
             "id": str(s.id),
+            "section_key": s.section_key,
             "title": s.title,
             "content_html": s.content_html,
-            "compliance_score": float(s.compliance_score) if s.compliance_score is not None else 100.0,
+            "compliance_score": float(s.compliance_score) if s.compliance_score is not None else 0.0,
         }
         for s in db_sections
+        if s.status not in ("failed", "processing") and (s.content_html or "").strip()
     ]
 
     dec_stmt = select(ProjectDecision).where(
@@ -403,7 +509,11 @@ async def stream_project_docx(
         sections=sections,
         decision_form=decision_form,
         template_bytes=template_bytes,
-        include_visuals=False,
+        # 10/09 : etait code a False -- l'export direct (bouton de telechargement
+        # immediat) livrait donc toujours un memoire sans planning ni organigramme,
+        # alors que l'export compile, lui, les demandait. Deux chemins, deux
+        # comportements, sans raison.
+        include_visuals=True,
         required_section_titles=required_section_titles,
         gantt_tasks=gantt_tasks,
         language=getattr(project, "output_language", None) or "fr",

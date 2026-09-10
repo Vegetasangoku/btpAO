@@ -248,6 +248,14 @@ class ExporterService:
         organigramme_path = None
         gantt_error = None
         organigramme_error = None
+        # Motifs d'echec des visuels, remontes a l'appelant (voir plus bas) pour que
+        # l'absence d'un planning ou d'un organigramme dans le Word ne soit plus muette.
+        visual_errors: List[str] = []
+        if not include_visuals:
+            visual_errors.append(
+                "Visuels non demandes pour cet export (include_visuals=False) : ni planning "
+                "ni organigramme n'ont ete generes."
+            )
 
         if include_visuals:
             try:
@@ -278,8 +286,13 @@ class ExporterService:
                 temp_gantt.close()
                 gantt_path = temp_gantt.name
             except Exception as e:
+                # 10/09 : l'erreur n'etait QUE printee dans les logs du conteneur worker.
+                # Cote utilisateur, le planning manquait simplement du document exporte,
+                # sans le moindre motif -- exactement le reproche "les graphiques ne se
+                # generent pas". On la remonte desormais jusqu'au job d'export.
                 print(f"[ExporterService] Gantt generation error: {e}")
                 gantt_error = EXP['gantt_error_msg']
+                visual_errors.append(f"Planning (Gantt) : {type(e).__name__}: {e}")
 
             try:
                 diag_res = diagram_service.generate_organigramme_png(
@@ -298,6 +311,7 @@ class ExporterService:
             except Exception as e:
                 print(f"[ExporterService] Organigramme generation error: {e}")
                 organigramme_error = EXP['organigramme_error_msg']
+                visual_errors.append(f"Organigramme : {type(e).__name__}: {e}")
 
         # 5. Render Each Section Body
         for s in sections:
@@ -379,10 +393,29 @@ class ExporterService:
         except Exception as e:
             print(f"[ExporterService] Storage upload notice (file still available in-memory): {e}")
 
+        # Les cles de section reellement exportees : si "moyens_humains" ou
+        # "methodologie_phasage" n'y figurent pas, les visuels n'ont AUCUN point
+        # d'insertion dans le document, quelle que soit leur generation.
+        cles_exportees = [s.get("section_key", "") for s in sections]
+        if include_visuals and gantt_path and not any(
+            k in cles_exportees for k in ("methodologie_phasage", "planning_gantt")
+        ):
+            visual_errors.append(
+                "Planning généré mais non inséré : aucune section « Méthodologie & phasage » "
+                "ni « Planning » dans le document exporté."
+            )
+        if include_visuals and organigramme_path and "moyens_humains" not in cles_exportees:
+            visual_errors.append(
+                "Organigramme généré mais non inséré : aucune section « Moyens humains » "
+                "dans le document exporté."
+            )
+
         return {
             "s3_docx_key": s3_docx_key,
             "docx_bytes": docx_bytes,
             "filename": f"Memoire_Technique_{project_data.get('reference_code', 'AO')}.docx",
+            "visual_errors": visual_errors,
+            "sections_exportees": cles_exportees,
         }
 
     def convert_docx_to_pdf(self, docx_bytes: bytes, tenant_id: str, project_id: str) -> Optional[str]:

@@ -103,6 +103,8 @@ services:
       SERPER_API_KEY: ${SERPER_API_KEY}
       BRAVE_SEARCH_API_KEY: ${BRAVE_SEARCH_API_KEY}
       WEB_SEARCH_PROVIDER: ${WEB_SEARCH_PROVIDER:-serper}
+      LLM_MAX_OUTPUT_TOKENS: ${LLM_MAX_OUTPUT_TOKENS:-12000}
+      LLM_REASONING_EFFORT: ${LLM_REASONING_EFFORT:-medium}
       SMTP_HOST: ${SMTP_HOST}
       SMTP_PORT: ${SMTP_PORT:-587}
       SMTP_USER: ${SMTP_USER}
@@ -159,6 +161,8 @@ services:
       SERPER_API_KEY: ${SERPER_API_KEY}
       BRAVE_SEARCH_API_KEY: ${BRAVE_SEARCH_API_KEY}
       WEB_SEARCH_PROVIDER: ${WEB_SEARCH_PROVIDER:-serper}
+      LLM_MAX_OUTPUT_TOKENS: ${LLM_MAX_OUTPUT_TOKENS:-12000}
+      LLM_REASONING_EFFORT: ${LLM_REASONING_EFFORT:-medium}
       ALLOW_MOCK_FALLBACK: "true"
     depends_on:
       redis:
@@ -166,7 +170,24 @@ services:
     volumes:
       - ./apps/api:/app
       - api_local_storage:/app/local_storage
-    command: celery -A app.core.celery_app worker --loglevel=info --concurrency=2 -Q default,ocr,generation
+    # 10/09 : le worker Celery ne recharge PAS le code a chaud, contrairement a
+    # l'API lancee avec --reload. Chaque correctif cote generation exigeait donc un
+    # `docker compose restart worker` manuel, facile a oublier -- on croyait tester
+    # le nouveau code alors que l'ancien tournait encore. watchmedo relance le worker
+    # des qu'un fichier .py change dans le volume monte.
+    # watchdog est installe au demarrage s'il manque, pour qu'un simple
+    # `docker compose up -d worker` suffise : pas de reconstruction d'image a
+    # demander, et repli automatique sur celery seul si l'installation echoue
+    # (reseau coupe par exemple) -- le worker demarre dans tous les cas.
+    command: >
+      sh -c "python -c 'import watchdog' 2>/dev/null || pip install --no-cache-dir --quiet 'watchdog>=4.0.0' || true;
+             if command -v watchmedo >/dev/null 2>&1; then
+               exec watchmedo auto-restart --directory=/app/app --pattern='*.py' --recursive --signal SIGTERM --
+                 celery -A app.core.celery_app worker --loglevel=info --concurrency=2 -Q default,ocr,generation;
+             else
+               echo 'watchmedo indisponible : demarrage sans rechargement a chaud';
+               exec celery -A app.core.celery_app worker --loglevel=info --concurrency=2 -Q default,ocr,generation;
+             fi"
     networks:
       - btpao_net
 

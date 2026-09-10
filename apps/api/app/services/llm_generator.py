@@ -5,6 +5,7 @@ internal & web source citations, and anti-hallucination flagging.
 Strictly localized per tenant country regulatory profile (Zero hardcoded French norms).
 """
 import json
+import re
 import time
 from typing import Any, Dict, List, Optional
 import litellm
@@ -138,13 +139,220 @@ DIRECTIVES ET POSITIONNEMENT SPÉCIFIQUES DE L'ENTREPRISE (PROMPT SYSTÈME PERSO
     return base_prompt
 
 
+# Budgets de contexte, en CARACTERES. Releves le 10/09 : ils avaient ete calibres
+# a l'epoque ou la sortie etait plafonnee a 2500 tokens, et rognaient donc la matiere
+# meme du memoire -- en particulier les anciens memoires de l'entreprise, qui sont
+# precisement ce qui permet de reproduire son style. ~57 000 caracteres au total,
+# soit de l'ordre de 16 000 tokens d'entree : largement dans la fenetre de tous les
+# modeles vises, pour un cout d'entree qui reste tres inferieur au cout de sortie.
 CONTEXT_LIMITS = {
-    "dce": 8000,
-    "assets": 6000,
-    "apprentissages": 4000,
-    "web": 4000,
-    "client_sites": 3000,
+    "dce": 20000,
+    "anciens_memoires": 20000,
+    "assets": 12000,
+    "apprentissages": 6000,
+    "web": 6000,
+    "client_sites": 5000,
 }
+
+# Categories de company_assets qui constituent le corpus de STYLE : ce sont d'anciens
+# memoires ou fiches de reference deja remis par l'entreprise, pas des fiches produit.
+CATEGORIES_ANCIENS_MEMOIRES = ("memoire_reference", "memoire", "dossier_reference", "reference_chantier")
+
+
+# ---------------------------------------------------------------------------
+# 10/09 - CAUSE RACINE DE "presque vide, chaque paragraphe pas clair".
+#
+# L'appel etait plafonne a max_tokens=2500. Or on demande au modele, dans UN
+# SEUL objet JSON avec echappement, la totalite de :
+#   - content_html : le corps redige de la section (le livrable),
+#   - compliance_checklist : une entree par critere du RC + par exigence pays,
+#   - compliance_notes, web_sources_used, client_sources_used.
+# L'echappement JSON de HTML (\" partout) gonfle encore le cout en tokens.
+#
+# Resultat systematique : le modele atteint le plafond en plein milieu d'une
+# chaine, la reponse est coupee, json.loads leve
+#   "Unterminated string starting at: line 3 column 19 (char 66)"
+# et TOUT est jete au profit du moteur de gabarits degrade. On paie donc
+# l'enorme prompt d'entree (DCE + savoir-faire + web) pour ne rien recuperer.
+#
+# Trois correctifs complementaires ci-dessous :
+#   1. un plafond de sortie realiste, reglable par variable d'environnement ;
+#   2. la detection explicite de la troncature (finish_reason == "length") ;
+#   3. un sauvetage du JSON partiel plutot que la perte seche.
+# ---------------------------------------------------------------------------
+
+# Plafond de sortie. 2500 etait le bug ; 12000 laisse la place a une section
+# redigee ET a une grille de conformite complete. Reglable sans redeploiement.
+DEFAULT_MAX_OUTPUT_TOKENS = 12000
+
+# Delai maximal d'un appel au fournisseur, en secondes.
+LLM_CALL_TIMEOUT_SECONDS = 180
+
+
+def resolve_max_output_tokens() -> int:
+    raw = getattr(settings, "LLM_MAX_OUTPUT_TOKENS", None)
+    try:
+        value = int(raw) if raw else DEFAULT_MAX_OUTPUT_TOKENS
+    except (TypeError, ValueError):
+        value = DEFAULT_MAX_OUTPUT_TOKENS
+    # Garde-fous : jamais sous 4000 (on retomberait dans le bug), jamais
+    # au-dessus de 32000 (aucun fournisseur courant ne l'accepte en sortie).
+    return max(4000, min(value, 32000))
+
+
+def _finish_reason(response) -> str:
+    try:
+        return (getattr(response.choices[0], "finish_reason", "") or "").lower()
+    except Exception:
+        return ""
+
+
+def _strip_code_fence(raw: str) -> str:
+    """Certains modeles renvoient le JSON dans un bloc ```json ... ``` malgre
+    response_format. On enleve la cloture avant de parser."""
+    text = (raw or "").strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+        if text.rstrip().endswith("```"):
+            text = text.rstrip()[:-3]
+    return text.strip()
+
+
+_JSON_TOKEN_RE = re.compile(
+    r"""
+      (?P<ws>\s+)
+    | (?P<punct>[{}\[\],:])
+    | (?P<string>"(?:[^"\\]|\\.)*")
+    | (?P<literal>-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?|true|false|null)
+    """,
+    re.VERBOSE,
+)
+
+
+def _repair_truncated_json(text: str) -> Optional[str]:
+    """Reconstruit un JSON coupe en plein vol, en coupant au dernier point sur.
+
+    Principe : on retokenise le texte en suivant l'automate JSON (objet attend
+    une cle, puis deux-points, puis une valeur, puis une virgule...). A chaque
+    fois qu'une VALEUR complete vient d'etre lue, on memorise la position ainsi
+    que la pile de conteneurs ouverts : c'est un endroit ou l'on peut couper et
+    refermer proprement. Quand la tokenisation bute (chaine non terminee, texte
+    coupe net), on revient au dernier point sur et on referme la pile.
+
+    Cette precaution evite deux pieges d'une reparation naive :
+      - couper sur une CLE sans valeur ({"a":1,"b} est invalide) ;
+      - couper juste apres un crochet ouvrant ({"a":[ ).
+    Dans les deux cas on recule jusqu'a la derniere valeur complete.
+
+    Renvoie None si le texte est deja valide (rien a reparer) ou si rien n'est
+    recuperable -- jamais un JSON approximatif qui casserait plus loin.
+    """
+    if not text:
+        return None
+
+    stack: List[str] = []          # caracteres de fermeture attendus
+    expect = "value"               # value | key | colon | comma_or_end
+    safe_cut: Optional[int] = None
+    safe_stack: List[str] = []
+    pos = 0
+    length = len(text)
+    truncated = False
+
+    def mark_value_done(end_pos: int) -> None:
+        nonlocal safe_cut, safe_stack, expect
+        expect = "comma_or_end"
+        safe_cut = end_pos
+        safe_stack = list(stack)
+
+    while pos < length:
+        m = _JSON_TOKEN_RE.match(text, pos)
+        if not m:
+            truncated = True       # chaine non terminee ou caractere illegal
+            break
+        pos = m.end()
+        if m.lastgroup == "ws":
+            continue
+        if m.lastgroup == "string":
+            if expect in ("key", "key_or_end"):
+                expect = "colon"
+            elif expect in ("value", "value_or_end"):
+                mark_value_done(m.end())
+            else:
+                return None        # structure inattendue : on ne bricole pas
+            continue
+        if m.lastgroup == "literal":
+            if expect not in ("value", "value_or_end"):
+                return None
+            mark_value_done(m.end())
+            continue
+        tok = m.group("punct")
+        if tok == "{":
+            if expect not in ("value", "value_or_end"):
+                return None
+            stack.append("}")
+            expect = "key_or_end"
+        elif tok == "[":
+            if expect not in ("value", "value_or_end"):
+                return None
+            stack.append("]")
+            expect = "value_or_end"
+        elif tok in "}]":
+            if not stack or stack[-1] != tok:
+                return None
+            stack.pop()
+            mark_value_done(m.end())
+        elif tok == ":":
+            if expect != "colon":
+                return None
+            expect = "value"
+        elif tok == ",":
+            if expect != "comma_or_end":
+                return None
+            expect = "key" if (stack and stack[-1] == "}") else "value"
+
+    if not truncated and not stack and expect == "comma_or_end":
+        return None                # deja valide : l'erreur vient d'ailleurs
+    if safe_cut is None or not safe_stack:
+        return None                # rien de complet n'a ete lu
+    return text[:safe_cut] + "".join(reversed(safe_stack))
+
+
+def parse_llm_json(raw_content: str, finish_reason: str = "") -> Dict[str, Any]:
+    """Parse la reponse du modele, en recuperant le maximum si elle est coupee.
+
+    Leve une ValueError explicite (et non une JSONDecodeError opaque) quand
+    rien n'est recuperable, pour que le motif affiche au client dise la verite.
+    """
+    text = _strip_code_fence(raw_content)
+    if not text:
+        raise ValueError("Le modèle n'a renvoyé aucun contenu.")
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        repaired = _repair_truncated_json(text)
+        if repaired:
+            try:
+                data = json.loads(repaired)
+                data["_truncated"] = True
+                data["_truncation_reason"] = (
+                    "réponse coupée par le plafond de sortie du modèle"
+                    if finish_reason == "length"
+                    else "réponse JSON incomplète renvoyée par le modèle"
+                )
+                print(
+                    "[LLMGenerator] Reponse tronquee (finish_reason=%r) : JSON reconstruit, "
+                    "%d caracteres recuperes." % (finish_reason, len(repaired))
+                )
+                return data
+            except json.JSONDecodeError:
+                pass
+        hint = ""
+        if finish_reason == "length":
+            hint = (
+                " Le modèle a atteint son plafond de tokens de sortie "
+                "(augmenter LLM_MAX_OUTPUT_TOKENS ou réduire le contexte)."
+            )
+        raise ValueError(f"Réponse JSON illisible du modèle : {exc}.{hint}")
 
 
 def bounded_context_join(items: List[str], max_chars: int, section_name: str) -> str:
@@ -193,6 +401,10 @@ class LLMGeneratorService:
         fallback_model: Optional[str] = None,
         fallback_api_key: Optional[str] = None,
         fallback_api_base: Optional[str] = None,
+        # Chaine de replis ordonnee (10/09). Si elle est fournie, elle remplace le
+        # triplet fallback_model/api_key/api_base ci-dessus, conserve pour les
+        # appelants existants et les tests.
+        fallback_chain: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
 
         """
@@ -218,9 +430,24 @@ class LLMGeneratorService:
             f"--- Extrait DCE ({c.get('section_title', 'Pièce')}, p.{c.get('page_number', 1)}) ---\n{c.get('content', '')}"
             for c in rag_dce_chunks
         ]
+        # 10/09 : les anciens memoires de l'entreprise etaient noyes dans le meme bloc
+        # que les fiches materiel et les certificats, sous l'intitule "savoir-faire".
+        # Le modele n'avait donc aucune raison de comprendre qu'il devait en REPRODUIRE
+        # LE STYLE -- alors que c'est la demande centrale du produit : "tout ce que
+        # faisait le client dans les anciens sera fait au meme style". On les isole.
+        def _est_ancien_memoire(a: Dict[str, Any]) -> bool:
+            return str(a.get("category") or "").strip().lower() in CATEGORIES_ANCIENS_MEMOIRES
+
+        anciens_memoires = [a for a in rag_company_assets if _est_ancien_memoire(a)]
+        autres_assets = [a for a in rag_company_assets if not _est_ancien_memoire(a)]
+
+        anciens_items = [
+            f"--- Ancien dossier remis par l'entreprise : {a.get('title', 'Sans titre')} ---\n{a.get('description', a.get('content', ''))}"
+            for a in anciens_memoires
+        ]
         assets_items = [
-            f"--- Savoir-faire Entreprise ({a.get('category', 'Asset')}) ---\n{a.get('description', a.get('content', ''))}"
-            for a in rag_company_assets
+            f"--- Savoir-faire Entreprise ({a.get('category', 'Asset')}) : {a.get('title', '')} ---\n{a.get('description', a.get('content', ''))}"
+            for a in autres_assets
         ]
         web_items = [
             f"--- Source Web ({w.get('title', 'Web')}) ---\nURL: {w.get('url', '')}\nExtrait: {w.get('snippet', '')}"
@@ -236,6 +463,7 @@ class LLMGeneratorService:
         ]
 
         dce_context_text = bounded_context_join(dce_items, CONTEXT_LIMITS["dce"], "DCE")
+        anciens_context_text = bounded_context_join(anciens_items, CONTEXT_LIMITS["anciens_memoires"], "Anciens mémoires")
         assets_context_text = bounded_context_join(assets_items, CONTEXT_LIMITS["assets"], "Company Assets")
         web_context_text = bounded_context_join(web_items, CONTEXT_LIMITS["web"], "Web Sources")
         client_sites_context_text = bounded_context_join(client_sites_items, CONTEXT_LIMITS["client_sites"], "Client Reference Sites")
@@ -261,8 +489,19 @@ SECTION À RÉDIGER : {section_title} (Clé : {section_key})
 4. EXTRAITS PERTINENTS DU DCE (CCTP, RC) :
 {dce_context_text or "Aucun extrait DCE spécifique fourni."}
 
-5. SAVOIR-FAIRE ET CERTIFICATS DE L'ENTREPRISE :
-{assets_context_text or "Certifications professionnelles et parc matériel propre."}
+5. ANCIENS DOSSIERS REMIS PAR CETTE ENTREPRISE — RÉFÉRENCE DE STYLE ET DE FOND :
+{anciens_context_text or "Aucun ancien mémoire n'a été chargé pour cette entreprise."}
+DIRECTIVE : ces textes ont déjà été remis à des acheteurs publics par cette entreprise.
+Reprends-en la structure de raisonnement, le vocabulaire métier, les intitulés de poste,
+les unités et le niveau de détail chiffré. Le jury doit reconnaître la même plume. Tu peux
+proposer une amélioration (un tableau là où il y avait un paragraphe, un engagement
+chiffré là où il était vague), mais jamais un texte générique qui pourrait appartenir à
+n'importe quelle entreprise. En revanche, ne recopie JAMAIS un chiffre, une référence de
+chantier ou un nom propre d'un ancien dossier dans celui-ci : ils concernent un autre
+marché. Ces textes servent de modèle de forme, pas de réservoir de faits.
+
+5 bis. SAVOIR-FAIRE, CERTIFICATS ET MOYENS DE L'ENTREPRISE :
+{assets_context_text or "Aucune fiche savoir-faire chargée pour cette entreprise."}
 
 6. RETOUR D'EXPÉRIENCE DU CLIENT (ENSEIGNEMENTS ACCUMULÉS DU TENANT) :
 {learnings_context_text or "Aucun retour d'expérience antérieur enregistré pour ce tenant."}
@@ -282,36 +521,118 @@ IMPORTANT : si des extraits figurent ci-dessus, tu DOIS explicitement t'appuyer 
 
 
 INSTRUCTIONS DE SORTIE :
-Génère une réponse au format JSON strict avec la structure suivante :
+Réponds UNIQUEMENT par un objet JSON strict : pas une ligne de texte avant, pas une après,
+aucun bloc markdown. Structure attendue :
 {{
   "title": "{section_title}",
-  "content_html": "<p>Texte HTML riche et structuré avec citations [Source : ...] et [Source web : Titre — URL]...</p>",
-  "compliance_score": 98.0,
-  "compliance_notes": "Justification de la conformité et couverture des critères.",
+  "content_html": "<h3>Sous-titre</h3><p>...</p><table>...</table>",
+  "compliance_score": 0,
+  "compliance_notes": "Ce qui est couvert, ce qui ne l'est pas, et pourquoi.",
   "compliance_checklist": [
-    {{"criterion": "Intitulé exact du critère RC ou de l'exigence réglementaire pays concerné", "status": "met", "source": "[Source : DCE p.X] ou [Savoir-faire entreprise] ou [Source web : Titre] ou [Site de référence client : Titre] ou [Profil réglementaire pays]", "justification": "Une phrase précise expliquant pourquoi ce critère est couvert (ou pas) et par quel passage exact du texte ci-dessus."}}
+    {{"criterion": "Intitulé exact du critère RC ou de l'exigence réglementaire concernée", "status": "met", "source": "[Source : CCTP p.X] ou [Savoir-faire entreprise] ou [Source web : Titre] ou [Site de référence client : Titre] ou [Profil réglementaire pays]", "justification": "Une phrase précise citant le passage exact qui couvre ce point."}}
   ],
-  "visual_placeholders": ["gantt_chart", "organigramme_chantier"],
-  "web_sources_used": [
-    {{"title": "...", "url": "..."}}
+  "gaps": [
+    {{"missing": "Ce qui manquait dans le contexte fourni", "impact": "Ce que cela empêche d'affirmer dans cette section", "how_to_fix": "Le document ou la donnée à fournir pour lever le point"}}
   ],
-  "client_sources_used": [
-    {{"title": "...", "url": "..."}}
-  ]
+  "visual_specs": [],
+  "web_sources_used": [{{"title": "...", "url": "..."}}],
+  "client_sources_used": [{{"title": "...", "url": "..."}}]
 }}
 
-IMPÉRATIF SUR "compliance_checklist" (03/09, exigence client -- la conformité doit être
-vérifiable point par point, jamais un score auto-déclaré non justifié) : crée une entrée
-pour CHAQUE critère de notation du RC (section 3 ci-dessus) ET pour chaque exigence
-réglementaire pays citée en section 1, avec "status" parmi "met" (couvert), "partial"
-(partiellement) ou "missing" (non couvert) -- jamais une checklist vide s'il existe au
-moins un critère ou une exigence fournie. N'invente JAMAIS une source : si aucune preuve
-interne (DCE/savoir-faire) ou web n'existe pour un point, "status" doit être "missing" et
-le dire explicitement plutôt que d'affirmer une conformité non prouvée.
+A. EXIGENCES DE FOND SUR "content_html" — c'est LE livrable, un jury le note :
+A1. VOLUME : entre 900 et 1500 mots. En dessous de 900 mots la section est refusée :
+    une demi-page de généralités ne vaut aucun point dans une notation d'appel d'offres.
+A2. STRUCTURE : 3 à 6 sous-parties introduites par <h3>. Des paragraphes <p> de 4 à
+    8 lignes. Les listes <ul> uniquement pour de vraies énumérations (moyens, étapes,
+    documents) — jamais pour découper une idée qui devrait être rédigée.
+A3. AU MOINS UN TABLEAU <table> réellement informatif dès que la section s'y prête
+    (moyens humains, moyens matériels, phasage, cadences, contrôles, points d'arrêt,
+    correspondance exigence -> réponse). Un tableau de 2 lignes vides ne compte pas.
+A4. CHIFFRER SYSTÉMATIQUEMENT : effectifs, cadences, délais, tonnages, fréquences de
+    contrôle, références de normes. Un engagement non chiffré n'engage à rien.
+A5. PHRASES INTERDITES — n'écris jamais des formules creuses de ce type :
+    "nous mettons un point d'honneur à", "acteur incontournable", "solution sur mesure",
+    "nous nous engageons à respecter les normes en vigueur", "notre savoir-faire reconnu".
+    Chaque phrase doit apporter un fait, un chiffre, une méthode ou une preuve.
+A6. CITATIONS : chaque affirmation factuelle porte sa source, au format défini plus haut.
+    Une phrase sans source doit être une phrase de méthode, jamais une affirmation
+    sur le marché, sur l'entreprise ou sur la réglementation.
+A7. STYLE DE L'ENTREPRISE : la section 5 contient ses anciens dossiers, la 5 bis son
+    savoir-faire, la 6 ses enseignements capitalisés. Le mémoire doit se lire comme la
+    suite de ses dossiers précédents — même vocabulaire, mêmes intitulés de poste, mêmes
+    unités, même niveau de détail chiffré — et jamais comme un texte interchangeable.
+A8. ZÉRO INVENTION : jamais un nom de personne, une référence de chantier, un chiffre
+    d'affaires, une certification ou un numéro de norme qui ne figure pas dans le contexte
+    fourni. S'il manque une donnée, écris explicitement l'hypothèse ou le champ à
+    compléter (par exemple "effectif à confirmer par le conducteur de travaux") et
+    reporte le point dans "gaps".
+
+B. "gaps" — DIS CE QUI T'A MANQUÉ. C'est une exigence produit : l'utilisateur doit savoir
+   si une section faible vient du modèle ou d'un document absent. Une entrée par manque
+   réel (règlement de consultation absent, aucun critère de notation fourni, aucun ancien
+   dossier de l'entreprise, planning non communiqué, effectifs inconnus...). Liste vide
+   uniquement si le contexte fourni permettait réellement de tout traiter.
+
+C. "visual_specs" — LES SCHÉMAS SONT CRÉÉS AUTOMATIQUEMENT À PARTIR DE CE CHAMP, et
+   restent modifiables par l'utilisateur dans l'application. Ne décris donc pas un schéma
+   en texte : produis ses données. Deux types sont acceptés, uniquement quand la section
+   les justifie et quand le contexte fournit de quoi les remplir :
+   - Planning :
+     {{"type": "gantt", "title": "Planning prévisionnel des travaux",
+       "tasks": [{{"name": "Installation de chantier", "start": "2026-03-02",
+                  "end": "2026-03-20", "progress": 0, "is_milestone": false,
+                  "depends_on": []}}]}}
+     Dates réelles au format AAAA-MM-JJ, déduites du délai d'exécution du marché.
+     "depends_on" cite le "name" exact des tâches précédentes.
+   - Organigramme de chantier :
+     {{"type": "organigramme", "title": "Organigramme d'encadrement",
+       "nodes": [{{"nom": "À pourvoir", "role": "Conducteur de travaux",
+                  "experience_ans": 15, "presence_hebdo_pct": 50,
+                  "qualif": "Ingénieur TP"}}]}}
+     L'ordre de la liste EST la hiérarchie : le premier nœud est la tête d'encadrement,
+     puis on descend. N'invente JAMAIS un nom de personne : écris "À pourvoir" sauf si le
+     nom figure réellement dans le contexte fourni.
+   Renvoie [] si la section ne justifie aucun schéma — un planning inventé est pire
+   qu'une absence de planning.
+
+D. IMPÉRATIF SUR "compliance_checklist" : la conformité doit être vérifiable point par
+   point, jamais un score auto-déclaré. Crée une entrée pour CHAQUE critère de notation du
+   RC (section 3) ET pour chaque exigence réglementaire pays citée en section 1, avec
+   "status" parmi "met", "partial" ou "missing". Si la section 3 est vide, appuie-toi sur
+   les exigences explicites du CCTP (section 4) et signale l'absence de RC dans "gaps".
+   N'invente JAMAIS une source : sans preuve interne (DCE / savoir-faire) ou web, le
+   statut est "missing" et tu le dis, plutôt que d'affirmer une conformité non prouvée.
 """
 
         # 1. Try LiteLLM call with dynamic country system prompt and tenant customization
         system_prompt = build_btp_system_prompt(reg, tenant_system_prompt=tenant_system_prompt, language=language)
+
+        # 10/09 - TRANSPARENCE SUR CE QUI EST ENVOYE (donc sur ce qui est facture).
+        # "Ca consomme beaucoup de tokens pour un resultat mediocre" etait un reproche
+        # impossible a instruire : personne ne savait ce que pesait reellement le
+        # prompt, ni quel bloc de contexte le remplissait. On mesure, on remonte, et
+        # l'utilisateur peut arbitrer plutot que subir.
+        contexte_stats = {
+            "dce_chars": len(dce_context_text),
+            "anciens_memoires_chars": len(anciens_context_text),
+            "savoir_faire_chars": len(assets_context_text),
+            "apprentissages_chars": len(learnings_context_text),
+            "web_chars": len(web_context_text),
+            "sites_client_chars": len(client_sites_context_text),
+            "consignes_chars": len(system_prompt) + len(user_prompt)
+            - len(dce_context_text) - len(anciens_context_text) - len(assets_context_text)
+            - len(learnings_context_text) - len(web_context_text) - len(client_sites_context_text),
+            "total_chars": len(system_prompt) + len(user_prompt),
+        }
+        print(
+            "[LLMGenerator] Prompt envoye : %d caracteres au total "
+            "(DCE %d, anciens memoires %d, savoir-faire %d, web %d, sites client %d)."
+            % (
+                contexte_stats["total_chars"], contexte_stats["dce_chars"],
+                contexte_stats["anciens_memoires_chars"], contexte_stats["savoir_faire_chars"],
+                contexte_stats["web_chars"], contexte_stats["sites_client_chars"],
+            )
+        )
 
         # Correctif (29/08) : has_api_key vérifiait settings.ANTHROPIC_API_KEY/MISTRAL_API_KEY/
         # OPENAI_API_KEY mais kwargs["api_key"] n'était réellement posé QUE si le paramètre
@@ -347,7 +668,15 @@ le dire explicitement plutôt que d'affirmer une conformité non prouvée.
             checklist = parsed_result.get("compliance_checklist")
             if not isinstance(checklist, list) or not checklist:
                 return parsed_result
-            valid_items = [c for c in checklist if isinstance(c, dict) and c.get("criterion")]
+            # 10/09 : exiger AUSSI un statut non vide. Une entree reduite a
+            # {"criterion": "..."} -- typiquement la derniere ligne d'une reponse
+            # coupee et reconstruite -- n'est pas une evaluation : la compter comme
+            # "manquant" ferait chuter le score de conformite pour une raison
+            # technique, et afficherait au client une ligne "non couvert" fausse.
+            valid_items = [
+                c for c in checklist
+                if isinstance(c, dict) and c.get("criterion") and str(c.get("status") or "").strip()
+            ]
             if not valid_items:
                 return parsed_result
 
@@ -379,6 +708,33 @@ le dire explicitement plutôt que d'affirmer une conformité non prouvée.
                 f"<tbody>{rows_html}</tbody></table>"
             )
             parsed_result["content_html"] = f"{parsed_result.get('content_html', '')}\n{checklist_html}"
+            return parsed_result
+
+        def _flag_truncation(parsed_result: Dict[str, Any]) -> Dict[str, Any]:
+            """Signale visiblement une section reconstruite depuis une reponse coupee.
+
+            Le sauvetage du JSON partiel evite de tout perdre, mais le texte recupere
+            s'arrete au milieu. Le livrer sans le dire serait pire que l'echec : le
+            client relirait une section amputee en la croyant complete. On l'affiche
+            donc en tete de section, et on empeche le score de conformite de passer
+            pour un resultat definitif."""
+            if not parsed_result.get("_truncated"):
+                return parsed_result
+            motif = parsed_result.get("_truncation_reason") or "réponse incomplète du modèle"
+            banniere = (
+                '<div style="border-left:4px solid #d97706;background:#fffbeb;'
+                'padding:12px 16px;margin:0 0 16px;border-radius:4px;">'
+                '<strong>Section incomplète — à régénérer.</strong> '
+                f'La réponse du modèle a été interrompue ({motif}). '
+                'Le texte ci-dessous s\'arrête donc en cours de rédaction et la grille '
+                'de conformité est partielle. Relancez la génération de cette section.'
+                "</div>"
+            )
+            parsed_result["content_html"] = banniere + (parsed_result.get("content_html") or "")
+            notes = parsed_result.get("compliance_notes") or ""
+            parsed_result["compliance_notes"] = (
+                f"[Génération interrompue : {motif} — conformité non concluante] {notes}".strip()
+            )
             return parsed_result
 
         def _fallback_env_api_key(model_str: str) -> Optional[str]:
@@ -440,6 +796,9 @@ le dire explicitement plutôt que d'affirmer une conformité non prouvée.
         # qui ne disait rien de la cause reelle -- impossible jusqu'ici de savoir si c'etait
         # la cle, le modele ou autre chose sans aller lire les logs du conteneur worker.
         _llm_error_detail: Optional[str] = None
+        # Consommation de la derniere reponse recue, meme si son contenu s'est revele
+        # inexploitable : le fournisseur a bien facture ces tokens.
+        _last_usage: Optional[Dict[str, Any]] = None
         if not has_api_key:
             _llm_error_detail = f"Aucune clé API disponible pour le modèle '{target_model}'."
         if has_api_key:
@@ -452,53 +811,92 @@ le dire explicitement plutôt que d'affirmer une conformité non prouvée.
                     ],
                     "response_format": {"type": "json_object"},
                     "temperature": 0.3,
-                    "max_tokens": 2500,
+                    "max_tokens": resolve_max_output_tokens(),
+                    # 10/09 : aucun timeout n'etait pose. Un fournisseur qui ne repond
+                    # jamais (connexion ouverte mais silencieuse) bloquait definitivement
+                    # un slot du worker, et la section restait sur "processing" pour
+                    # toujours -- sans erreur, sans trace, sans possibilite de relancer.
+                    # 180 s couvre largement une redaction de 12 000 tokens de sortie.
+                    "timeout": LLM_CALL_TIMEOUT_SECONDS,
                 }
+                # Transmis seulement s'il est configure. litellm.drop_params etant
+                # actif (voir app.core.config), un modele qui ne connait pas ce
+                # parametre l'ignore proprement au lieu d'echouer.
+                effort = (getattr(settings, "LLM_REASONING_EFFORT", "") or "").strip().lower()
+                if effort in ("minimal", "low", "medium", "high"):
+                    kwargs["reasoning_effort"] = effort
                 kwargs["api_key"] = effective_api_key
                 if api_base:
                     kwargs["api_base"] = api_base
 
                 response = _completion_with_retry(kwargs)
+                _last_usage = _extract_usage(response)
                 raw_content = response.choices[0].message.content
-                parsed = json.loads(raw_content)
+                parsed = parse_llm_json(raw_content, _finish_reason(response))
                 parsed["model_used"] = target_model
                 parsed["fallback_used"] = False
                 parsed["usage"] = _extract_usage(response)
                 parsed = _apply_compliance_checklist(parsed)
+                parsed = _flag_truncation(parsed)
+                parsed["context_stats"] = contexte_stats
                 return parsed
             except Exception as e:
                 _llm_error_detail = f"{target_model} : {e}"
                 print(f"[LLMGenerator] LiteLLM call notice with model '{target_model}': {e}, attempting fallback if available.")
 
-                # Repli résilient (29/08) : un unique essai avec un fournisseur alternatif
-                # (clé réellement configurée, résolu côté appelant via
-                # model_routing_service.get_fallback_candidate) avant le moteur de gabarits.
-                # Objectif : une panne/quota/dépréciation sur UN fournisseur ne bloque pas
-                # toute génération -- sans construire un registre de N modèles avec
-                # synchronisation automatique, jugé disproportionné pour 2-4 fournisseurs réels.
-                if fallback_model and fallback_api_key:
+                # CHAINE DE REPLIS (10/09), et non plus un unique essai.
+                #
+                # L'ancienne version tentait UN seul fournisseur de secours. Or la
+                # cause d'echec la plus frequente est un quota : elle frappe tout le
+                # fournisseur, pas la requete. Concretement : modele principal coupe
+                # par le plafond de sortie, repli sur le palier gratuit Gemini
+                # (20 requetes/jour) deja epuise -> 429 -> moteur de gabarits, alors
+                # qu'un troisieme fournisseur parfaitement utilisable etait configure.
+                # On essaie donc chaque repli disponible, dans l'ordre choisi par
+                # l'administrateur, et on n'abandonne qu'apres les avoir tous vus.
+                candidats: List[Dict[str, Any]] = [
+                    c for c in (fallback_chain or [])
+                    if isinstance(c, dict) and c.get("model_string") and c.get("api_key")
+                ]
+                if not candidats and fallback_model and fallback_api_key:
+                    candidats = [{
+                        "model_string": fallback_model,
+                        "api_key": fallback_api_key,
+                        "api_base": fallback_api_base,
+                    }]
+
+                motifs: List[str] = [f"{target_model} : {e}"]
+                for candidat in candidats:
+                    modele_repli = candidat["model_string"]
                     try:
-                        print(f"[LLMGenerator] Tentative de repli sur '{fallback_model}' après échec de '{target_model}'.")
+                        print(f"[LLMGenerator] Tentative de repli sur '{modele_repli}' après échec de '{target_model}'.")
                         fb_kwargs: Dict[str, Any] = dict(kwargs)
-                        fb_kwargs["model"] = fallback_model
-                        fb_kwargs["api_key"] = fallback_api_key
-                        if fallback_api_base:
-                            fb_kwargs["api_base"] = fallback_api_base
+                        fb_kwargs["model"] = modele_repli
+                        fb_kwargs["api_key"] = candidat["api_key"]
+                        if candidat.get("api_base"):
+                            fb_kwargs["api_base"] = candidat["api_base"]
                         elif "api_base" in fb_kwargs:
                             del fb_kwargs["api_base"]
 
                         fb_response = _completion_with_retry(fb_kwargs)
+                        _last_usage = _extract_usage(fb_response) or _last_usage
                         fb_raw_content = fb_response.choices[0].message.content
-                        fb_parsed = json.loads(fb_raw_content)
-                        fb_parsed["model_used"] = fallback_model
+                        fb_parsed = parse_llm_json(fb_raw_content, _finish_reason(fb_response))
+                        fb_parsed["model_used"] = modele_repli
                         fb_parsed["fallback_used"] = True
                         fb_parsed["primary_model_failed"] = target_model
                         fb_parsed["usage"] = _extract_usage(fb_response)
                         fb_parsed = _apply_compliance_checklist(fb_parsed)
+                        fb_parsed = _flag_truncation(fb_parsed)
+                        fb_parsed["context_stats"] = contexte_stats
                         return fb_parsed
                     except Exception as e2:
-                        _llm_error_detail = f"{target_model} : {e} | repli {fallback_model} : {e2}"
-                        print(f"[LLMGenerator] Repli '{fallback_model}' également en échec: {e2}, falling back to intelligent BTP template engine.")
+                        motifs.append(f"repli {modele_repli} : {e2}")
+                        print(f"[LLMGenerator] Repli '{modele_repli}' également en échec: {e2}")
+
+                _llm_error_detail = " | ".join(motifs)
+                if len(candidats) > 1:
+                    print(f"[LLMGenerator] Les {len(candidats)} replis ont échoué -- moteur de gabarits.")
 
 
         # 2. Resilient BTP Domain Template Engine with Citations, Learnings & Anti-Hallucination
@@ -518,6 +916,29 @@ le dire explicitement plutôt que d'affirmer une conformité non prouvée.
             debug_error=_llm_error_detail,
         )
         res["model_used"] = target_model
+        res["context_stats"] = contexte_stats
+
+        # 10/09 - HONNETETE DU SCORE DE CONFORMITE.
+        #
+        # Le moteur de gabarits affichait des scores de 97 a 99 % sur des textes
+        # qui ne sont que des canevas : aucune exigence du marche n'a ete lue,
+        # aucun critere verifie. C'est la source directe du "tu annonces 85 % et
+        # il n'y a rien dedans" : le chiffre venait d'une constante ecrite dans le
+        # code, pas d'une evaluation. Un gabarit ne prouve aucune conformite, donc
+        # il n'a pas de score -- et on le dit.
+        if _llm_error_detail:
+            res["compliance_score"] = 0.0
+            res["compliance_notes"] = (
+                "Aucune rédaction par l'IA n'a abouti : le texte affiché est un canevas, "
+                "pas une réponse au marché. Aucune conformité n'a donc pu être vérifiée. "
+                f"Cause réelle : {_llm_error_detail}"
+            )
+            res["degraded"] = True
+            # Les tokens consommes par la tentative echouee sont bien reels : ils
+            # doivent apparaitre dans le suivi de consommation, sinon le cout du
+            # jour est sous-estime precisement les jours ou tout echoue.
+            if _last_usage:
+                res["usage"] = _last_usage
         return res
 
 
