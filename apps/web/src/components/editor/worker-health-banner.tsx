@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useEffect, useState } from 'react';
+import { useTranslation } from '@/components/i18n-provider';
 import { AlertTriangle } from 'lucide-react';
 
 /**
@@ -58,6 +59,7 @@ export function useWorkerHealth(): { etat: EtatCode | null; bloquant: boolean; v
 }
 
 export function WorkerHealthBanner() {
+  const { t } = useTranslation();
   const { etat, bloquant } = useWorkerHealth();
   if (!etat || !bloquant) return null;
 
@@ -67,16 +69,9 @@ export function WorkerHealthBanner() {
       <AlertTriangle className="w-4 h-4 shrink-0 mt-px" />
       <div className="space-y-1">
         <p className="font-semibold">
-          {estArret
-            ? "Aucun moteur de rédaction en tâche de fond ne répond."
-            : "Le moteur de rédaction en tâche de fond exécute une version périmée du code."}
+          {estArret ? t('admin.worker.aucun_worker') : t('admin.worker.perime')}
         </p>
-        <p className="opacity-90">
-          La rédaction bascule automatiquement en <strong>mode de secours</strong> : elle
-          s&apos;exécute directement, avec le code à jour, mais chaque section prend deux à
-          trois minutes et la page doit rester ouverte. Pour retrouver le fonctionnement
-          normal :
-        </p>
+        <p className="opacity-90">{t('admin.worker.secours')}</p>
         <p className="font-mono opacity-75">docker compose up -d worker</p>
       </div>
     </div>

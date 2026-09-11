@@ -1202,7 +1202,8 @@ def build_export_doc_task(
                 # reste téléchargeable, error_message explique pourquoi ce n'est pas le PDF
                 # demandé) plutôt que de faire échouer tout le job ou de mentir sur le format
                 # livré.
-                if doc_format == "pdf":
+                # 11/09 : le format « both » (Word + PDF) ne produisait que le Word.
+                if doc_format in ("pdf", "both"):
                     pdf_key = exporter_service.convert_docx_to_pdf(file_bytes, tenant_id, project_id)
                     if pdf_key:
                         job.s3_pdf_url = pdf_key

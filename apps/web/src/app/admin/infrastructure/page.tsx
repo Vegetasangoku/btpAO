@@ -273,7 +273,13 @@ export default function AdminInfrastructurePage() {
                       : 'text-danger bg-danger/10 border-danger/20'
                   }`}
                 >
-                  <p className="font-semibold">{health.redis_celery.code.message}</p>
+                  {/* 11/09 : le message vient du serveur en francais ; on l'affiche dans la
+                      langue de l'interface a partir de son statut. */}
+                  <p className="font-semibold">
+                    {t(`admin.worker.${health.redis_celery.code.statut}`) !== `admin.worker.${health.redis_celery.code.statut}`
+                      ? t(`admin.worker.${health.redis_celery.code.statut}`)
+                      : health.redis_celery.code.message}
+                  </p>
                   {health.redis_celery.code.statut !== 'a_jour' && (
                     <p className="font-mono opacity-80">docker compose up -d worker</p>
                   )}
