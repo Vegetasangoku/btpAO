@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   UploadCloud,
   FileText,
@@ -27,6 +27,25 @@ export function DCEUploader({ projectId, criteria = [], onCriteriaExtracted }: D
   const [uploadProgress, setUploadProgress] = useState(0);
   const [docType, setDocType] = useState('rc');
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  // 11/09 : les criteres n'etaient jamais charges a l'ouverture de la page (liste vide
+  // alors que le RC etait lu), et le badge « Valeur technique 60 % • Prix 40 % » etait
+  // un texte fixe, le meme pour tous les marches. On charge les vrais criteres.
+  const [liste, setListe] = useState<DCECriterion[]>(criteria);
+  const recharger = async () => {
+    try {
+      const c = await api.getCriteria(projectId);
+      setListe(c);
+      return c;
+    } catch {
+      return null;
+    }
+  };
+  useEffect(() => {
+    recharger();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId]);
+  const gabarit = liste.length > 0 && liste.every((c) => (c.extracted_from || '').startsWith('gabarit'));
+  const totalPoids = Math.round(liste.reduce((n, c) => n + (Number(c.weight_percentage) || 0), 0));
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
@@ -47,11 +66,13 @@ export function DCEUploader({ projectId, criteria = [], onCriteriaExtracted }: D
       setUploadProgress(100);
       setStatusMessage(t('dce.uploader.status_success'));
 
-      // Refresh criteria
-      const updatedCriteria = await api.getCriteria(projectId);
-      if (onCriteriaExtracted) {
+      // Refresh criteria (l'analyse se fait en arriere-plan : on relit ensuite)
+      const updatedCriteria = await recharger();
+      if (onCriteriaExtracted && updatedCriteria) {
         onCriteriaExtracted(updatedCriteria);
       }
+      setTimeout(recharger, 15000);
+      setTimeout(recharger, 45000);
     } catch (err) {
       console.error('Upload failed', err);
       setStatusMessage(t('dce.uploader.status_error'));
@@ -149,13 +170,24 @@ export function DCEUploader({ projectId, criteria = [], onCriteriaExtracted }: D
             </p>
           </div>
 
-          <span className="badge-pill-emerald text-[10px]">
-            {t('dce.uploader.weight_badge')}
-          </span>
+          {liste.length > 0 && (
+            <span className={`${gabarit ? 'badge-pill' : 'badge-pill-emerald'} text-[10px]`}>
+              {gabarit
+                ? t('dce.uploader.bareme_generique')
+                : t('dce.uploader.total_poids', { n: String(liste.length), total: String(totalPoids) })}
+            </span>
+          )}
         </div>
 
+        {liste.length === 0 && (
+          <p className="text-[12px] text-muted-foreground">{t('dce.uploader.aucun_critere')}</p>
+        )}
+        {gabarit && (
+          <p className="text-[12px] text-warning">{t('dce.uploader.gabarit_explication')}</p>
+        )}
+
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {criteria.map((c, idx) => (
+          {liste.map((c, idx) => (
             <div
               key={c.id || idx}
               className="p-4 rounded-xl card-inset hover:border-hl/40 transition-all flex flex-col justify-between space-y-3"

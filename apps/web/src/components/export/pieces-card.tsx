@@ -14,10 +14,13 @@ import { PiecesRapport } from '@/lib/types';
 import { useTranslation } from '@/components/i18n-provider';
 
 export function PiecesCard({ projectId }: { projectId: string }) {
-  const { t } = useTranslation();
+  const { t, language } = useTranslation();
   const [rapport, setRapport] = useState<PiecesRapport | null>(null);
   const [enCours, setEnCours] = useState(false);
   const [erreur, setErreur] = useState<string | null>(null);
+
+  // Changement de langue : le rapport (redige par l'API) doit etre refait.
+  React.useEffect(() => { setRapport(null); }, [language]);
 
   const lancer = async () => {
     setEnCours(true);
@@ -69,7 +72,19 @@ export function PiecesCard({ projectId }: { projectId: string }) {
             <span className="px-2 py-1 rounded-lg bg-danger/15 text-danger">{t('pieces.nb_manquant', { n: String(rapport.resume.manquant) })}</span>
           </div>
           {rapport.avertissement && (
-            <p className="text-xs text-warning flex gap-1.5"><Info className="w-3.5 h-3.5 shrink-0 mt-0.5" />{rapport.avertissement}</p>
+            <div className="rounded-xl border border-warning/30 bg-warning/10 p-3 space-y-2">
+              <p className="text-xs text-foreground flex gap-1.5"><Info className="w-3.5 h-3.5 shrink-0 mt-0.5 text-warning" />{rapport.avertissement}</p>
+              {rapport.rc_absent && (
+                <a href={`/projects/${projectId}/dce`} className="btn-secondary !py-1 !px-2.5 !text-[11px] inline-flex">
+                  <FileDown className="w-3 h-3" /> {t('pieces.ajouter_rc')}
+                </a>
+              )}
+            </div>
+          )}
+          {rapport.lecture_simple && (
+            <p className="text-[11px] text-muted-foreground flex gap-1.5">
+              <Info className="w-3.5 h-3.5 shrink-0 mt-0.5" />{t('pieces.lecture_simple')}
+            </p>
           )}
           <div className="space-y-2">
             {rapport.pieces.map((p, i) => (

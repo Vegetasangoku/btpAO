@@ -2450,3 +2450,31 @@ async def reindex_rag_embeddings(
             await s.commit()
             bilan[table] = faits
     return {"modele": model, "origine_cle": sonde.get("key_origin"), "reindexes": bilan}
+
+
+@router.post("/lire-page")
+async def tester_lecture_page(
+    payload: Dict[str, Any],
+    admin_user: CurrentTenantUser = Depends(require_platform_admin),
+):
+    """
+    Teste la lecture d'une page officielle (11/09).
+
+    Certains portails publics refusent les robots : sans moyen de tester, on ne
+    savait pas si un correctif d'en-tetes marchait. Cette route lit une URL et
+    renvoie ce que l'application en obtient vraiment.
+    """
+    from app.services.official_page_reader import lire_page
+
+    url = (payload or {}).get("url") or ""
+    if not url.startswith(("http://", "https://")):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="URL invalide")
+    res = await lire_page(url, (payload or {}).get("question") or "", int((payload or {}).get("budget") or 1200))
+    return {
+        "url": url,
+        "type": res.get("type"),
+        "titre": res.get("titre"),
+        "erreur": res.get("erreur"),
+        "caracteres": len(res.get("texte") or ""),
+        "extrait": (res.get("texte") or "")[:800],
+    }

@@ -258,6 +258,12 @@ class GoNoGoFactor(BaseModel):
     impact: str  # "positive", "neutral", "negative", "critical"
     detail: str
     recommendation: Optional[str] = None
+    # 11/09 : code + parametres pour afficher le facteur dans la langue de l'interface,
+    # et le lien vers l'endroit ou corriger (voir go_no_go_i18n.py).
+    code: Optional[str] = None
+    params: Dict[str, Any] = Field(default_factory=dict)
+    lien: Optional[str] = None
+    action: Optional[str] = None
 
 
 class GoNoGoAnalysisOut(BaseModel):
@@ -275,6 +281,11 @@ class GoNoGoAnalysisOut(BaseModel):
     evaluated_by: Optional[str] = None
     created_at: datetime
     updated_at: datetime
+    # 11/09 : pourquoi la conclusion est ce qu'elle est, et quoi faire (langue de l'interface).
+    etat: Optional[str] = None  # go | no_go | suspendue | reserves
+    raisons: List[str] = Field(default_factory=list)
+    actions: List[Dict[str, Any]] = Field(default_factory=list)
+    langue: str = "fr"
 
 
 
@@ -286,7 +297,7 @@ class CadreEquipe(BaseModel):
     role: str = Field(..., example="Directeur de Projet / Conducteur Principal")
     experience_ans: int = Field(default=10, example=15)
     presence_hebdo_pct: int = Field(default=100, example=100)
-    qualif: Optional[str] = Field(default="Ingénieur ESTP", example="Ingénieur ESTP")
+    qualif: Optional[str] = Field(default=None, example="Ingénieur ESTP")
 
 
 class PhaseChantier(BaseModel):
@@ -296,41 +307,32 @@ class PhaseChantier(BaseModel):
 
 
 class ProjectDecisionsForm(BaseModel):
-    delai_mois: int = Field(default=6, example=6)
-    date_demarrage: Optional[str] = Field(default="2026-10-01", example="2026-10-01")
+    # 11/09 : les valeurs par defaut etaient un chantier d'exemple complet (equipe
+    # « Jean-Marc Alibert », grue Potain, 88 % de valorisation Paprec/Veolia...). Un
+    # projet sans donnees chantier recevait donc ces valeurs, qui partaient dans le
+    # memoire et l'organigramme comme des faits. Les exemples restent en `example`
+    # (documentation de l'API) ; les valeurs par defaut sont desormais vides.
+    delai_mois: Optional[int] = Field(default=None, example=6)
+    date_demarrage: Optional[str] = Field(default=None, example="2026-10-01")
     materiel_principal: str = Field(
-        default="Grue à tour Potain 50m, 2 pelles Liebherr 22t, centrale à coulis et banches manuportables Alphi",
+        default="",
         example="Grue à tour Potain 50m, 2 pelles Liebherr 22t, centrale à coulis et banches manuportables Alphi"
     )
     travail_de_nuit: bool = Field(default=False, example=False)
     gestion_dechets: str = Field(
-        default="Tri sélectif 5 flux in situ avec valorisation 88% en filière locale agréée Paprec/Veolia à 12 km",
+        default="",
         example="Tri sélectif 5 flux in situ avec valorisation 88% en filière locale agréée Paprec/Veolia à 12 km"
     )
-    equipe_cadres: List[CadreEquipe] = Field(
-        default_factory=lambda: [
-            CadreEquipe(nom="Jean-Marc Alibert", role="Directeur de Projet & Conducteur Principal", experience_ans=15, presence_hebdo_pct=100),
-            CadreEquipe(nom="Sébastien Vasseur", role="Chef de Chantier Gros Œuvre", experience_ans=12, presence_hebdo_pct=100),
-            CadreEquipe(nom="Chloé Fontaine", role="Ingénieur QSE & Environnement", experience_ans=7, presence_hebdo_pct=50)
-        ]
-    )
+    equipe_cadres: List[CadreEquipe] = Field(default_factory=list)
     mesures_securite: str = Field(
-        default="PPSPS strict, accueil sécurité avec badge biométrique, protection collective intégrée sur banches, défibrillateur et 4 SST",
+        default="",
         example="PPSPS strict, accueil sécurité avec badge biométrique, protection collective intégrée sur banches, défibrillateur et 4 SST"
     )
     demarche_rse_environnement: str = Field(
-        default="Béton bas carbone CEM III/A (-42% CO2), circuit fermé de recyclage des eaux de lavage toupies, charte chantier vert",
+        default="",
         example="Béton bas carbone CEM III/A (-42% CO2), circuit fermé de recyclage des eaux de lavage toupies, charte chantier vert"
     )
-    phasage_travaux: List[PhaseChantier] = Field(
-        default_factory=lambda: [
-            PhaseChantier(phase="1. Installation de chantier, PIC & Terrassements", duree_semaines=4, jalon="Plateforme opérationnelle"),
-            PhaseChantier(phase="2. Fondations profondes et longrines", duree_semaines=4, jalon="Réception plateforme géotechnique"),
-            PhaseChantier(phase="3. Infrastructure & Superstructure R+2 Gros Œuvre", duree_semaines=10, jalon="Hors d'eau / Hors d'air structurel"),
-            PhaseChantier(phase="4. Réseaux enterrés, VRD & Aménagements extérieurs", duree_semaines=4, jalon="Essais d'étanchéité & OPR"),
-            PhaseChantier(phase="5. Repli de chantier, levée des réserves & Livraison", duree_semaines=2, jalon="Parfait Achèvement & Remise des clés")
-        ]
-    )
+    phasage_travaux: List[PhaseChantier] = Field(default_factory=list)
 
 
 # -----------------------------------------------------------------------------

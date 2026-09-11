@@ -25,11 +25,38 @@ import httpx
 logger = logging.getLogger(__name__)
 
 MAX_OCTETS = 3_000_000
+_UA_NAVIGATEUR = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
 _ENTETES = {
     "User-Agent": "Mozilla/5.0 (compatible; btpAO-SourcesOfficielles/1.0)",
     "Accept": "text/html,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,*/*;q=0.8",
     "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8,ar;q=0.6",
 }
+# 11/09 : Legifrance et economie.gouv.fr renvoyaient 403 meme avec un simple
+# User-Agent de navigateur : leur pare-feu regarde l'ensemble des en-tetes (et le
+# HTTP/2). On essaie donc, dans l'ordre : robot honnete, navigateur complet,
+# navigateur complet en HTTP/2. Le delai passe a 20 s (la page de la FFB depassait 12 s).
+_DELAI = httpx.Timeout(30.0, connect=10.0)
+_ENTETES_NAVIGATEUR = {
+    "User-Agent": _UA_NAVIGATEUR,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,application/pdf;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
+    # (pas d'Accept-Encoding force : httpx ne sait decompresser que ce qu'il annonce ;
+    # en reclamer « br » renvoyait une page illisible depuis economie.gouv.fr.)
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+    "Sec-Ch-Ua": '"Chromium";v="128", "Not;A=Brand";v="24", "Google Chrome";v="128"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"macOS"',
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
+    "Connection": "keep-alive",
+}
+_STRATEGIES = [(_ENTETES, False), (_ENTETES_NAVIGATEUR, False), (_ENTETES_NAVIGATEUR, True)]
+
 _VIDES = {"les", "des", "une", "pour", "sur", "avec", "dans", "que", "qui", "est", "sont", "the", "and", "for",
           "with", "what", "which", "are", "quels", "quelles", "quel", "quelle", "faut", "doit", "aux", "par"}
 
@@ -77,6 +104,18 @@ def _texte_docx(data: bytes) -> str:
         return ""
 
 
+def _texte_de_secours(html: str) -> str:
+    """Contenu d'une page dont le HTML livre est vide : metadonnees et blocs JSON."""
+    morceaux: List[str] = []
+    for motif in (r'<meta[^>]+name=["\']description["\'][^>]+content=["\']([^"\']+)',
+                  r'<meta[^>]+property=["\']og:description["\'][^>]+content=["\']([^"\']+)'):
+        morceaux += re.findall(motif, html or "", re.I)
+    for bloc in re.findall(r'<script[^>]+application/ld\+json[^>]*>(.*?)</script>', html or "", re.S | re.I):
+        morceaux.append(re.sub(r"[\{\}\[\]\"]", " ", bloc))
+    texte = " ".join(m.strip() for m in morceaux if m and m.strip())
+    return re.sub(r"\s+", " ", texte).strip()
+
+
 def passages_pertinents(texte: str, question: str, budget: int = 2500) -> str:
     """Garde les phrases qui contiennent les mots de la question (et leur voisinage),
     dans l'ordre du document. Sans correspondance : le debut de la page."""
@@ -106,11 +145,30 @@ def passages_pertinents(texte: str, question: str, budget: int = 2500) -> str:
 
 async def lire_page(url: str, question: str = "", budget: int = 2500) -> Dict[str, Any]:
     """Renvoie {url, titre, type, texte, erreur}. Ne leve jamais."""
+    resp = None
+    erreur_reseau = None
+    for tentative, (entetes, http2) in enumerate(_STRATEGIES):
+        try:
+            async with httpx.AsyncClient(timeout=_DELAI, follow_redirects=True, verify=False,
+                                         http2=http2, headers=entetes) as client:
+                resp = await client.get(url)
+            if resp.status_code == 200 or resp.status_code not in (401, 403, 406, 429, 503):
+                break
+        except ImportError:
+            continue  # http2 demande le paquet h2 : on passe a la strategie suivante
+        except httpx.TimeoutException:
+            erreur_reseau = "délai dépassé"
+            resp = None
+            continue
+        except Exception as exc:
+            erreur_reseau = type(exc).__name__
+            resp = None
+            continue
+    if resp is None:
+        return {"url": url, "erreur": erreur_reseau or "injoignable"}
+    if resp.status_code != 200:
+        return {"url": url, "erreur": f"code {resp.status_code}"}
     try:
-        async with httpx.AsyncClient(timeout=12.0, follow_redirects=True, verify=False, headers=_ENTETES) as client:
-            resp = await client.get(url)
-        if resp.status_code != 200:
-            return {"url": url, "erreur": f"code {resp.status_code}"}
         data = resp.content[:MAX_OCTETS]
         ctype = (resp.headers.get("content-type") or "").lower()
         chemin = url.lower().split("?")[0]
@@ -122,11 +180,14 @@ async def lire_page(url: str, question: str = "", budget: int = 2500) -> Dict[st
         else:
             genre = "html"
             titre, texte = _texte_html(resp.text)
-        if len(texte.strip()) < 60:
+            if len((texte or "").strip()) < 60:
+                # 11/09 : une page entierement construite par du JavaScript (accueil du
+                # BOAMP : 132 caracteres) n'a presque pas de texte dans le HTML livre.
+                # Son contenu est alors dans les metadonnees ou dans un bloc JSON.
+                texte = _texte_de_secours(resp.text) or texte
+        if len((texte or "").strip()) < 60:
             return {"url": url, "type": genre, "erreur": "contenu vide ou non lisible (page dynamique ou document scanné)"}
         return {"url": url, "titre": titre, "type": genre, "texte": passages_pertinents(texte, question, budget)}
-    except httpx.TimeoutException:
-        return {"url": url, "erreur": "délai dépassé"}
     except Exception as exc:
         return {"url": url, "erreur": type(exc).__name__}
 

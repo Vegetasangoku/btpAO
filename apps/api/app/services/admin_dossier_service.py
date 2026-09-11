@@ -12,6 +12,15 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
 
 
+def _tva_depuis_siret(siret) -> str:
+    chiffres = "".join(c for c in str(siret or "") if c.isdigit())
+    if len(chiffres) < 9:
+        return "[À COMPLÉTER : numéro TVA intracommunautaire]"
+    siren = int(chiffres[:9])
+    cle = (12 + 3 * (siren % 97)) % 97
+    return f"FR{cle:02d}{chiffres[:9]}"
+
+
 class AdminDossierService:
     @staticmethod
     def _create_styled_header(doc: docx.Document, title: str, subtitle: str):
@@ -197,7 +206,9 @@ class AdminDossierService:
             "economic_operator": {
                 "name": tenant.get("name", "[À COMPLÉTER : dénomination sociale]"),
                 "siret": tenant.get("siret", "[À COMPLÉTER : numéro SIRET]"),
-                "vat_number": tenant.get("vat_number", f"FR{tenant.get('siret', '000000000')[:9]}" if tenant.get("siret") else "[À COMPLÉTER : numéro TVA intracommunautaire]"),
+                # 11/09 : « FR » + SIREN n'est pas un numero de TVA (il manque la cle a 2
+                # chiffres). Cle officielle : (12 + 3 × (SIREN mod 97)) mod 97.
+                "vat_number": tenant.get("vat_number") or _tva_depuis_siret(tenant.get("siret")),
                 "country": tenant.get("country_code", "FR"),
                 "is_sme": tenant.get("is_sme", None),  # Must be declared by operator
                 "contact": {
@@ -235,6 +246,90 @@ class AdminDossierService:
             ),
             "declaration_status": "draft_requires_human_validation",
         }
+
+
+    def generate_dume_docx(self, tenant: Dict[str, Any], project: Dict[str, Any]) -> bytes:
+        """DUME pré-rempli en Word (11/09). Jusqu'ici le DUME n'existait qu'en JSON, sans
+        aucun moyen de l'obtenir depuis l'interface. Les déclarations sur l'honneur
+        (motifs d'exclusion, critères de sélection) restent volontairement à cocher par
+        le représentant légal : on ne les pré-remplit jamais."""
+        data = self.generate_dume_summary(tenant, project)
+        op, proc = data["economic_operator"], data["procurement_procedure"]
+        doc = docx.Document()
+        self._create_styled_header(
+            doc,
+            title="DUME — DOCUMENT UNIQUE DE MARCHÉ EUROPÉEN",
+            subtitle="Projet pré-rempli à partir de votre dossier — à compléter, vérifier et signer par le représentant légal",
+        )
+        avert = doc.add_paragraph()
+        r = avert.add_run(
+            "À faire valider avant tout dépôt : les déclarations sur l'honneur (partie III) et les critères de "
+            "sélection (partie IV) ne sont jamais pré-remplis ; ils doivent être complétés, vérifiés et signés par "
+            "le représentant légal. Une fausse déclaration engage la responsabilité du signataire (art. L2141-7 CCP)."
+        )
+        r.italic = True
+        r.font.size = Pt(9)
+        r.font.color.rgb = RGBColor(185, 28, 28)
+
+        def ligne(libelle, valeur):
+            p = doc.add_paragraph()
+            p.add_run(f"{libelle} : ").bold = True
+            v = str(valeur) if valeur not in (None, "") else "[à compléter]"
+            run = p.add_run(v)
+            if v.startswith("[") and "compl" in v.lower():
+                run.font.color.rgb = RGBColor(185, 28, 28)
+
+        self._add_section_heading(doc, "PARTIE I — INFORMATIONS SUR LA PROCÉDURE")
+        ligne("Acheteur (pouvoir adjudicateur)", proc.get("buyer_name"))
+        ligne("Référence de la consultation", proc.get("reference_code"))
+        ligne("Objet du marché", proc.get("title"))
+
+        self._add_section_heading(doc, "PARTIE II — INFORMATIONS SUR L'OPÉRATEUR ÉCONOMIQUE")
+        ligne("Dénomination", op.get("name"))
+        ligne("SIRET", op.get("siret"))
+        ligne("N° TVA intracommunautaire", op.get("vat_number"))
+        ligne("Pays", op.get("country"))
+        ligne("Micro, petite ou moyenne entreprise", "☐ Oui   ☐ Non")
+        ligne("Courriel de contact", (op.get("contact") or {}).get("email"))
+        ligne("Téléphone", (op.get("contact") or {}).get("phone"))
+        ligne("Participation en groupement", "☐ Non   ☐ Oui — préciser le rôle et les membres")
+
+        self._add_section_heading(doc, "PARTIE III — MOTIFS D'EXCLUSION (déclaration sur l'honneur)")
+        for libelle in (
+            "Condamnations pénales (participation à une organisation criminelle, corruption, fraude, terrorisme, blanchiment, travail des enfants)",
+            "Paiement des impôts et taxes",
+            "Paiement des cotisations de sécurité sociale",
+            "Faillite, insolvabilité, liquidation, fautes professionnelles graves",
+        ):
+            p = doc.add_paragraph()
+            p.add_run(f"{libelle} — ").bold = True
+            p.add_run("L'opérateur déclare être en situation régulière :  ☐ Oui   ☐ Non")
+
+        self._add_section_heading(doc, "PARTIE IV — CRITÈRES DE SÉLECTION")
+        ligne("Chiffre d'affaires global des 3 derniers exercices", None)
+        ligne("Effectifs moyens annuels et encadrement", None)
+        ligne("Références de travaux similaires (5 dernières années)", None)
+        certifs = data["selection_criteria"].get("quality_assurance_schemes") or []
+        ligne("Certificats et qualifications détenus", ", ".join(certifs) if certifs else None)
+
+        self._add_section_heading(doc, "PARTIE VI — DÉCLARATIONS FINALES")
+        doc.add_paragraph(
+            "Je soussigné(e) déclare formellement que les renseignements fournis dans les parties II à IV "
+            "sont exacts et corrects, et que je suis conscient(e) des conséquences d'une fausse déclaration."
+        )
+        ligne("Nom, qualité du signataire", None)
+        ligne("Date et lieu", None)
+        doc.add_paragraph("Signature :")
+        note = doc.add_paragraph()
+        nr = note.add_run(
+            "Pour un dépôt électronique, ce contenu se reporte dans le service DUME en ligne proposé par le profil "
+            "d'acheteur ou par l'État ; ce document sert de préparation et de trace interne."
+        )
+        nr.italic = True
+        nr.font.size = Pt(9)
+        out = io.BytesIO()
+        doc.save(out)
+        return out.getvalue()
 
 
 admin_dossier_service = AdminDossierService()

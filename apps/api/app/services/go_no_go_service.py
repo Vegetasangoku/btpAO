@@ -121,6 +121,7 @@ class GoNoGoService:
                     title="Exigences & Critères du DCE",
                     status="missing_data",
                     impact="neutral",
+                    code="crit_absents", params={},
                     detail="Aucun critère DCE extrait pour ce dossier. Uploader le Règlement de Consultation (RC) pour une analyse affinée.",
                     recommendation="Uploader le RC et le CCTP dans l'onglet DCE.",
                 )
@@ -137,6 +138,7 @@ class GoNoGoService:
                     title="Exigences & Critères du DCE",
                     status="ok",
                     impact="positive",
+                    code="crit_ok", params={"n": len(criteria), "m": total_mand},
                     detail=f"{len(criteria)} critères extraits du DCE dont {total_mand} exigence(s) obligatoire(s).",
                     recommendation="S'assurer de répondre à 100% des attendus éliminatoires.",
                 )
@@ -168,6 +170,7 @@ class GoNoGoService:
                     title="Qualifications & Assurances Entreprise",
                     status="missing_data",
                     impact="warning",
+                    code="qualif_absentes", params={"quals": quals_label},
                     detail=f"Aucune qualification ou assurance renseignée dans l'espace entreprise ({quals_label}, Décennale).",
                     recommendation=f"Renseigner vos attestations ({quals_label}) et assurances dans l'Espace Entreprise.",
                 )
@@ -183,6 +186,7 @@ class GoNoGoService:
                     title="Qualifications & Assurances Entreprise",
                     status="blocking",
                     impact="critical",
+                    code="qualif_expirees", params={"liste": ", ".join(expired_assets)},
                     detail=f"Qualifications expirées détectées : {', '.join(expired_assets)}. Risque d'irrecevabilité administrative de l'offre.",
                     recommendation="Mettre à jour d'urgence les attestations d'assurance et certifications avant dépôt.",
                 )
@@ -213,6 +217,7 @@ class GoNoGoService:
                         title="Qualifications & Assurances Entreprise",
                         status="blocking",
                         impact="critical",
+                        code="qualif_manquantes", params={"liste": ", ".join(unique_missing)},
                         detail=f"Le DCE requiert les certifications suivantes absentes du dossier entreprise : {', '.join(unique_missing)}.",
                         recommendation="Déposer en groupement momentané d'entreprises (cotraitance) ou sous-traiter le lot concerné.",
                     )
@@ -225,6 +230,7 @@ class GoNoGoService:
                         title="Qualifications & Assurances Entreprise",
                         status="ok",
                         impact="positive",
+                        code="qualif_ok", params={"n": len(company_assets)},
                         detail=f"{len(company_assets)} qualifications, assurances et références valides renseignées.",
                         recommendation="Conformité administrative et technique vérifiée.",
                     )
@@ -241,6 +247,7 @@ class GoNoGoService:
                     title="Délai de Réponse & Charge Équipe",
                     status="missing_data",
                     impact="neutral",
+                    code="delai_absent", params={"charge": active_projects_count},
                     detail=f"Date limite de remise non renseignée sur ce projet. Charge actuelle : {active_projects_count} dossier(s) en cours.",
                     recommendation="Renseigner la date limite de dépôt dans les paramètres du projet.",
                 )
@@ -259,6 +266,7 @@ class GoNoGoService:
                         title="Délai de Réponse & Charge Équipe",
                         status="blocking",
                         impact="critical",
+                        code="delai_intenable", params={"j": max(0, int(days_left)), "charge": active_projects_count},
                         detail=f"Délai d'urgence extrême ({max(0, int(days_left))} jour(s) restant(s)) avec {active_projects_count} dossier(s) en cours en parallèle.",
                         recommendation="Risque élevé de remise d'une offre incomplète. Candidature déconseillée sauf équipe dédiée disponible.",
                     )
@@ -271,6 +279,7 @@ class GoNoGoService:
                         title="Délai de Réponse & Charge Équipe",
                         status="warning",
                         impact="negative",
+                        code="delai_tendu", params={"j": int(days_left), "charge": active_projects_count},
                         detail=f"Délai tendu ({int(days_left)} jours restants) et {active_projects_count} AO en cours sur le tenant.",
                         recommendation="Prioriser la rédaction et mobiliser le conducteur de travaux immédiatement.",
                     )
@@ -283,6 +292,7 @@ class GoNoGoService:
                         title="Délai de Réponse & Charge Équipe",
                         status="ok",
                         impact="positive",
+                        code="delai_ok", params={"j": int(days_left), "charge": active_projects_count},
                         detail=f"Délai confortable ({int(days_left)} jours restants) pour {active_projects_count} dossier(s) actif(s).",
                         recommendation="Calendrier idéal pour peaufiner les mémoires et optimiser le chiffrage.",
                     )
@@ -303,6 +313,7 @@ class GoNoGoService:
                     title="Historique & Taux de Succès Similaires",
                     status="missing_data",
                     impact="neutral",
+                    code="histo_absent", params={"n": total_hist},
                     detail="Historique insuffisant pour ce type de marché (0 marché similaire référencé). Donnée neutre.",
                     recommendation="La constitution de l'historique permettra d'affiner le ciblage prédictif des futurs AO.",
                 )
@@ -316,6 +327,7 @@ class GoNoGoService:
                         title="Historique & Taux de Succès Similaires",
                         status="ok",
                         impact="positive",
+                        code="histo_ok", params={"taux": round(win_rate), "n": total_hist, "g": won_count},
                         detail=f"Taux de succès historique de {win_rate:.0f}% sur {total_hist} marchés comparables ({won_count} remportés).",
                         recommendation="Profil de marché aligné avec vos points forts historiques.",
                     )
@@ -328,6 +340,7 @@ class GoNoGoService:
                         title="Historique & Taux de Succès Similaires",
                         status="warning",
                         impact="negative",
+                        code="histo_faible", params={"taux": round(win_rate), "n": total_hist},
                         detail=f"Taux de succès historique modéré ({win_rate:.0f}% sur {total_hist} marchés).",
                         recommendation="Renforcer l'effort sur la note méthodologique pour se démarquer.",
                     )
@@ -342,7 +355,9 @@ class GoNoGoService:
         # ---------------------------------------------------------------------
         # En deçà de ce taux de couverture, aucune recommandation GO n'est délivrée :
         # la conclusion est suspendue et présentée comme telle (voir plus bas).
-        COUVERTURE_MINIMALE_POUR_UN_GO = 50.0
+        # 11/09 : 50 % laissait passer « GO CONFIRMÉ 95/100 » avec 2 facteurs sur 4
+        # sans aucune donnee (dont les criteres du DCE). Il en faut au moins 3 sur 4.
+        from app.services.go_no_go_i18n import COUVERTURE_MINIMALE_POUR_UN_GO
         real_data_factors = sum(1 for f in factors if f.status != "missing_data")
         has_sufficient_data = real_data_factors >= 1
         facteurs_sans_donnee = [f.title for f in factors if f.status == "missing_data"]

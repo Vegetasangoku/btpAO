@@ -261,7 +261,7 @@ export interface PhaseChantier {
 }
 
 export interface ProjectDecisionsForm {
-  delai_mois: number;
+  delai_mois?: number;
   date_demarrage?: string;
   materiel_principal: string;
   travail_de_nuit: boolean;
@@ -328,13 +328,16 @@ export interface GoNoGoFactor {
   impact: 'positive' | 'neutral' | 'negative' | 'critical';
   detail: string;
   recommendation?: string;
+  code?: string;
+  lien?: string | null;
+  action?: string | null;
 }
 
 export interface GoNoGoAnalysis {
   id: string;
   tenant_id: string;
   project_id: string;
-  recommendation: 'GO' | 'RESERVES' | 'NO-GO' | 'RÉSERVES';
+  recommendation: 'GO' | 'RESERVES' | 'NO-GO' | 'NO_GO' | 'RÉSERVES';
   score: number;
   summary: string;
   factors: GoNoGoFactor[];
@@ -345,6 +348,11 @@ export interface GoNoGoAnalysis {
   evaluated_by?: string;
   created_at: string;
   updated_at: string;
+  // 11/09 : pourquoi cette conclusion, et quoi faire (langue de l'interface).
+  etat?: 'go' | 'no_go' | 'suspendue' | 'reserves';
+  raisons?: string[];
+  actions?: { texte: string; detail?: string | null; lien?: string | null }[];
+  langue?: string;
 }
 
 export interface PlatformLLMKeys {
@@ -488,12 +496,19 @@ export interface GanttDetailReport {
   message?: string;
 }
 
+export interface TransparenceRapport {
+  items: { domaine: string; gravite: 'a_completer' | 'a_verifier' | 'info'; fait: string; parce_que: string; lien: string | null; lien_libelle: string | null }[];
+  resume: { a_completer: number; a_verifier: number; info: number };
+}
+
 export interface PiecesRapport {
   pays: string;
   pays_nom: string;
   portails: string[];
   dce_analyse: boolean;
   pieces_du_dce: number;
+  rc_absent?: boolean;
+  lecture_simple?: boolean;
   avertissement: string | null;
   resume: { fourni: number; generable: number; manquant: number };
   pieces: {

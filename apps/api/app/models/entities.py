@@ -258,7 +258,13 @@ class DCECriterionEntity(Base):
     description = Column(Text, nullable=True)
     key_expectations = Column(JSONB, default=list)
     required_evidence = Column(JSONB, default=list)
-    mandatory = Column(String, default="true")
+    # 11/09 : la colonne est un BOOLEEN en base ; declaree en texte ici, chaque
+    # insertion de criteres echouait (« mandatory is of type boolean »), et l'analyse
+    # d'un RC restait « en cours » pour toujours.
+    mandatory = Column(Boolean, default=True)
+    # 11/09 : d'ou vient le critere -- nom du fichier lu, ou « gabarit: <raison> »
+    # quand l'extraction a echoue et que le bareme generique a ete pose a la place.
+    extracted_from = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
 
 

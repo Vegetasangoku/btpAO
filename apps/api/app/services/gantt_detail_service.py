@@ -491,6 +491,12 @@ async def detailler_planning(db: AsyncSession, tenant_id: uuid.UUID, project: Pr
 
     db.add_all(nouvelles)
     rapport["created"] = len(nouvelles)
+    # Trace pour « Ce que l'application a fait à votre place » (transparence_service).
+    from datetime import datetime as _dt
+    meta = dict(project.metadata_json or {})
+    meta["gantt_detail"] = {"origine": rapport["origine"], "taches": rapport["taches"],
+                            "sous_taches": rapport["sous_taches"], "le": _dt.utcnow().isoformat()}
+    project.metadata_json = meta
     if not nouvelles:
         rapport["ajustements"].append("Aucune tâche exploitable n'a pu être produite.")
     # Limiter la liste affichee : au-dela, c'est du bruit.

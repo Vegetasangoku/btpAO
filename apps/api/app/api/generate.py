@@ -499,6 +499,94 @@ async def update_section_content(
     )
 
 
+@router.get("/sections/{project_id}/langues")
+async def langues_des_sections(
+    project_id: str,
+    current_user: CurrentTenantUser = Depends(get_current_tenant_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Langue réellement écrite de chaque section, face à la langue demandée du mémoire (11/09)."""
+    from app.services.traduction_service import langue_du_texte
+    try:
+        p_uuid = uuid.UUID(project_id)
+        t_uuid = uuid.UUID(current_user.tenant_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Identifiant invalide")
+
+    projet = (await db.execute(select(Project).where(Project.id == p_uuid, Project.tenant_id == t_uuid))).scalar_one_or_none()
+    if not projet:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dossier introuvable")
+    langue_doc = (projet.output_language or "fr")[:2]
+
+    sections = (await db.execute(select(GeneratedSection).where(
+        GeneratedSection.project_id == p_uuid, GeneratedSection.tenant_id == t_uuid,
+    ).order_by(GeneratedSection.order_index))).scalars().all()
+
+    lignes = []
+    for sec in sections:
+        if sec.status == "failed" or not sec.content_html:
+            continue
+        lg = langue_du_texte(sec.content_html)
+        lignes.append({
+            "id": str(sec.id),
+            "titre": sec.title,
+            "langue": lg,
+            "a_traduire": bool(lg and lg != langue_doc),
+        })
+    return {"langue_document": langue_doc, "sections": lignes,
+            "a_traduire": sum(1 for l in lignes if l["a_traduire"])}
+
+
+@router.post("/section/{section_id}/traduire")
+async def traduire_section(
+    section_id: str,
+    current_user: CurrentTenantUser = Depends(get_current_tenant_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Traduit une section dans la langue demandée du mémoire, en gardant l'original (11/09)."""
+    from app.services.traduction_service import langue_du_texte, traduire_html
+    try:
+        s_uuid = uuid.UUID(section_id)
+        t_uuid = uuid.UUID(current_user.tenant_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Identifiant invalide")
+
+    section = (await db.execute(select(GeneratedSection).where(
+        GeneratedSection.id == s_uuid, GeneratedSection.tenant_id == t_uuid))).scalar_one_or_none()
+    if not section:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Section introuvable")
+    projet = (await db.execute(select(Project).where(Project.id == section.project_id))).scalar_one_or_none()
+    cible = (projet.output_language or "fr")[:2] if projet else "fr"
+    depart = langue_du_texte(section.content_html)
+    if depart == cible:
+        return {"section_id": section_id, "traduite": False, "langue": cible, "motif": "déjà dans la bonne langue"}
+
+    resultat = await traduire_html(db, t_uuid, section.content_html or "", cible, section.title or "")
+    if not resultat.get("ok"):
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
+                            detail=f"Traduction impossible : {resultat.get('motif')}")
+
+    # Archive la version d'origine, comme une modification manuelle.
+    dernier = (await db.execute(select(func.max(GeneratedSectionVersion.version_number)).where(
+        GeneratedSectionVersion.section_id == s_uuid, GeneratedSectionVersion.tenant_id == t_uuid))).scalar() or 0
+    db.add(GeneratedSectionVersion(
+        id=uuid.uuid4(), tenant_id=t_uuid, project_id=section.project_id, section_id=section.id,
+        version_number=dernier + 1, title=section.title, content_html=section.content_html,
+        content_json=section.content_json or {}, compliance_score=section.compliance_score,
+        compliance_notes=section.compliance_notes, status=section.status,
+        created_by=uuid.UUID(current_user.user_id) if current_user.user_id else None,
+        created_at=datetime.utcnow(),
+        change_summary=f"Version avant traduction en {cible} (texte d'origine en {depart or '?'})",
+    ))
+    section.content_html = resultat["html"]
+    if resultat.get("titre"):
+        section.title = resultat["titre"]
+    section.content_json = {**(section.content_json or {}), "langue": cible, "traduit_depuis": depart}
+    section.updated_at = datetime.utcnow()
+    await db.flush()
+    return {"section_id": section_id, "traduite": True, "langue": cible, "depuis": depart, "titre": section.title}
+
+
 @router.get("/section/{section_id}/history", response_model=List[GeneratedSectionVersionOut])
 async def get_section_version_history(
     section_id: str,

@@ -113,11 +113,12 @@ class DiagramService:
         accent = brand_color or "#0284c7"
         accent_text = _readable_text_color(accent)
         if not cadres:
+            # 11/09 : une equipe fictive (« Jean-Marc Alibert »...) etait dessinee quand
+            # aucune n'etait declaree. On dessine les roles, noms laisses a completer.
             cadres = [
-                {"nom": "Jean-Marc Alibert", "role": "Directeur de Projet & Conducteur Principal", "experience_ans": 15, "presence_hebdo_pct": 100},
-                {"nom": "Sébastien Vasseur", "role": "Chef de Chantier Gros Œuvre", "experience_ans": 12, "presence_hebdo_pct": 100},
-                {"nom": "Chloé Fontaine", "role": "Ingénieur QSE & Environnement", "experience_ans": 7, "presence_hebdo_pct": 50},
-                {"nom": "Tarek Benali", "role": "Chef d'Équipe Coffrage / Banches", "experience_ans": 9, "presence_hebdo_pct": 100}
+                {"nom": "[à compléter]", "role": "Conducteur de travaux principal"},
+                {"nom": "[à compléter]", "role": "Chef de chantier"},
+                {"nom": "[à compléter]", "role": "Responsable QSE"},
             ]
 
         fig, ax = plt.subplots(figsize=(12, 6.5), dpi=300)
@@ -154,7 +155,7 @@ class DiagramService:
         ax.add_patch(pm_box)
         ax.text(50, 58, f"{lead.get('role', 'Conducteur Principal').upper()}", ha="center", va="center",
                 fontsize=10, fontweight="bold", color=accent_text)
-        ax.text(50, 53.5, f"{lead.get('nom', 'Jean-Marc Alibert')} ({lead.get('experience_ans', 15)} ans exp.) - Présence : 100%",
+        ax.text(50, 53.5, (f"{lead.get('nom') or '[à compléter]'}" + (f" ({lead['experience_ans']} ans exp.)" if lead.get('experience_ans') else "") + (f" - Présence : {lead['presence_hebdo_pct']}%" if lead.get('presence_hebdo_pct') else "")),
                 ha="center", va="center", fontsize=8.5, color=accent_text)
 
         # Connecting vertical branch
@@ -189,7 +190,7 @@ class DiagramService:
                     fontsize=8.5, fontweight="bold", color="#0f172a")
             ax.text(x, 23.5, cadre.get("nom", "Nom"), ha="center", va="center",
                     fontsize=8, fontweight="semibold", color="#334155")
-            ax.text(x, 20.0, f"Présence : {cadre.get('presence_hebdo_pct', 100)}% | {cadre.get('experience_ans', 10)} ans exp.",
+            ax.text(x, 20.0, " | ".join(x for x in ((f"Présence : {cadre['presence_hebdo_pct']}%" if cadre.get('presence_hebdo_pct') else ""), (f"{cadre['experience_ans']} ans exp." if cadre.get('experience_ans') else "")) if x),
                     ha="center", va="center", fontsize=7.5, color="#64748b")
 
         # Bottom Level: Production Teams Box
@@ -197,7 +198,7 @@ class DiagramService:
                                           facecolor="#f8fafc", edgecolor="#94a3b8", linewidth=1.2, linestyle="--",
                                           mutation_aspect=mutation_aspect)
         ax.add_patch(prod_box)
-        ax.text(50, 7, "ÉQUIPES DE PRODUCTION GROS ŒUVRE & CORPS D'ÉTAT SECONDAIRES (18 COMPAGNONS & CHEFS D'ÉQUIPE)",
+        ax.text(50, 7, "ÉQUIPES DE PRODUCTION & CHEFS D'ÉQUIPE",
                 ha="center", va="center", fontsize=8, fontweight="bold", color="#475569")
 
         plt.tight_layout()

@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -628,6 +628,10 @@ async def record_project_outcome(
     project.outcome_status = outcome_clean
     if outcome_clean in ("won", "lost"):
         project.status = outcome_clean
+    elif project.status in ("won", "lost"):
+        # 11/09 : repasser « en attente » laissait le statut « won » et le dossier
+        # continuait de compter dans l'historique du Go/No-Go.
+        project.status = "in_progress"
     project.outcome_recorded_at = now
     project.outcome_recorded_by = u_uuid
     project.updated_at = now
@@ -635,7 +639,9 @@ async def record_project_outcome(
     feedback_dict = payload.buyer_feedback.model_dump() if payload.buyer_feedback else {}
     if payload.notes:
         feedback_dict["notes"] = payload.notes
-    project.buyer_feedback = feedback_dict
+    # 11/09 : changer seulement l'issue (liste des dossiers) effacait le retour de l'acheteur.
+    if feedback_dict:
+        project.buyer_feedback = feedback_dict
 
     # Automatically extract continuous learnings into tenant memory
     if feedback_dict:
@@ -1412,3 +1418,25 @@ async def override_project_country(
     await db.commit()
 
     return _country_payload(project, tenant_country, available)
+
+
+
+@router.get("/{project_id}/transparence")
+async def transparence_projet(
+    project_id: str,
+    request: Request,
+    current_user: CurrentTenantUser = Depends(get_current_tenant_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Ce que l'application a fait à la place de l'utilisateur, faute de données (11/09)."""
+    from app.services.transparence_service import rapport_transparence
+    try:
+        p_uuid = uuid.UUID(project_id)
+        t_uuid = uuid.UUID(current_user.tenant_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Identifiant invalide")
+    project = (await db.execute(select(Project).where(Project.id == p_uuid, Project.tenant_id == t_uuid))).scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Projet introuvable")
+    langue = request.headers.get("x-ui-language") or request.query_params.get("lang") or "fr"
+    return await rapport_transparence(db, t_uuid, project, langue)

@@ -66,7 +66,12 @@ def parse_dce_task(
             doc = res.scalar_one_or_none()
 
             if not doc:
-                raise ValueError(f"Document {document_id} not found for tenant {tenant_id}")
+                # 11/09 : l'API envoie la tache AVANT que sa transaction ne soit validee
+                # (la ligne n'existe pas encore pour le worker). Un worker rapide la
+                # cherchait, ne la trouvait pas et abandonnait : le document restait
+                # « en cours d'analyse » pour toujours (constate sur un RC de test). On
+                # reessaie donc quelques secondes plus tard au lieu d'abandonner.
+                return "RETRY_NOT_FOUND"
 
             try:
                 # 2. Download file from storage
@@ -136,21 +141,40 @@ def parse_dce_task(
                 )
                 if is_rc_doc:
                     try:
-                        existing_crit_stmt = select(DCECriterionEntity.id).where(
+                        # 11/09 : un bareme GENERIQUE (pose quand une extraction avait
+                        # echoue) bloquait toute nouvelle lecture du RC. On le remplace ;
+                        # des criteres vraiment lus, eux, restent intacts.
+                        from app.services.criteria_extraction_service import FALLBACK_CRITERIA
+                        _titres_gabarit = {c[0] for c in FALLBACK_CRITERIA}
+                        existants = (await db.execute(select(DCECriterionEntity).where(
                             DCECriterionEntity.project_id == proj_uuid,
                             DCECriterionEntity.tenant_id == tenant_uuid,
-                        ).limit(1)
-                        existing_crit_res = await db.execute(existing_crit_stmt)
-                        if not existing_crit_res.scalar_one_or_none():
+                        ))).scalars().all()
+                        gabarit_seul = bool(existants) and all(
+                            (c.extracted_from or "").startswith("gabarit") or c.criterion_title in _titres_gabarit
+                            for c in existants)
+                        if gabarit_seul:
+                            for c in existants:
+                                await db.delete(c)
+                        if not existants or gabarit_seul:
                             from app.services.criteria_extraction_service import extract_criteria_from_text
                             criteria_rows = await extract_criteria_from_text(
                                 db=db,
                                 tenant_id=tenant_uuid,
                                 project_id=proj_uuid,
-                                raw_text=ocr_result.get("raw_text", ""),
+                                # 11/09 : l'OCR renvoie « full_text », pas « raw_text » :
+                                # le texte arrivait VIDE et TOUS les RC recevaient le
+                                # bareme generique 25/35/25/15 au lieu de leurs criteres.
+                                raw_text=(ocr_result.get("full_text") or ocr_result.get("raw_text")
+                                          or "\n".join(p.get("text", "") for p in pages)),
                                 filename=doc.filename or "",
                             )
-                            db.add_all(criteria_rows)
+                            # 11/09 : dans un point de sauvegarde. Une insertion de
+                            # criteres en echec cassait toute la session et faisait
+                            # perdre l'indexation de la piece avec elle.
+                            async with db.begin_nested():
+                                db.add_all(criteria_rows)
+                                await db.flush()
                     except Exception as crit_exc:
                         logger.warning("[parse_dce_task] Extraction critères non bloquante en échec: %s", crit_exc)
 
@@ -171,15 +195,32 @@ def parse_dce_task(
                 }
 
             except Exception as e:
+                # 11/09 : apres une erreur SQL la session est inutilisable ; le commit
+                # du statut « failed » echouait en silence et la piece restait « en
+                # cours d'analyse » pour toujours. On annule, puis on ecrit l'echec
+                # dans une session neuve, avec le vrai motif.
                 try:
-                    doc.status = "failed"
-                    doc.metadata_json = {"error": f"Erreur lors de l'analyse OCR / RAG : {str(e)}"}
-                    await db.commit()
+                    await db.rollback()
                 except Exception:
                     pass
+                try:
+                    async with get_worker_db_session(tenant_id) as db_echec:
+                        d_echec = await db_echec.get(DCEDocument, doc_uuid)
+                        if d_echec is not None:
+                            d_echec.ocr_status = "failed"
+                            d_echec.raw_metadata = {"error": f"Erreur lors de l'analyse OCR / RAG : {str(e)[:500]}"}
+                            await db_echec.commit()
+                except Exception as e_statut:
+                    logger.error("[parse_dce_task] statut 'failed' non enregistre : %s", e_statut)
                 raise e
 
-    return asyncio.run(_async_parse())
+    resultat = asyncio.run(_async_parse())
+    if resultat == "RETRY_NOT_FOUND":
+        # 6 essais espaces de 3 s : largement de quoi laisser la requete d'envoi se terminer.
+        if self.request.retries < 6:
+            raise self.retry(countdown=3, max_retries=6)
+        raise ValueError(f"Document {document_id} introuvable pour le tenant {tenant_id} apres 6 essais")
+    return resultat
 
 
 # ---------------------------------------------------------------------------
@@ -994,7 +1035,9 @@ def build_export_doc_task(
             job_res = await db.execute(job_stmt)
             job = job_res.scalar_one_or_none()
             if not job:
-                raise ValueError(f"ExportJob {export_job_id} not found for tenant {tenant_id}")
+                # 11/09 : meme course que parse_dce_task -- la tache peut arriver avant
+                # la validation de la transaction de l'API. On reessaie.
+                return "RETRY_NOT_FOUND"
 
             try:
                 # 3. Fetch Project & Sections
@@ -1187,7 +1230,12 @@ def build_export_doc_task(
                 raise e
 
 
-    return asyncio.run(_async_export())
+    resultat = asyncio.run(_async_export())
+    if resultat == "RETRY_NOT_FOUND":
+        if self.request.retries < 6:
+            raise self.retry(countdown=3, max_retries=6)
+        raise ValueError(f"ExportJob {export_job_id} introuvable apres 6 essais")
+    return resultat
 
 
 @celery_app.task(name="tasks.purge_expired_accounts_task")

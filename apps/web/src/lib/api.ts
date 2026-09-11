@@ -26,6 +26,7 @@ import {
   GanttDetailReport,
   CadreRapport,
   PiecesRapport,
+  TransparenceRapport,
   OrganigrammeNode,
   ProjectCountryState,
 } from './types';
@@ -150,6 +151,11 @@ async function fetcher<T>(endpoint: string, options: RequestInit = {}): Promise<
 
 
 
+  // 11/09 : langue de l'interface transmise a l'API, pour les messages qu'elle
+  // redige elle-meme (recapitulatif « ce que l'application a fait », etc.).
+  if (typeof window !== 'undefined' && !headers.has('X-UI-Language')) {
+    try { headers.set('X-UI-Language', localStorage.getItem('btp_language') || 'fr'); } catch { /* stockage indisponible */ }
+  }
   if (!headers.has('Content-Type') && !(options.body instanceof FormData)) {
     headers.set('Content-Type', 'application/json');
   }
@@ -229,6 +235,7 @@ export async function postFormForBlob(path: string, form: FormData): Promise<{ b
 
 async function authHeadersForBlob(): Promise<Headers> {
   const headers = new Headers();
+  try { headers.set('X-UI-Language', localStorage.getItem('btp_language') || 'fr'); } catch { /* */ }
   try {
     const { data } = await supabase.auth.getSession();
     if (data?.session?.access_token) {
@@ -347,6 +354,9 @@ export const api = {
   getProject: (id: string) => fetcher<Project>(`/projects/${id}`),
   createProject: (data: Partial<Project>) =>
     fetcher<Project>('/projects', { method: 'POST', body: JSON.stringify(data) }),
+  // 11/09 : issue du marché (gagné / perdu…) -- nourrit l'historique du Go/No-Go.
+  recordOutcome: (id: string, outcome_status: string) =>
+    fetcher<Project>(`/projects/${id}/outcome`, { method: 'POST', body: JSON.stringify({ outcome_status }) }),
   updateProject: (id: string, data: Partial<Project>) =>
     fetcher<Project>(`/projects/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
 
@@ -365,6 +375,11 @@ export const api = {
       exploitable: boolean;
       avertissement?: string | null;
     }>(`/dce/documents/${projectId}`),
+  // 11/09 : analyse immediate dans l'API, sans dependre du worker.
+  analyserDceMaintenant: (documentId: string) =>
+    fetcher<{ document_id: string; statut: string | null; fragments: number; criteres: number; erreur?: string | null }>(
+      `/dce/documents/${documentId}/analyser-maintenant`, { method: 'POST' },
+    ),
   reanalyserDceDocument: (documentId: string) =>
     fetcher<{ relance: boolean; document_id: string; filename: string }>(
       `/dce/documents/${documentId}/reanalyser`, { method: 'POST' },
@@ -405,6 +420,16 @@ export const api = {
     }>('/billing/subscription'),
 
   getPlans: () => fetcher<any[]>('/billing/plans'),
+
+  // 11/09 : langue réellement écrite des sections + traduction dans la langue du mémoire.
+  getLanguesSections: (projectId: string) =>
+    fetcher<{ langue_document: string; a_traduire: number; sections: { id: string; titre: string; langue: string | null; a_traduire: boolean }[] }>(
+      `/generate/sections/${projectId}/langues`,
+    ),
+  traduireSection: (sectionId: string) =>
+    fetcher<{ section_id: string; traduite: boolean; langue: string; depuis?: string | null; titre?: string }>(
+      `/generate/section/${sectionId}/traduire`, { method: 'POST' },
+    ),
 
   // Decisions Form
   getDecisions: (projectId: string) =>
@@ -551,6 +576,8 @@ export const api = {
     fetcher<{ settings: GanttSettings; palettes: Record<string, string[]>; brand_color: string | null; projet_personnalise: boolean }>(
       `/visuals/gantt-settings/${projectId}`
     ),
+  getTransparence: (projectId: string) =>
+    fetcher<TransparenceRapport>(`/projects/${projectId}/transparence`),
   verifierPieces: (projectId: string) =>
     fetcher<PiecesRapport>(`/dossiers/${projectId}/pieces`, { method: 'POST' }),
   analyserCadreAcheteur: (projectId: string, fichier: File) => {

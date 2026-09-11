@@ -19,10 +19,13 @@ import {
   Sparkles,
   Calculator,
 } from 'lucide-react';
-import { Project } from '@/lib/types';
+import { GoNoGoAnalysis, Project } from '@/lib/types';
 import { api } from '@/lib/api';
 import { useTranslation } from '@/components/i18n-provider';
 import { ProjectCountryBanner } from '@/components/projects/project-country-banner';
+import { TransparenceCard } from '@/components/export/transparence-card';
+import { ProjectInfoCard } from '@/components/projects/project-info-card';
+import { etatGoNoGo, useLibelleEtat } from '@/components/gonogo/gonogo-explication';
 
 const PIPELINE_STEPS = [
   { key: 'dce', labelKey: 'projects.hub.step1_label', icon: UploadCloud, descKey: 'projects.hub.step1_desc' },
@@ -34,11 +37,18 @@ const PIPELINE_STEPS = [
 ] as const;
 
 export default function ProjectHubPage() {
-  const { t } = useTranslation();
+  const { t, language } = useTranslation();
+  const libelleEtat = useLibelleEtat();
   const params = useParams();
   const projectId = params.id as string;
   const [project, setProject] = useState<Project | null>(null);
   const [loading, setLoading] = useState(true);
+
+  // 11/09 : Go/No-Go relu (recalculé, dans la langue de l'interface) pour le badge.
+  const [gng, setGng] = useState<GoNoGoAnalysis | null>(null);
+  useEffect(() => {
+    api.getGoNoGo(projectId).then(setGng).catch(() => undefined);
+  }, [projectId, language]);
 
   useEffect(() => {
     api
@@ -84,18 +94,21 @@ export default function ProjectHubPage() {
           <span className="badge-pill-slate font-mono text-[9px]">
             {project.reference_code || 'REF-AO'}
           </span>
-          {project.go_no_go && project.go_no_go.has_sufficient_data !== false && (
-            <span
+          {gng && (
+            <Link
+              href={`/projects/${projectId}/export`}
               className={`badge-pill font-mono text-[9px] ${
-                project.go_no_go.recommendation === 'GO'
+                etatGoNoGo(gng) === 'go'
                   ? 'badge-pill-emerald'
-                  : project.go_no_go.recommendation === 'RESERVES' || project.go_no_go.recommendation === 'RÉSERVES'
-                  ? 'bg-hl/10 text-hl border border-hl/20'
-                  : 'badge-pill-red'
+                  : etatGoNoGo(gng) === 'no_go'
+                  ? 'badge-pill-red'
+                  : etatGoNoGo(gng) === 'suspendue'
+                  ? 'badge-pill-slate'
+                  : 'bg-hl/10 text-hl border border-hl/20'
               }`}
             >
-              {t('projects.hub.go_no_go_score', { score: String(Math.round(project.go_no_go.score)), recommendation: project.go_no_go.recommendation })}
-            </span>
+              {t('projects.hub.go_no_go_score', { score: String(Math.round(gng.score)), recommendation: libelleEtat(etatGoNoGo(gng)) })}
+            </Link>
           )}
           <span className="badge-pill-slate text-[9px]">
             {t('projects.hub.badge_active')}
@@ -127,6 +140,12 @@ export default function ProjectHubPage() {
             le contenu genere en aval (normes, sources officielles, qualifications). */}
         <ProjectCountryBanner projectId={projectId} />
       </div>
+
+      {/* Ce que l'application a fait à votre place (11/09), replié ici, détaillé sur l'export. */}
+      <TransparenceCard projectId={projectId} compact />
+
+      {/* Informations du marché, modifiables (11/09). */}
+      <ProjectInfoCard project={project} onSaved={setProject} />
 
       {/* Pipeline Steps Cards */}
       <div className="space-y-3">

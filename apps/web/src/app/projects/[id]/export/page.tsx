@@ -39,13 +39,16 @@ import { Project, SuggestedTemplate, GoNoGoAnalysis, GeneratedSection, ExportJob
 import { Bascule } from '@/components/ui/bascule';
 import { CadreAcheteurCard } from '@/components/export/cadre-acheteur-card';
 import { PiecesCard } from '@/components/export/pieces-card';
+import { GoNoGoExplication } from '@/components/gonogo/gonogo-explication';
+import { TransparenceCard } from '@/components/export/transparence-card';
+import { TraductionCard } from '@/components/export/traduction-card';
 
 const MANDATORY_SECTIONS = MEMO_SECTIONS;
 
 export default function ExportPage() {
   const params = useParams();
   const projectId = params.id as string;
-  const { t } = useTranslation();
+  const { t, language } = useTranslation();
 
   // Project & Context Data
   const [project, setProject] = useState<Project | null>(null);
@@ -130,6 +133,12 @@ export default function ExportPage() {
       loadInitialData();
     }
   }, [projectId]);
+
+  // 11/09 : le Go/No-Go est rédigé par le serveur dans la langue de l'interface.
+  useEffect(() => {
+    if (!projectId) return;
+    api.getGoNoGo(projectId).then(setGonogo).catch(() => undefined);
+  }, [projectId, language]);
 
   async function handleRunGoNoGo() {
     setCalculatingGoNoGo(true);
@@ -247,9 +256,13 @@ export default function ExportPage() {
 
   // Go/No-Go Score color and label helpers
   const score = gonogo ? Math.round(gonogo.score) : null;
-  const isGo = gonogo?.recommendation === 'GO';
-  const isReserves = gonogo?.recommendation === 'RESERVES' || gonogo?.recommendation === 'RÉSERVES';
-  const isNoGo = gonogo?.recommendation === 'NO-GO';
+  // 11/09 : l'état vient du serveur (go / no_go / suspendue / reserves). « Suspendue »
+  // n'est ni un GO ni un NO-GO : il manque des données pour conclure.
+  const etat = gonogo?.etat
+    || (gonogo?.recommendation === 'GO' ? 'go' : gonogo?.recommendation === 'NO_GO' || gonogo?.recommendation === 'NO-GO' ? 'no_go' : 'reserves');
+  const isGo = etat === 'go';
+  const isReserves = etat === 'reserves' || etat === 'suspendue';
+  const isNoGo = etat === 'no_go';
   // Un dossier sans RC n'a AUCUN critère éliminatoire extrait : afficher alors
   // « 100 % des critères validés » revient à valider le vide. Troisième état
   // nécessaire : « on ne sait pas », visuellement distinct du vert et du rouge.
@@ -321,6 +334,12 @@ export default function ExportPage() {
         </div>
       </div>
 
+      {/* Ce que l'application a fait à votre place, faute de données (11/09). */}
+      <TransparenceCard projectId={projectId} />
+
+      {/* Texte déjà rédigé dans une autre langue que celle demandée (11/09). */}
+      <TraductionCard projectId={projectId} />
+
       {/* Grid: Go/No-Go Decision + Sections Status */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Card 1 & 2: Go/No-Go Decision Matrix (2 Cols) */}
@@ -356,20 +375,26 @@ export default function ExportPage() {
                       className={`text-xs font-bold uppercase tracking-wider px-3 py-1 rounded-full border ${
                         isGo
                           ? 'bg-positive/15 text-positive border-positive/40'
+                          : etat === 'suspendue'
+                          ? 'bg-sunken text-muted-foreground border-line'
                           : isReserves
                           ? 'bg-hl/15 text-hl border-hl/40'
                           : 'bg-danger/15 text-danger border-danger/40'
                       }`}
                     >
-                      {gonogo.recommendation === 'GO'
+                      {isGo
                         ? t('projects.export.gonogo_go')
+                        : etat === 'suspendue'
+                        ? t('projects.export.gonogo_suspendue')
                         : isReserves
                         ? t('projects.export.gonogo_reserves')
                         : t('projects.export.gonogo_nogo')}
                     </span>
-                    <span className="text-xs font-mono font-bold text-slate-800 dark:text-white">
-                      {t('projects.export.gonogo_score_label', { score: String(score) })}
-                    </span>
+                    {etat !== 'suspendue' && (
+                      <span className="text-xs font-mono font-bold text-slate-800 dark:text-white">
+                        {t('projects.export.gonogo_score_label', { score: String(score) })}
+                      </span>
+                    )}
                   </div>
                   <p className="text-xs text-slate-600 dark:text-zinc-300 pt-1 leading-relaxed">{gonogo.summary}</p>
                 </div>
@@ -377,13 +402,18 @@ export default function ExportPage() {
                 {/* Score Circular / Progress Badge */}
                 <div className="shrink-0 flex flex-col items-center justify-center p-3 rounded-xl bg-card border border-line text-center min-w-[90px] shadow-xs">
                   <span className={`text-2xl font-bold font-mono ${
-                    (score || 0) >= 70 ? 'text-positive' : (score || 0) >= 50 ? 'text-hl' : 'text-danger'
+                    etat === 'suspendue' ? 'text-muted-foreground' : (score || 0) >= 70 ? 'text-positive' : (score || 0) >= 50 ? 'text-hl' : 'text-danger'
                   }`}>
                     {score}%
                   </span>
-                  <span className="text-[10px] text-muted-foreground uppercase font-bold tracking-wider">{t('projects.export.ai_index')}</span>
+                  <span className="text-[10px] text-muted-foreground uppercase font-bold tracking-wider">
+                    {etat === 'suspendue' ? t('projects.export.score_indicatif') : t('projects.export.ai_index')}
+                  </span>
                 </div>
               </div>
+
+              {/* 11/09 : pourquoi cette conclusion, et quoi faire pour la débloquer. */}
+              <GoNoGoExplication analysis={gonogo} />
 
               {/* Factors Highlights */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">

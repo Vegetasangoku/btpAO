@@ -46,9 +46,9 @@ class ExporterService:
             "unit_mois": "mois",
             "row_budget": "Budget prévisionnel des travaux :",
             "row_materiel": "Matériel lourd principal :",
-            "default_materiel": "Grue Potain 50m",
-            "row_dechets": "Taux de valorisation déchets BTP :",
-            "val_dechets": "88% en filières locales agréées (<15 km)",
+            "a_completer": "[à compléter]",
+            "unit_ht": "€ HT",
+            "row_dechets": "Gestion des déchets de chantier :",
             "toc_heading": "Sommaire du Mémoire Technique",
             "missing_sections_warning": "⚠️ Sections requises par l'appel d'offres, absentes de la structure du template client d'origine (ajoutées automatiquement ci-dessous, à vérifier) :",
             "figure1_caption": "\nFigure 1 : Organigramme d'Encadrement Chantier",
@@ -73,9 +73,9 @@ class ExporterService:
             "unit_mois": "months",
             "row_budget": "Estimated works budget:",
             "row_materiel": "Main heavy equipment:",
-            "default_materiel": "Potain 50m tower crane",
-            "row_dechets": "Construction waste recovery rate:",
-            "val_dechets": "88% through approved local channels (<15 km)",
+            "a_completer": "[to be completed]",
+            "unit_ht": "€ excl. VAT",
+            "row_dechets": "Site waste management:",
             "toc_heading": "Table of Contents",
             "missing_sections_warning": "⚠️ Sections required by the tender, absent from the original client template structure (automatically added below, to be reviewed):",
             "figure1_caption": "\nFigure 1: Site Supervision Organization Chart",
@@ -100,9 +100,9 @@ class ExporterService:
             "unit_mois": "أشهر",
             "row_budget": "الميزانية التقديرية للأشغال:",
             "row_materiel": "المعدات الثقيلة الرئيسية:",
-            "default_materiel": "رافعة برجية Potain بارتفاع 50 م",
-            "row_dechets": "معدل تثمين نفايات البناء:",
-            "val_dechets": "88% عبر قنوات محلية معتمدة (أقل من 15 كم)",
+            "a_completer": "[يُستكمل]",
+            "unit_ht": "€ دون احتساب الضريبة",
+            "row_dechets": "إدارة نفايات الورشة:",
             "toc_heading": "فهرس المذكرة الفنية",
             "missing_sections_warning": "⚠️ أقسام مطلوبة في طلب العروض وغير موجودة في نموذج العميل الأصلي (أُضيفت تلقائيًا أدناه، يُرجى المراجعة):",
             "figure1_caption": "\nالشكل 1: الهيكل التنظيمي لتأطير الورش",
@@ -113,6 +113,14 @@ class ExporterService:
             "default_section_title": "قسم",
         },
     }
+
+    @staticmethod
+    def _court(texte: Any, limite: int = 160) -> Optional[str]:
+        """Valeur declaree, raccourcie pour tenir dans la page de garde."""
+        t = " ".join(str(texte or "").split())
+        if not t:
+            return None
+        return t if len(t) <= limite else t[:limite].rsplit(" ", 1)[0] + "…"
 
     @staticmethod
     def _delai_declare(decision_form: Dict[str, Any], EXP: Dict[str, str]) -> Optional[str]:
@@ -273,7 +281,9 @@ class ExporterService:
             # 11/09 : les valeurs par defaut de l'assistant (« Acheteur Public Détecté »,
             # « Lot 01 - Gros Œuvre », 6 mois, 3 500 000 € HT) partaient sur la page de
             # garde comme des faits. Une donnee absente est desormais dite absente.
-            _A_COMPLETER = "[à compléter]"
+            # 11/09 : dans la langue du document ; la grue Potain et les « 88 % de
+            # valorisation » etaient ecrits en dur, quel que soit le chantier.
+            _A_COMPLETER = EXP.get("a_completer", "[à compléter]")
             _DEFAUTS = {"acheteur public détecté", "acheteur public detecte", "lot 01 - gros œuvre", "lot 01 - gros oeuvre", ""}
             def _reel(v):
                 return v if v is not None and str(v).strip().lower() not in _DEFAUTS else None
@@ -290,10 +300,10 @@ class ExporterService:
 
             rows_data = [
                 (EXP['row_delai'], self._delai_declare(decision_form, EXP) or _A_COMPLETER),
-                (EXP['row_budget'], f"{float(project_data['budget_estimate']):,.2f} € HT".replace(",", " ")
+                (EXP['row_budget'], f"{float(project_data['budget_estimate']):,.2f} {EXP.get('unit_ht', '€ HT')}".replace(",", " ")
                  if project_data.get('budget_estimate') else _A_COMPLETER),
-                (EXP['row_materiel'], decision_form.get('materiel_principal', EXP['default_materiel'])),
-                (EXP['row_dechets'], EXP['val_dechets']),
+                (EXP['row_materiel'], self._court(decision_form.get('materiel_principal')) or _A_COMPLETER),
+                (EXP['row_dechets'], self._court(decision_form.get('gestion_dechets')) or _A_COMPLETER),
             ]
 
             for idx, (label, val) in enumerate(rows_data):
@@ -313,6 +323,11 @@ class ExporterService:
             r_toc = p_toc_item.add_run(f"{s.get('title', 'Section')}")
             r_toc.font.size = Pt(11)
 
+        # 11/09 : l'avertissement annoncait « ajoutées automatiquement ci-dessous » des
+        # sections dont la redaction avait echoue et qui n'etaient donc PAS dans le
+        # document. On ne cite plus que celles qui y figurent vraiment.
+        _titres_presents = {" ".join(str(s.get("title", "")).lower().split()) for s in sections}
+        missing_sections = [m for m in missing_sections if " ".join(str(m).lower().split()) in _titres_presents]
         if missing_sections:
             warn_p = doc.add_paragraph()
             warn_run = warn_p.add_run(EXP['missing_sections_warning'])

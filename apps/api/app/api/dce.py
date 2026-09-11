@@ -7,7 +7,7 @@ import hashlib
 import uuid
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
@@ -98,6 +98,8 @@ async def upload_dce_document(
     # qui ne lisait jamais le contenu réel du document déposé.
 
     await db.flush()
+    # (La ligne n'est validee qu'a la fin de la requete : parse_dce_task reessaie
+    # quelques secondes s'il ne la trouve pas encore -- voir tasks.py, 11/09.)
 
     # 3. Asynchronously dispatch Celery background worker task for OCR, chunking & vector embeddings
     from app.workers.tasks import parse_dce_task
@@ -121,9 +123,29 @@ async def upload_dce_document(
 
 
 
+MSG_PIECES = {
+    "fr": {"abandon": "Analyse jamais terminée (le traitement en arrière-plan s'est arrêté). Cliquez sur « Relancer l'analyse » : elle se fera tout de suite.",
+           "vide": "Analyse déclarée terminée mais aucun fragment indexé : cette pièce n'apporte rien à la rédaction. Relancez l'analyse.",
+           "ok": "{n} fragment(s) indexé(s) et exploitables par la rédaction.",
+           "echec": "Analyse en échec.", "en_cours": "Analyse en cours.",
+           "aucune": "Aucune pièce du marché n'est exploitable sur ce dossier : la rédaction se fera sans le CCTP ni le règlement de consultation."},
+    "en": {"abandon": "Analysis never finished (the background processing stopped). Click “Rerun analysis”: it will run right away.",
+           "vide": "Analysis reported as finished but no passage was indexed: this document adds nothing to the writing. Rerun the analysis.",
+           "ok": "{n} passage(s) indexed and usable for writing.",
+           "echec": "Analysis failed.", "en_cours": "Analysis in progress.",
+           "aucune": "No tender document is usable on this project: writing will proceed without the specifications or the tender regulations."},
+    "ar": {"abandon": "لم يكتمل التحليل (توقفت المعالجة في الخلفية). انقر على «إعادة التحليل»: سيتم فورًا.",
+           "vide": "أُعلن انتهاء التحليل دون فهرسة أي مقطع: لا تفيد هذه الوثيقة التحرير. أعد التحليل.",
+           "ok": "{n} مقطع مفهرس وقابل للاستخدام في التحرير.",
+           "echec": "فشل التحليل.", "en_cours": "التحليل جارٍ.",
+           "aucune": "لا توجد وثيقة مناقصة قابلة للاستخدام في هذا المشروع: سيتم التحرير دون دفتر الشروط الفنية ولا نظام المناقصة."},
+}
+
+
 @router.get("/documents/{project_id}")
 async def list_dce_documents(
     project_id: str,
+    request: Request,
     current_user: CurrentTenantUser = Depends(get_current_tenant_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -165,6 +187,10 @@ async def list_dce_documents(
         comptes = {row[0]: row[1] for row in cnt_res.all()}
 
     DELAI_ABANDON = timedelta(minutes=20)
+    # 11/09 : messages dans la langue de l'interface.
+    L = (request.headers.get("X-UI-Language") or "fr").lower()[:2]
+    L = L if L in MSG_PIECES else "fr"
+    M = MSG_PIECES[L]
     maintenant = datetime.utcnow()
     sortie = []
     for d in documents:
@@ -172,27 +198,29 @@ async def list_dce_documents(
         statut = d.ocr_status or "processing"
         message = None
         depuis = d.created_at
+        # 11/09 : une piece RELANCEE etait jugee sur sa date de depot et redevenait
+        # aussitot « jamais terminee ». On part de la derniere relance.
+        relance = (d.raw_metadata or {}).get("relance_le")
+        if relance:
+            try:
+                depuis = datetime.fromisoformat(relance)
+            except ValueError:
+                pass
         if depuis is not None and depuis.tzinfo is not None:
             depuis = depuis.replace(tzinfo=None)
 
         if statut == "processing" and depuis is not None and maintenant - depuis > DELAI_ABANDON:
             statut = "failed"
-            message = (
-                "Analyse jamais terminée. Le worker a probablement été arrêté ou redémarré "
-                "pendant le traitement. Relancez l'analyse de cette pièce."
-            )
+            message = M["abandon"]
         elif statut == "completed" and nb == 0:
             statut = "failed"
-            message = (
-                "Analyse déclarée terminée mais aucun fragment indexé : cette pièce "
-                "n'apporte rien à la rédaction. Relancez l'analyse."
-            )
+            message = M["vide"]
         elif statut == "completed":
-            message = f"{nb} fragment(s) indexé(s) et exploitables par la rédaction."
+            message = M["ok"].format(n=nb)
         elif statut == "failed":
-            message = (d.raw_metadata or {}).get("error") or "Analyse en échec."
+            message = (d.raw_metadata or {}).get("error") or M["echec"]
         else:
-            message = "Analyse en cours."
+            message = M["en_cours"]
 
         sortie.append({
             "id": str(d.id),
@@ -211,10 +239,7 @@ async def list_dce_documents(
         "documents": sortie,
         "total_fragments": total_fragments,
         "exploitable": total_fragments > 0,
-        "avertissement": None if total_fragments > 0 else (
-            "Aucune pièce du marché n'est exploitable sur ce dossier : la rédaction se fera "
-            "sans le CCTP ni le règlement de consultation."
-        ),
+        "avertissement": None if total_fragments > 0 else M["aucune"],
     }
 
 
@@ -243,17 +268,82 @@ async def relancer_analyse_document(
             detail="Cette pièce n'a pas de fichier stocké : il faut la redéposer.",
         )
 
-    doc.ocr_status = "processing"
-    doc.raw_metadata = {**(doc.raw_metadata or {}), "task": "parse_dce_task", "relance_le": datetime.utcnow().isoformat()}
-
-    from app.workers.tasks import parse_dce_task
-    parse_dce_task.delay(
+    reponse = {"relance": True, "document_id": str(doc.id), "filename": doc.filename}
+    tache = dict(
         tenant_id=current_user.tenant_id,
         project_id=str(doc.project_id),
         document_id=str(doc.id),
         s3_key=doc.s3_key,
     )
-    return {"relance": True, "document_id": str(doc.id), "filename": doc.filename}
+    # 11/09 : le statut est valide AVANT d'envoyer la tache, dans une session dediee
+    # (la session de get_db ne se valide qu'en fin de requete et ne doit pas etre
+    # validee a la main). Sinon un echec rapide du worker (« failed ») etait ecrase
+    # par le « processing » valide apres coup. L'appartenance vient d'etre verifiee.
+    from app.core.db import AsyncSessionLocal
+    async with AsyncSessionLocal() as session_statut:
+        d_statut = await session_statut.get(DCEDocument, doc.id)
+        d_statut.ocr_status = "processing"
+        d_statut.raw_metadata = {**(d_statut.raw_metadata or {}), "task": "parse_dce_task",
+                                 "relance_le": datetime.utcnow().isoformat()}
+        await session_statut.commit()
+    db.expunge(doc)
+
+    from app.workers.tasks import parse_dce_task
+    parse_dce_task.delay(**tache)
+    return reponse
+
+
+@router.post("/documents/{document_id}/analyser-maintenant")
+async def analyser_document_maintenant(
+    document_id: str,
+    current_user: CurrentTenantUser = Depends(get_current_tenant_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Analyse une piece TOUT DE SUITE, dans l'API, sans passer par le worker (11/09).
+
+    Meme raison d'etre que /export/compile/sync : quand le worker est arrete, occupe
+    ou sur un code perime, « Relancer l'analyse » partait en file et ne revenait
+    jamais (constate avec le RC de test : « en cours » pendant plus d'une heure).
+    """
+    from starlette.concurrency import run_in_threadpool
+    from app.core.db import AsyncSessionLocal
+    from app.workers.tasks import parse_dce_task
+
+    try:
+        d_uuid = uuid.UUID(document_id)
+        t_uuid = uuid.UUID(current_user.tenant_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Identifiant invalide")
+    doc = (await db.execute(select(DCEDocument).where(DCEDocument.id == d_uuid,
+                                                      DCEDocument.tenant_id == t_uuid))).scalar_one_or_none()
+    if not doc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pièce introuvable")
+    if not doc.s3_key:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Cette pièce n'a pas de fichier stocké : il faut la redéposer.")
+    project_id, s3_key = doc.project_id, doc.s3_key
+
+    async with AsyncSessionLocal() as session_statut:
+        d = await session_statut.get(DCEDocument, d_uuid)
+        d.ocr_status = "processing"
+        d.raw_metadata = {**(d.raw_metadata or {}), "task": "parse_dce_task (api)",
+                          "relance_le": datetime.utcnow().isoformat()}
+        await session_statut.commit()
+
+    erreur = None
+    try:
+        await run_in_threadpool(parse_dce_task, tenant_id=current_user.tenant_id, project_id=str(project_id),
+                                document_id=document_id, s3_key=s3_key)
+    except Exception as exc:  # le statut « failed » et son motif sont ecrits par la tache
+        erreur = str(exc)[:300]
+
+    async with AsyncSessionLocal() as session_lecture:
+        d = await session_lecture.get(DCEDocument, d_uuid)
+        fragments = (await session_lecture.execute(select(func.count()).select_from(DCEEmbedding)
+                                                   .where(DCEEmbedding.document_id == d_uuid))).scalar() or 0
+        criteres = (await session_lecture.execute(select(func.count()).select_from(DCECriterionEntity)
+                                                  .where(DCECriterionEntity.project_id == project_id))).scalar() or 0
+        return {"document_id": document_id, "statut": d.ocr_status if d else None, "fragments": fragments,
+                "criteres": criteres, "erreur": erreur or ((d.raw_metadata or {}).get("error") if d else None)}
 
 
 @router.get("/criteria/{project_id}", response_model=List[DCECriterion])
@@ -288,6 +378,8 @@ async def get_project_criteria(
             key_expectations=c.key_expectations or [],
             required_evidence=c.required_evidence or [],
             mandatory=c.mandatory in ("true", "True", True, "1"),
+            # 11/09 : on dit d'ou vient le critere (fichier lu, ou bareme generique).
+            extracted_from=c.extracted_from or "Règlement de Consultation (RC)",
         )
         for c in criteria
     ]
@@ -505,7 +597,7 @@ async def test_ocr_extraction(
     
     ocr_result = ocr_service.extract_text_and_tables(file_bytes, filename)
     pages = ocr_result.get("pages", [])
-    raw_text = ocr_result.get("raw_text", "")
+    raw_text = ocr_result.get("full_text") or ocr_result.get("raw_text", "")
     chunks = chunking_service.chunk_document_pages(pages)
 
     return {
@@ -528,21 +620,26 @@ async def test_ocr_extraction(
 @router.post("/go-no-go/{project_id}", response_model=GoNoGoAnalysisOut)
 async def evaluate_tender_go_no_go(
     project_id: str,
+    request: Request,
     current_user: CurrentTenantUser = Depends(get_current_tenant_user),
     db: AsyncSession = Depends(get_db),
 ):
     """
     Computes a reasoned Go / Réserves / No-Go recommendation for a tender.
-    Cross-references mandatory criteria, company qualifications, deadline vs workload, and past win-rate.
-    Strictly isolated per tenant under Postgres RLS.
+    11/09 : renvoie aussi l'etat (go / no_go / suspendue / reserves), les raisons et les
+    actions a mener avec leur lien, dans la langue de l'interface (X-UI-Language).
     """
+    return await _go_no_go(project_id, request, current_user, db)
+
+
+async def _go_no_go(project_id: str, request: Request, current_user: CurrentTenantUser, db: AsyncSession):
+    from app.services.go_no_go_i18n import localiser_analyse
     try:
         p_uuid = uuid.UUID(project_id)
         t_uuid = uuid.UUID(current_user.tenant_id)
         u_uuid = uuid.UUID(current_user.user_id) if current_user.user_id else None
-    except ValueError:
+    except (ValueError, TypeError):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid project or tenant UUID")
-
     try:
         analysis = await go_no_go_service.evaluate_project(
             db=db,
@@ -552,77 +649,19 @@ async def evaluate_tender_go_no_go(
         )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
-
-    return GoNoGoAnalysisOut(
-        id=str(analysis.id),
-        tenant_id=str(analysis.tenant_id),
-        project_id=str(analysis.project_id),
-        recommendation=analysis.recommendation,
-        score=float(analysis.score),
-        summary=analysis.summary,
-        factors=analysis.factors,
-        mandatory_criteria_met=bool(analysis.mandatory_criteria_met),
-        blocking_issues=analysis.blocking_issues or [],
-        completion_rate=float(analysis.completion_rate) if analysis.completion_rate is not None else None,
-        has_sufficient_data=bool(analysis.has_sufficient_data),
-        evaluated_by=str(analysis.evaluated_by) if analysis.evaluated_by else None,
-        created_at=analysis.created_at,
-        updated_at=analysis.updated_at,
-    )
+    return GoNoGoAnalysisOut(**localiser_analyse(analysis, request.headers.get("X-UI-Language")))
 
 
 @router.get("/go-no-go/{project_id}", response_model=GoNoGoAnalysisOut)
 async def get_tender_go_no_go(
     project_id: str,
+    request: Request,
     current_user: CurrentTenantUser = Depends(get_current_tenant_user),
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Retrieves the persisted Go/No-Go analysis for the project without recalculating.
-    Strictly isolated per tenant under Postgres RLS.
+    11/09 : l'analyse enregistree devenait fausse des qu'une donnee changeait (RC depose,
+    date limite saisie...) et restait affichee telle quelle. Le calcul ne coute que
+    quelques requetes : on le refait a chaque lecture.
     """
-    try:
-        p_uuid = uuid.UUID(project_id)
-        t_uuid = uuid.UUID(current_user.tenant_id)
-    except ValueError:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid project or tenant UUID")
-
-    stmt = select(ProjectGoNoGoAnalysis).where(
-        ProjectGoNoGoAnalysis.project_id == p_uuid,
-        ProjectGoNoGoAnalysis.tenant_id == t_uuid,
-    )
-    result = await db.execute(stmt)
-    analysis = result.scalar_one_or_none()
-
-    if not analysis:
-        try:
-            u_uuid = uuid.UUID(current_user.user_id) if current_user.user_id else None
-            analysis = await go_no_go_service.evaluate_project(
-                db=db,
-                tenant_id=t_uuid,
-                project_id=p_uuid,
-                user_id=u_uuid,
-            )
-        except Exception as e:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Erreur lors du calcul Go/No-Go : {str(e)}",
-            )
-
-    return GoNoGoAnalysisOut(
-        id=str(analysis.id),
-        tenant_id=str(analysis.tenant_id),
-        project_id=str(analysis.project_id),
-        recommendation=analysis.recommendation,
-        score=float(analysis.score),
-        summary=analysis.summary,
-        factors=analysis.factors,
-        mandatory_criteria_met=bool(analysis.mandatory_criteria_met),
-        blocking_issues=analysis.blocking_issues or [],
-        completion_rate=float(analysis.completion_rate) if analysis.completion_rate is not None else None,
-        has_sufficient_data=bool(analysis.has_sufficient_data),
-        evaluated_by=str(analysis.evaluated_by) if analysis.evaluated_by else None,
-        created_at=analysis.created_at,
-        updated_at=analysis.updated_at,
-    )
-
+    return await _go_no_go(project_id, request, current_user, db)

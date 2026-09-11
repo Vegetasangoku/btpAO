@@ -14,6 +14,7 @@ transparent (aucune clé LLM configurée, échec de l'appel, ou réponse LLM ine
 -- jamais comme comportement par défaut silencieux.
 """
 import json
+import re
 import logging
 import uuid
 from typing import Any, Dict, List, Optional
@@ -68,7 +69,8 @@ def _fallback_rows(tenant_id: uuid.UUID, project_id: uuid.UUID, source: str) -> 
                 description=desc,
                 key_expectations=exp,
                 required_evidence=ev,
-                mandatory="true",
+                mandatory=True,
+                extracted_from=f"gabarit: {source}"[:500],
             )
         )
     logger.warning(
@@ -150,7 +152,15 @@ Si aucun barème n'est identifiable dans le texte, réponds {{"criteria": []}}.
         if credentials.get("api_base"):
             kwargs["api_base"] = credentials["api_base"]
 
-        response = litellm.completion(**kwargs)
+        # 11/09 : certains fournisseurs (passerelles compatibles OpenAI) refusent
+        # `response_format` ; l'extraction retombait alors en silence sur le bareme
+        # generique (constate sur le RC de test : 25/35/25/15 au lieu de 60/40).
+        try:
+            response = litellm.completion(**kwargs)
+        except Exception as exc_format:
+            logger.info("[CriteriaExtraction] nouvel essai sans response_format (%s)", exc_format)
+            kwargs.pop("response_format", None)
+            response = litellm.completion(**kwargs)
 
         # 02/09 : journal de consommation LLM -- absent jusqu'ici sur ce point d'appel.
         _usage = getattr(response, "usage", None)
@@ -165,7 +175,10 @@ Si aucun barème n'est identifiable dans le texte, réponds {{"criteria": []}}.
             total_tokens=getattr(_usage, "total_tokens", None) if _usage else None,
         )
 
-        parsed = json.loads(response.choices[0].message.content)
+        brut = (response.choices[0].message.content or "").strip()
+        brut = re.sub(r"^```(?:json)?\s*|\s*```$", "", brut)
+        m_json = re.search(r"\{.*\}", brut, re.S)
+        parsed = json.loads(m_json.group(0) if m_json else brut)
         items = parsed.get("criteria") or []
         if not isinstance(items, list) or not items:
             return _fallback_rows(tenant_id, project_id, "réponse LLM sans critère exploitable")
@@ -187,7 +200,9 @@ Si aucun barème n'est identifiable dans le texte, réponds {{"criteria": []}}.
                         description=str(item.get("description") or "") or None,
                         key_expectations=item.get("key_expectations") or [],
                         required_evidence=item.get("required_evidence") or [],
-                        mandatory="true" if item.get("mandatory", True) else "false",
+                        mandatory=(item.get("mandatory", True) if isinstance(item.get("mandatory", True), bool)
+                                   else str(item.get("mandatory")).strip().lower() not in ("false", "0", "non", "no")),
+                        extracted_from=(filename or "RC")[:500],
                     )
                 )
             except Exception as row_exc:

@@ -4,7 +4,7 @@ Strictly scoped by tenant_id under Postgres RLS.
 """
 import uuid
 from typing import Any, Dict, Optional
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -59,9 +59,9 @@ async def export_dc1_dossier(
     }
     project_dict = {
         "title": project.title,
-        "client_name": project.client_name,
+        "client_name": _reel(project.client_name),
         "reference_code": project.reference_code,
-        "lot_number": project.lot_number or "Lot unique / Tous corps d'état",
+        "lot_number": _reel(project.lot_number) if project.lot_number else "Lot unique / Tous corps d'état",
     }
 
     docx_bytes = admin_dossier_service.generate_dc1_docx(tenant_dict, project_dict)
@@ -142,7 +142,7 @@ async def export_dc2_dossier(
     }
     project_dict = {
         "title": project.title,
-        "client_name": project.client_name,
+        "client_name": _reel(project.client_name),
         "reference_code": project.reference_code,
     }
 
@@ -175,11 +175,53 @@ async def export_dume_summary_endpoint(
     }
     project_dict = {
         "title": project.title,
-        "client_name": project.client_name,
+        "client_name": _reel(project.client_name),
         "reference_code": project.reference_code,
     }
 
     return admin_dossier_service.generate_dume_summary(tenant_dict, project_dict)
+
+
+_DEFAUTS_APPLI = {"acheteur public détecté", "acheteur public detecte", "lot 01 - gros œuvre", "lot 01 - gros oeuvre"}
+
+
+def _reel(v):
+    """Une valeur par defaut de l'assistant n'est pas une donnee : « [à compléter] »."""
+    return v if v and str(v).strip().lower() not in _DEFAUTS_APPLI else "[à compléter]"
+
+
+@router.get("/{project_id}/dume.docx")
+async def export_dume_docx(
+    project_id: str,
+    current_user: CurrentTenantUser = Depends(get_current_tenant_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """DUME pré-rempli en Word (11/09) : jusqu'ici uniquement un JSON, introuvable dans l'interface."""
+    from app.models.entities import CompanyAsset
+    tenant, project = await _get_project_and_tenant(project_id, current_user, db)
+    certifs = (await db.execute(
+        select(CompanyAsset.title).where(CompanyAsset.tenant_id == tenant.id,
+                                         CompanyAsset.category.in_(("certification", "certificat_qualibat")),
+                                         CompanyAsset.obsolete_at.is_(None))
+    )).scalars().all()
+    tenant_dict = {
+        "name": tenant.name,
+        "siret": tenant.siret or "[à compléter]",
+        "country_code": tenant.country_code or "FR",
+        "contact_email": current_user.email,
+        "certifications": list(certifs),
+    }
+    project_dict = {
+        "title": project.title,
+        "client_name": _reel(project.client_name),
+        "reference_code": project.reference_code or "[à compléter]",
+    }
+    docx_bytes = admin_dossier_service.generate_dume_docx(tenant_dict, project_dict)
+    return Response(
+        content=docx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f'attachment; filename="DUME_{project.reference_code or "AO"}.docx"'},
+    )
 
 
 @router.get("/{project_id}/regulatory-profile")
@@ -227,6 +269,7 @@ async def get_project_regulatory_profile_endpoint(
 @router.post("/{project_id}/pieces")
 async def verifier_pieces_et_formulaires(
     project_id: str,
+    request: Request,
     chercher: bool = True,
     current_user: CurrentTenantUser = Depends(get_current_tenant_user),
     db: AsyncSession = Depends(get_db),
@@ -235,4 +278,5 @@ async def verifier_pieces_et_formulaires(
     manque, lien vers le formulaire sur les portails officiels du pays (11/09)."""
     from app.services.pieces_service import analyser_pieces
     tenant, project = await _get_project_and_tenant(project_id, current_user, db)
-    return await analyser_pieces(db, tenant.id, project, chercher=chercher)
+    return await analyser_pieces(db, tenant.id, project, chercher=chercher,
+                                 langue=request.headers.get("x-ui-language") or "fr")

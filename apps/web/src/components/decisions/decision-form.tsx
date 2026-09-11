@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Sliders,
   Calendar,
@@ -26,37 +26,55 @@ interface DecisionFormProps {
 
 export function DecisionForm({ projectId, initialData, onSaved }: DecisionFormProps) {
   const { t } = useTranslation();
+  // 11/09 : le formulaire s'ouvrait sur un chantier d'exemple complet (equipe
+  // « Jean-Marc Alibert », grue Potain, 88 % de valorisation...) et n'affichait jamais
+  // les donnees deja enregistrees. Un simple « Enregistrer » ecrasait donc les vraies
+  // donnees par l'exemple, qui partait ensuite dans le memoire. On part desormais du
+  // vide, on recharge ce qui est enregistre, et les exemples ne sont que des indications.
   const [formData, setFormData] = useState<ProjectDecisionsForm>(
     initialData || {
-      delai_mois: 6,
-      date_demarrage: '2026-10-01',
-      materiel_principal:
-        'Grue à tour Potain MDT 219 (flèche 50m), 2 pelles Liebherr 22t, 4 camions 8x4 avec bâchage automatique, banches manuportables Alphi',
+      delai_mois: undefined,
+      date_demarrage: '',
+      materiel_principal: '',
       travail_de_nuit: false,
-      gestion_dechets:
-        'Tri sélectif 5 flux sur plateforme sécurisée avec compacteur in situ. Objectif 88% de valorisation matière via plateforme locale Paprec / Veolia à 12 km du site.',
-      equipe_cadres: [
-        { nom: 'Jean-Marc Alibert', role: 'Directeur de Projet & Conducteur Principal', experience_ans: 15, presence_hebdo_pct: 100, qualif: 'Ingénieur ESTP' },
-        { nom: 'Sébastien Vasseur', role: 'Chef de Chantier Gros Œuvre', experience_ans: 12, presence_hebdo_pct: 100, qualif: 'Master Génie Civil' },
-        { nom: 'Chloé Fontaine', role: 'Ingénieur QSE & Environnement', experience_ans: 7, presence_hebdo_pct: 50, qualif: 'Master QSE BTP' },
-      ],
-      mesures_securite:
-        "PPSPS strict, accueil sécurité avec badge biométrique, protection collective intégrée sur banches (garde-corps verrouillés), défibrillateur et 4 SST sur site.",
-      demarche_rse_environnement:
-        'Béton bas carbone CEM III/A (-42% CO2), circuit fermé de recyclage des eaux de lavage toupies, charte chantier vert à faibles nuisances sonores.',
-      phasage_travaux: [
-        { phase: '1. Installation de chantier, PIC & Terrassements', duree_semaines: 4, jalon: 'Accès voirie & base-vie opérationnels' },
-        { phase: '2. Fondations profondes et longrines', duree_semaines: 4, jalon: 'Réception plateforme géotechnique' },
-        { phase: '3. Infrastructure & Superstructure R+2 Gros Œuvre', duree_semaines: 10, jalon: "Hors d'eau / Hors d'air structurel" },
-        { phase: '4. Réseaux enterrés, VRD & Aménagements extérieurs', duree_semaines: 4, jalon: "Essais d'étanchéité & OPR" },
-        { phase: '5. Repli de chantier, levée des réserves & Livraison', duree_semaines: 2, jalon: 'Parfait Achèvement & Remise des clés' },
-      ],
+      gestion_dechets: '',
+      equipe_cadres: [],
+      mesures_securite: '',
+      demarche_rse_environnement: '',
+      phasage_travaux: [],
     }
   );
+  const [charge, setCharge] = useState<boolean>(!!initialData);
+
+  useEffect(() => {
+    if (initialData) return;
+    let annule = false;
+    api.getDecisions(projectId)
+      .then((d) => {
+        if (annule || !d) return;
+        setFormData({
+          ...d,
+          date_demarrage: d.date_demarrage || '',
+          materiel_principal: d.materiel_principal || '',
+          gestion_dechets: d.gestion_dechets || '',
+          mesures_securite: d.mesures_securite || '',
+          demarche_rse_environnement: d.demarche_rse_environnement || '',
+          equipe_cadres: d.equipe_cadres || [],
+          phasage_travaux: d.phasage_travaux || [],
+        });
+      })
+      .catch((e) => console.error('Failed to load decisions', e))
+      .finally(() => { if (!annule) setCharge(true); });
+    return () => { annule = true; };
+  }, [projectId, initialData]);
 
   const [isSaving, setIsSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [activeTab, setActiveTab] = useState<'delais' | 'materiels' | 'cadres' | 'rse' | 'securite' | 'phasage'>('delais');
+
+  // 11/09 : donnees d'exemple de l'ancien formulaire, enregistrees telles quelles.
+  const EXEMPLES = ['Jean-Marc Alibert', 'Sébastien Vasseur', 'Chloé Fontaine', 'Potain MDT 219', 'Paprec / Veolia à 12 km'];
+  const contientExemple = charge && EXEMPLES.some((x) => JSON.stringify(formData).includes(x));
 
   const handleSave = async () => {
     setIsSaving(true);
@@ -79,7 +97,7 @@ export function DecisionForm({ projectId, initialData, onSaved }: DecisionFormPr
       ...formData,
       equipe_cadres: [
         ...formData.equipe_cadres,
-        { nom: '', role: 'Chef d’équipe', experience_ans: 5, presence_hebdo_pct: 100, qualif: '' },
+        { nom: '', role: '', experience_ans: 0, presence_hebdo_pct: 100, qualif: '' },
       ],
     });
   };
@@ -97,7 +115,7 @@ export function DecisionForm({ projectId, initialData, onSaved }: DecisionFormPr
       ...formData,
       phasage_travaux: [
         ...formData.phasage_travaux,
-        { phase: `Phase ${formData.phasage_travaux.length + 1}`, duree_semaines: 4, jalon: 'Jalon intermédiaire' },
+        { phase: '', duree_semaines: 0, jalon: '' },
       ],
     });
   };
@@ -111,6 +129,11 @@ export function DecisionForm({ projectId, initialData, onSaved }: DecisionFormPr
 
   return (
     <div className="card-modern p-6 sm:p-7 space-y-6 rounded-2xl font-sans">
+      {contientExemple && (
+        <div className="p-3 rounded-xl border border-warning/30 bg-warning/10 text-[12px] text-foreground">
+          {t('decisions.form.alerte_exemple')}
+        </div>
+      )}
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-4 pb-4 border-b border-line">
         <div>
@@ -125,7 +148,7 @@ export function DecisionForm({ projectId, initialData, onSaved }: DecisionFormPr
 
         <button
           onClick={handleSave}
-          disabled={isSaving}
+          disabled={isSaving || !charge}
           className="btn-primary cursor-pointer"
         >
           <Save className="w-4 h-4" />
@@ -175,8 +198,9 @@ export function DecisionForm({ projectId, initialData, onSaved }: DecisionFormPr
                 type="number"
                 min="1"
                 max="48"
-                value={formData.delai_mois}
-                onChange={(e) => setFormData({ ...formData, delai_mois: parseInt(e.target.value) || 6 })}
+                value={formData.delai_mois ?? ''}
+                placeholder={t('decisions.form.exemple_delai')}
+                onChange={(e) => setFormData({ ...formData, delai_mois: e.target.value === '' ? undefined : (parseInt(e.target.value) || undefined) })}
                 className="input-field font-mono"
               />
             </div>
@@ -343,6 +367,7 @@ export function DecisionForm({ projectId, initialData, onSaved }: DecisionFormPr
             <textarea
               rows={3}
               value={formData.demarche_rse_environnement}
+              placeholder={t('decisions.form.exemple_rse')}
               onChange={(e) => setFormData({ ...formData, demarche_rse_environnement: e.target.value })}
               className="input-field"
             />
@@ -355,6 +380,7 @@ export function DecisionForm({ projectId, initialData, onSaved }: DecisionFormPr
             <textarea
               rows={3}
               value={formData.gestion_dechets}
+              placeholder={t('decisions.form.exemple_dechets')}
               onChange={(e) => setFormData({ ...formData, gestion_dechets: e.target.value })}
               className="input-field"
             />
@@ -371,6 +397,7 @@ export function DecisionForm({ projectId, initialData, onSaved }: DecisionFormPr
           <textarea
             rows={4}
             value={formData.mesures_securite}
+            placeholder={t('decisions.form.exemple_securite')}
             onChange={(e) => setFormData({ ...formData, mesures_securite: e.target.value })}
             className="input-field"
           />

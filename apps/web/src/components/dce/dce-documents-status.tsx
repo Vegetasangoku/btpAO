@@ -3,6 +3,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { AlertTriangle, CheckCircle2, Loader2, RefreshCw, FileText } from 'lucide-react';
 import { api } from '@/lib/api';
+import { useTranslation } from '@/components/i18n-provider';
 
 /**
  * État réel des pièces du marché déposées (10/09).
@@ -34,6 +35,7 @@ type Etat = {
 };
 
 export function DceDocumentsStatus({ projectId }: { projectId: string }) {
+  const { t, language } = useTranslation();
   const [etat, setEtat] = useState<Etat | null>(null);
   const [chargement, setChargement] = useState(true);
   const [relance, setRelance] = useState<string | null>(null);
@@ -44,11 +46,11 @@ export function DceDocumentsStatus({ projectId }: { projectId: string }) {
       setEtat(await api.getDceDocuments(projectId));
       setErreur(null);
     } catch (e) {
-      setErreur(e instanceof Error ? e.message : 'État des pièces indisponible');
+      setErreur(e instanceof Error ? e.message : t('dce.status.indisponible'));
     } finally {
       setChargement(false);
     }
-  }, [projectId]);
+  }, [projectId, language]);
 
   useEffect(() => {
     charger();
@@ -57,11 +59,12 @@ export function DceDocumentsStatus({ projectId }: { projectId: string }) {
   async function relancerAnalyse(documentId: string) {
     setRelance(documentId);
     try {
-      await api.reanalyserDceDocument(documentId);
-      // L'analyse repart en tâche de fond : on relit dans quelques secondes.
-      setTimeout(charger, 6000);
+      // 11/09 : l'analyse se fait maintenant tout de suite dans l'API (le worker
+      // pouvait etre arrete ou perime, et la piece restait « en cours » pour toujours).
+      await api.analyserDceMaintenant(documentId);
+      await charger();
     } catch (e) {
-      setErreur(e instanceof Error ? e.message : 'Relance impossible');
+      setErreur(e instanceof Error ? e.message : t('dce.status.relance_impossible'));
     } finally {
       setRelance(null);
     }
@@ -70,7 +73,7 @@ export function DceDocumentsStatus({ projectId }: { projectId: string }) {
   if (chargement) {
     return (
       <div className="card-modern p-4 flex items-center gap-2 text-[12px] text-muted-foreground">
-        <Loader2 className="w-3.5 h-3.5 animate-spin" /> Lecture de l&apos;état des pièces…
+        <Loader2 className="w-3.5 h-3.5 animate-spin" /> {t('dce.status.lecture')}
       </div>
     );
   }
@@ -84,10 +87,10 @@ export function DceDocumentsStatus({ projectId }: { projectId: string }) {
       <div className="flex items-center justify-between gap-3">
         <h2 className="text-[14px] font-bold text-foreground font-heading flex items-center gap-2">
           <FileText className="w-4 h-4 text-hl" />
-          Pièces analysées
+          {t('dce.status.titre')}
         </h2>
         <button onClick={charger} className="btn-ghost !py-1 !px-2 !text-[11px]">
-          <RefreshCw className="w-3 h-3" /> Actualiser
+          <RefreshCw className="w-3 h-3" /> {t('dce.status.actualiser')}
         </button>
       </div>
 
@@ -136,9 +139,9 @@ export function DceDocumentsStatus({ projectId }: { projectId: string }) {
                   className="btn-secondary !py-1 !px-2.5 !text-[11px] shrink-0"
                 >
                   {relance === d.id ? (
-                    <><Loader2 className="w-3 h-3 animate-spin" /> Relance…</>
+                    <><Loader2 className="w-3 h-3 animate-spin" /> {t('dce.status.relance_en_cours')}</>
                   ) : (
-                    <><RefreshCw className="w-3 h-3" /> Relancer l&apos;analyse</>
+                    <><RefreshCw className="w-3 h-3" /> {t('dce.status.relancer')}</>
                   )}
                 </button>
               )}

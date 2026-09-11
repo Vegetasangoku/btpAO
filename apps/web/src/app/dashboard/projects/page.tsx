@@ -31,9 +31,12 @@ import {
 import { Project, GoNoGoAnalysis } from '@/lib/types';
 import { api } from '@/lib/api';
 import { useTranslation } from '@/components/i18n-provider';
+import { GoNoGoExplication, etatGoNoGo, useLibelleEtat, couleurEtat } from '@/components/gonogo/gonogo-explication';
+import { OutcomeSelect } from '@/components/projects/outcome-select';
 
 export default function DashboardProjectsPage() {
-  const { t } = useTranslation();
+  const { t, language } = useTranslation();
+  const libelleEtat = useLibelleEtat();
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
@@ -63,9 +66,10 @@ export default function DashboardProjectsPage() {
         }
         setScoresMap(initialScores);
 
-        // Also fetch/refresh Go/No-Go scores for visible projects in background if needed
+        // 11/09 : on relit toujours le Go/No-Go (recalculé et rédigé dans la langue de
+        // l'interface par le serveur) : l'état « conclusion suspendue » n'existe que là.
         for (const p of loadedProjects) {
-          if (!initialScores[p.id]) {
+          {
             api.getGoNoGo(p.id)
               .then((analysis) => {
                 if (analysis) {
@@ -82,12 +86,12 @@ export default function DashboardProjectsPage() {
       }
     }
     loadProjects();
-  }, []);
+  }, [language]);
 
   async function handleOpenScoreModal(project: Project) {
     setSelectedModalProject(project);
-    const existing = scoresMap[project.id] || project.go_no_go;
-    if (existing) {
+    const existing = scoresMap[project.id];
+    if (existing && existing.etat) {
       setModalAnalysis(existing);
     } else {
       setLoadingModalScore(true);
@@ -113,7 +117,7 @@ export default function DashboardProjectsPage() {
       setModalAnalysis(res);
       setScoresMap((prev) => ({ ...prev, [selectedModalProject.id]: res }));
     } catch (err: any) {
-      alert('Erreur calcul Go/No-Go : ' + (err?.message || err));
+      alert(t('projects.export.error_gonogo') + ' ' + (err?.message || err));
     } finally {
       setRecalculatingScore(false);
     }
@@ -134,7 +138,7 @@ export default function DashboardProjectsPage() {
       setModalAnalysis(refreshed);
       setScoresMap((prev) => ({ ...prev, [selectedModalProject.id]: refreshed }));
     } catch (err: any) {
-      alert("Erreur lors de la confirmation de conformité : " + (err?.message || err));
+      alert(t('projects.gonogo_confirmation_erreur') + ' ' + (err?.message || err));
     } finally {
       setConfirmingIssue(null);
     }
@@ -254,25 +258,24 @@ export default function DashboardProjectsPage() {
                           handleOpenScoreModal(project);
                         }}
                         className="font-mono text-[11px] font-bold px-2.5 py-1 rounded-lg card-inset hover:border-hl/30 transition-all flex items-center gap-1.5 cursor-pointer"
-                        title="Voir la matrice de décision Go / No-Go"
+                        title={t('projects.gonogo_voir')}
                       >
                         <TrendingUp className="w-3.5 h-3.5 text-hl" />
-                        <span className={
-                          projectScore.recommendation === 'GO'
-                            ? 'text-positive'
-                            : projectScore.recommendation === 'RESERVES' || projectScore.recommendation === 'RÉSERVES'
-                            ? 'text-hl'
-                            : 'text-danger'
-                        }>
+                        <span className={couleurEtat(etatGoNoGo(projectScore))}>
                           {Math.round(projectScore.score)}%
                         </span>
-                        <span className="text-muted-foreground">{projectScore.recommendation}</span>
+                        <span className="text-muted-foreground">{libelleEtat(etatGoNoGo(projectScore))}</span>
                       </button>
                     )}
                     <span className="text-[11px] text-muted-foreground flex items-center gap-2 min-w-[70px]">
                       <span className={`w-2 h-2 rounded-full ${project.status === 'completed' || project.outcome_status === 'won' ? 'bg-positive' : 'bg-hl'}`}></span>
                       {project.status === 'completed' ? t('projects.status_ready') : t('projects.status_drafting')}
                     </span>
+                    <OutcomeSelect
+                      projectId={project.id}
+                      value={project.outcome_status}
+                      onSaved={(o) => setProjects((prev) => prev.map((x) => (x.id === project.id ? { ...x, outcome_status: o } : x)))}
+                    />
                   </div>
                 </div>
 
@@ -284,21 +287,15 @@ export default function DashboardProjectsPage() {
                     className="card-inset p-3.5 text-left transition-all group cursor-pointer hover:border-hl/40"
                   >
                     <div className="flex items-center justify-between">
-                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Décision</p>
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">{t('projects.carte.decision')}</p>
                       {hasScore ? (
                         <span
-                          className={`text-[10px] font-mono font-bold ${
-                            projectScore.recommendation === 'GO'
-                              ? 'text-positive'
-                              : projectScore.recommendation === 'RESERVES' || projectScore.recommendation === 'RÉSERVES'
-                              ? 'text-hl'
-                              : 'text-danger'
-                          }`}
+                          className={`text-[10px] font-mono font-bold ${couleurEtat(etatGoNoGo(projectScore))}`}
                         >
                           {Math.round(projectScore.score)}%
                         </span>
                       ) : (
-                        <span className="text-[10px] text-muted-foreground">Score...</span>
+                        <span className="text-[10px] text-muted-foreground">…</span>
                       )}
                     </div>
                     <p className="text-[13px] font-semibold text-foreground group-hover:text-hl flex items-center gap-1.5 mt-1 font-heading">
@@ -311,7 +308,7 @@ export default function DashboardProjectsPage() {
                     href={`/projects/${project.id}/visuals`}
                     className="card-inset p-3.5 text-left transition-all group hover:border-hl/40"
                   >
-                    <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Chantier</p>
+                    <p className="text-[10px] text-muted-foreground uppercase tracking-wider">{t('projects.carte.chantier')}</p>
                     <p className="text-[13px] font-semibold text-foreground group-hover:text-hl flex items-center gap-1.5 mt-1 font-heading">
                       <BarChart2 className="w-3.5 h-3.5 text-hl" />
                       <span>{t('projects.btn_planning')}</span>
@@ -322,7 +319,7 @@ export default function DashboardProjectsPage() {
                     href={`/projects/${project.id}/editor`}
                     className="card-inset p-3.5 text-left transition-all group hover:border-hl/40"
                   >
-                    <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Rédaction</p>
+                    <p className="text-[10px] text-muted-foreground uppercase tracking-wider">{t('projects.carte.redaction')}</p>
                     <p className="text-[13px] font-semibold text-foreground group-hover:text-hl flex items-center gap-1.5 mt-1 font-heading">
                       <Edit3 className="w-3.5 h-3.5 text-hl" />
                       <span>{t('projects.btn_wizard')}</span>
@@ -333,7 +330,7 @@ export default function DashboardProjectsPage() {
                     href={`/projects/${project.id}/export`}
                     className="card-inset p-3.5 text-left transition-all group hover:border-hl/40"
                   >
-                    <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Livraison</p>
+                    <p className="text-[10px] text-muted-foreground uppercase tracking-wider">{t('projects.carte.livraison')}</p>
                     <p className="text-[13px] font-semibold text-foreground group-hover:text-hl flex items-center gap-1.5 mt-1 font-heading">
                       <Download className="w-3.5 h-3.5 text-hl" />
                       <span>{t('projects.btn_download')}</span>
@@ -408,19 +405,9 @@ export default function DashboardProjectsPage() {
                 <div className="card-inset p-5 flex items-center justify-between gap-4 rounded-xl">
                   <div className="space-y-2">
                     <span
-                      className={`badge-pill text-[10px] ${
-                        modalAnalysis.recommendation === 'GO'
-                          ? 'bg-positive/10 text-positive border-positive/20'
-                          : modalAnalysis.recommendation === 'RESERVES' || modalAnalysis.recommendation === 'RÉSERVES'
-                          ? 'bg-hl/10 text-hl border-hl/20'
-                          : 'bg-danger/10 text-danger border-danger/20'
-                      }`}
+                      className={`badge-pill text-[10px] ${couleurEtat(etatGoNoGo(modalAnalysis))}`}
                     >
-                      {modalAnalysis.recommendation === 'GO'
-                        ? t('projects.export.gonogo_go')
-                        : modalAnalysis.recommendation === 'RESERVES' || modalAnalysis.recommendation === 'RÉSERVES'
-                        ? t('projects.export.gonogo_reserves')
-                        : t('projects.export.gonogo_nogo')}
+                      {libelleEtat(etatGoNoGo(modalAnalysis))}
                     </span>
                     <p className="text-[13px] text-foreground leading-relaxed">{modalAnalysis.summary}</p>
                   </div>
@@ -441,6 +428,8 @@ export default function DashboardProjectsPage() {
                   </div>
                 </div>
                 )}
+
+                <GoNoGoExplication analysis={modalAnalysis} />
 
                 {/* Criteria Checks */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">

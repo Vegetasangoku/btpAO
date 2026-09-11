@@ -101,13 +101,25 @@ class CompanyBootstrapService:
             "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
         }
         try:
-            async with httpx.AsyncClient(timeout=10.0, follow_redirects=True, verify=False) as client:
-                resp = await client.get(url, headers=headers)
+            # 11/09 : memes strategies que la lecture des pages officielles (robot honnete,
+            # puis navigateur complet, puis HTTP/2) et 20 s de delai : la page de la FFB
+            # depassait 10 s et plusieurs sites refusaient le robot.
+            from app.services.official_page_reader import _DELAI, _ENTETES_NAVIGATEUR, _texte_de_secours
+            resp = None
+            async with httpx.AsyncClient(timeout=_DELAI, follow_redirects=True, verify=False) as client:
+                for entetes in (headers, _ENTETES_NAVIGATEUR):
+                    resp = await client.get(url, headers=entetes)
+                    if resp.status_code not in (401, 403, 406, 429, 503):
+                        break
+            if True:
                 if resp.status_code == 200:
                     parser = HTMLTextCleaner()
                     parser.feed(resp.text)
                     title = parser.get_title() or url
                     text = parser.get_text()
+                    if len(text) <= 40:
+                        # Page construite par JavaScript : on garde au moins ses metadonnees.
+                        text = _texte_de_secours(resp.text) or text
                     if len(text) > 40:
                         return {"url": url, "title": title, "text": text[:6000]}, None
                     return None, (
@@ -125,7 +137,7 @@ class CompanyBootstrapService:
                 return None, f"Le site a repondu avec un code inattendu ({resp.status_code})."
         except httpx.TimeoutException:
             logger.warning(f"[CompanyBootstrap] Timeout fetching {url}")
-            return None, "Le site n'a pas repondu dans le delai imparti (10 secondes)."
+            return None, "Le site n'a pas repondu dans le delai imparti (30 secondes)."
         except httpx.ConnectError as exc:
             logger.warning(f"[CompanyBootstrap] Connection error fetching {url}: {exc}")
             return None, "Impossible de se connecter a ce site (domaine introuvable ou serveur injoignable)."

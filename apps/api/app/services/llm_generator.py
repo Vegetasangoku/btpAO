@@ -1017,9 +1017,10 @@ D. IMPÉRATIF SUR "compliance_checklist" : la conformité doit être vérifiable
         web_sources = rag_web_sources or []
         client_sites = rag_client_sites or []
         learnings_list = tenant_learnings or []
-        delai = decision_form.get("delai_mois", 6)
-        materiel = decision_form.get("materiel_principal", "Grue à tour Potain 50m, 2 pelles 22t")
-        dechets = decision_form.get("gestion_dechets", "Tri sélectif 5 flux avec 88% de valorisation")
+        # 11/09 : plus de valeurs d'exemple inventees (6 mois, grue Potain, 88 %).
+        delai = decision_form.get("delai_mois") or "[à compléter]"
+        materiel = decision_form.get("materiel_principal") or "[matériel à compléter]"
+        dechets = decision_form.get("gestion_dechets") or "[gestion des déchets à compléter]"
         cadres = decision_form.get("equipe_cadres", [])
         securite = decision_form.get("mesures_securite", f"Respect strict du {reg_value(reg, 'safety_plan_regime', 'plan de sécurité chantier applicable')}")
         rse = decision_form.get("demarche_rse_environnement", f"Conformité {reg_value(reg, 'environmental_regulation', 'à la réglementation environnementale applicable')} et béton bas carbone")
