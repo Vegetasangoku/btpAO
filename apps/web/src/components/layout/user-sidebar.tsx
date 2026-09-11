@@ -33,28 +33,52 @@ export function UserSidebar() {
   const [userEmail, setUserEmail] = useState('');
   const [isPlatformAdmin, setIsPlatformAdmin] = useState(false);
 
+  // Le 10/09, ce bloc lisait la session UNE SEULE FOIS au montage et ne
+  // s'abonnait jamais aux changements de session. Résultat observé en vrai :
+  // l'encart « Espace actif » affichait charbelakl@gmail.com et le bandeau
+  // Super Admin, alors que toutes les requêtes API partaient sous
+  // boyloyvoy@gmail.com — le jeton en cookie ayant été remplacé entre-temps.
+  // L'utilisateur croyait donc travailler dans son espace d'administrateur
+  // alors qu'il modifiait les données du tenant client. On resynchronise
+  // désormais à chaque changement de session, et la qualité d'administrateur
+  // est celle que renvoie le SERVEUR (/auth/me), jamais une comparaison
+  // d'adresse e-mail faite dans le navigateur.
   useEffect(() => {
-    supabase.auth.getUser().then(({ data }) => {
-      if (data?.user) {
-        const email = (data.user.email || '').toLowerCase();
-        setUserEmail(email);
-        if (email === 'charbelakl@gmail.com') {
-          setIsPlatformAdmin(true);
-        }
+    let annule = false;
+
+    async function resynchroniser() {
+      try {
+        const { data } = await supabase.auth.getUser();
+        if (!annule) setUserEmail((data?.user?.email || '').toLowerCase());
+      } catch {
+        if (!annule) setUserEmail('');
       }
+      try {
+        const profile = await api.getProfile();
+        if (annule) return;
+        // /auth/me fait autorité : c'est la même source que celle qui autorise
+        // (ou refuse) les appels d'administration côté API.
+        if (profile.email) setUserEmail(profile.email.toLowerCase());
+        setIsPlatformAdmin(profile.role === 'platform_admin' || profile.role === 'super_admin');
+      } catch {
+        if (!annule) setIsPlatformAdmin(false);
+      }
+      try {
+        const tenant = await api.getTenant();
+        if (!annule) setCompanyName(tenant.name);
+      } catch {
+        if (!annule) setCompanyName('');
+      }
+    }
+
+    resynchroniser();
+    const { data: ecoute } = supabase.auth.onAuthStateChange(() => {
+      resynchroniser();
     });
-
-    api.getProfile()
-      .then((profile) => {
-        if (profile.role === 'platform_admin' || profile.role === 'super_admin') {
-          setIsPlatformAdmin(true);
-        }
-      })
-      .catch(() => {});
-
-    api.getTenant()
-      .then((tenant) => setCompanyName(tenant.name))
-      .catch(() => setCompanyName(''));
+    return () => {
+      annule = true;
+      ecoute.subscription.unsubscribe();
+    };
   }, []);
 
   async function handleLogout() {

@@ -187,6 +187,12 @@ async def _record_audit_log(
         logging.getLogger("uvicorn.error").warning("Audit log recording skipped: %s", e)
 
 
+# Ligne technique de la plateforme, jamais un client : elle sert de rattachement
+# aux enregistrements de niveau plateforme et ne doit apparaitre dans aucune
+# liste d'entreprises.
+TENANT_SYSTEME = uuid.UUID("00000000-0000-0000-0000-000000000000")
+
+
 @router.get("/tenants")
 async def list_tenants(
     request: Request,
@@ -215,6 +221,11 @@ async def list_tenants(
         )
         .outerjoin(users_subq, Tenant.id == users_subq.c.tenant_id)
         .outerjoin(projects_subq, Tenant.id == projects_subq.c.tenant_id)
+        # L'espace systeme (UUID tout a zero) n'est pas une entreprise cliente :
+        # c'est une ligne technique. L'afficher dans "Entreprises clientes"
+        # gonflait le compteur de comptes et invitait a cliquer sur un espace
+        # qui n'appartient a personne.
+        .where(Tenant.id != TENANT_SYSTEME)
         .order_by(Tenant.created_at.desc())
     )
 
@@ -1490,6 +1501,7 @@ async def get_rag_supervision(
     # est actuellement en repli sur le vecteur pseudo-aléatoire déterministe.
     from app.services.embedding_service import embedding_service
     await embedding_service.sync_platform_key(db)
+    sonde = embedding_service.probe()
     embedding_status = embedding_service.get_embedding_status()
 
     return {
@@ -1501,6 +1513,8 @@ async def get_rag_supervision(
         "index_type": "HNSW",
         "embedding_mode": embedding_status.get("mode"),
         "embedding_provider": embedding_status.get("provider"),
+        "embedding_reason": embedding_status.get("reason"),
+        "embedding_probe": sonde,
     }
 
 
@@ -2374,3 +2388,65 @@ async def apply_recommended_plan_cost_caps(
     )
     await db.commit()
     return {"success": True, "applied": applied}
+
+
+@router.post("/rag-reindex")
+async def reindex_rag_embeddings(
+    admin_user: CurrentTenantUser = Depends(require_platform_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Recalcule TOUS les embeddings (DCE, base de connaissances, fiches entreprise) avec
+    le vrai modele d'embedding.
+
+    Pourquoi (11/09) : 100 % des vecteurs stockes etaient des vecteurs de REPLI (hash
+    des mots, ~150 composantes non nulles sur 1536) parce que la cle d'embedding
+    retenue etait une cle de test rejetee en 401 -- sans que rien ne le signale. Une
+    fois la vraie cle branchee, comparer une question vectorisee pour de vrai a des
+    documents vectorises par hash donnerait des resultats aleatoires : il faut donc
+    tout recalculer d'un coup. Refuse de tourner si le vrai modele n'est pas joignable
+    (on ne remplace jamais des vecteurs de repli par d'autres vecteurs de repli)."""
+    import litellm
+    from app.core.db import AsyncSessionLocal
+    from app.services.embedding_service import embedding_service, EMBEDDING_MODEL_BY_PROVIDER
+
+    await embedding_service.sync_platform_key(db)
+    sonde = embedding_service.probe()
+    if not sonde.get("real"):
+        raise HTTPException(status_code=409, detail=f"Modèle d'embedding indisponible, rien n'a été modifié : {sonde.get('error')}")
+    key, model = embedding_service._resolve_key_and_model()
+    base = getattr(embedding_service, "_runtime_base", None)
+
+    tables = (
+        ("dce_embeddings", "content"),
+        ("knowledge_vectors", "content"),
+        ("company_assets", "coalesce(description, title)"),
+        ("tenant_document_chunks", "content"),
+    )
+    bilan: Dict[str, Any] = {}
+    async with AsyncSessionLocal() as s:
+        for table, col in tables:
+            try:
+                rows = (await s.execute(text(f"select id, {col} as txt from {table}"))).all()
+            except Exception as exc:
+                bilan[table] = f"ignorée ({type(exc).__name__})"
+                await s.rollback()
+                continue
+            faits = 0
+            for i in range(0, len(rows), 64):
+                # (Row.t est un attribut reserve de SQLAlchemy : on lit par position.)
+                lot = [(r[0], (str(r[1] or ""))[:8000] or " ") for r in rows[i:i + 64]]
+                kw = {"model": model, "input": [t for _, t in lot], "api_key": key}
+                if base:
+                    kw["api_base"] = base
+                resp = litellm.embedding(**kw)
+                for (rid, _), item in zip(lot, resp.data):
+                    vec = item["embedding"][:1536]
+                    vec = vec + [0.0] * (1536 - len(vec))
+                    await s.execute(
+                        text(f"update {table} set embedding = cast(:v as vector) where id = :id"),
+                        {"v": "[" + ",".join(f"{x:.7f}" for x in vec) + "]", "id": rid},
+                    )
+                    faits += 1
+            await s.commit()
+            bilan[table] = faits
+    return {"modele": model, "origine_cle": sonde.get("key_origin"), "reindexes": bilan}

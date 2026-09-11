@@ -88,6 +88,119 @@ def _milestone_marker(shape_style: Optional[str]) -> str:
     return "o" if style in ("arrondi", "pilule") else "D"
 
 
+# ---------------------------------------------------------------------------
+# Planning hierarchique et reglages d'affichage (11/09)
+# ---------------------------------------------------------------------------
+# Retour Charbel : « le Gantt est trop macro, pas assez de taches et sous-taches ;
+# on devrait pouvoir choisir le niveau, les couleurs, certains parametres ».
+# Les reglages ci-dessous sont PARTAGES par la vue interactive (frontend) et par
+# le PNG insere dans le Word/PDF : ce que l'utilisateur regle a l'ecran est ce qui
+# part dans le memoire.
+
+# Palettes proposees. "charte" est calculee a partir des couleurs du client.
+GANTT_PALETTES: Dict[str, List[str]] = {
+    "btp": ["#0369a1", "#0f766e", "#b45309", "#7c3aed", "#be123c", "#4d7c0f", "#1d4ed8", "#a16207"],
+    "contraste": ["#1e3a8a", "#c2410c", "#15803d", "#7e22ce", "#b91c1c", "#0e7490", "#a16207", "#334155"],
+    "pastel": ["#60a5fa", "#34d399", "#fbbf24", "#f472b6", "#a78bfa", "#fb923c", "#2dd4bf", "#94a3b8"],
+    "sobre": ["#334155", "#475569", "#64748b", "#1e293b", "#52525b", "#3f3f46", "#57534e", "#44403c"],
+}
+
+DEFAULT_GANTT_SETTINGS: Dict[str, Any] = {
+    "niveau_detail": "sous_taches",
+    "couleur_par": "phase",
+    "palette": [],
+    "chemin_critique": True,
+    "jalons": True,
+    "durees": True,
+    "liens": True,
+}
+
+_HEX_OK = __import__("re").compile(r"^#[0-9a-fA-F]{6}$")
+
+
+def _hex_ok(value: Any) -> Optional[str]:
+    v = str(value or "").strip()
+    if v and not v.startswith("#"):
+        v = "#" + v
+    return v if _HEX_OK.match(v) else None
+
+
+def normalize_gantt_settings(*layers: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Fusionne reglages par defaut < entreprise < projet, en ecartant toute valeur
+    invalide (une palette mal formee retombe sur la charte, jamais une erreur)."""
+    out = dict(DEFAULT_GANTT_SETTINGS)
+    for layer in layers:
+        if not isinstance(layer, dict):
+            continue
+        for key in DEFAULT_GANTT_SETTINGS:
+            if key in layer and layer[key] is not None:
+                out[key] = layer[key]
+    if out["niveau_detail"] not in ("phases", "taches", "sous_taches"):
+        out["niveau_detail"] = "sous_taches"
+    if out["couleur_par"] not in ("phase", "lot", "uniforme"):
+        out["couleur_par"] = "phase"
+    palette = out.get("palette")
+    if isinstance(palette, str):
+        palette = GANTT_PALETTES.get(palette, [])
+    out["palette"] = [c for c in (_hex_ok(x) for x in (palette or [])) if c][:12]
+    for key in ("chemin_critique", "jalons", "durees", "liens"):
+        out[key] = bool(out[key])
+    return out
+
+
+def _shade(hex_color: str, amount: float) -> str:
+    """Eclaircit (amount > 0, vers le blanc) ou fonce (amount < 0)."""
+    h = (_hex_ok(hex_color) or "#0284c7").lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    if amount >= 0:
+        r, g, b = (int(c + (255 - c) * amount) for c in (r, g, b))
+    else:
+        r, g, b = (int(c * (1 + amount)) for c in (r, g, b))
+    return "#{:02x}{:02x}{:02x}".format(max(0, min(r, 255)), max(0, min(g, 255)), max(0, min(b, 255)))
+
+
+def order_gantt_hierarchy(tasks: List[Dict[str, Any]]) -> List[tuple]:
+    """Ordre d'affichage : chaque phase suivie de ses taches, chaque tache de ses
+    sous-taches (parcours en profondeur). Renvoie [(tache, niveau)]. Une tache dont le
+    parent n'existe plus est traitee comme une phase plutot que perdue ; un cycle
+    parent/enfant (impossible via l'API, mais possible en base) est coupe."""
+    by_id = {str(t["id"]): t for t in tasks}
+    children: Dict[Optional[str], List[Dict[str, Any]]] = {}
+    for t in tasks:
+        parent = str(t.get("parent_id") or "") or None
+        if parent is not None and parent not in by_id:
+            parent = None
+        children.setdefault(parent, []).append(t)
+    for lst in children.values():
+        lst.sort(key=lambda t: (t.get("sequence", 0), t["start_date"]))
+    ordered: List[tuple] = []
+    seen: set = set()
+
+    def walk(parent: Optional[str], level: int) -> None:
+        for t in children.get(parent, []):
+            tid = str(t["id"])
+            if tid in seen:
+                continue
+            seen.add(tid)
+            ordered.append((t, level))
+            walk(tid, min(level + 1, 3))
+
+    walk(None, 0)
+    for t in tasks:  # orphelins pris dans un cycle
+        if str(t["id"]) not in seen:
+            ordered.append((t, 0))
+    return ordered
+
+
+def resolve_gantt_palette(settings: Dict[str, Any], brand_color: Optional[str]) -> List[str]:
+    palette = list(settings.get("palette") or [])
+    if palette:
+        return palette
+    base = GANTT_PALETTES["btp"]
+    brand = _hex_ok(brand_color)
+    return ([brand] + [c for c in base if c.lower() != brand.lower()]) if brand else base
+
+
 class GanttService:
     def generate_gantt_chart_png(
         self,
@@ -354,118 +467,238 @@ class GanttService:
             previous_id = task_id
         return tasks
 
-    def generate_gantt_chart_png_from_tasks(self, tenant_id, project_id, project_title, tasks, brand_color=None, shape_style=None):
+    ROWS_PER_PAGE = 42
+
+    def generate_gantt_chart_png_from_tasks(self, tenant_id, project_id, project_title, tasks,
+                                            brand_color=None, shape_style=None, settings=None):
         """
-        Renders the same high-resolution BTP Gantt PNG as generate_gantt_chart_png, but
-        from real persisted project_gantt_tasks rows instead of a stateless phases list
-        -- so the Word-export image always reflects the project's actual, user-edited
-        plan instead of the generic 5-phase default. Critical-path tasks (computed via
-        compute_critical_path) are drawn in red with a bolder edge, matching the
-        interactive view's highlighting so the two stay visually consistent. Uploads to
-        the SAME storage key as generate_gantt_chart_png, so any existing caller reading
-        that key (e.g. the Word export) transparently picks up the richer chart.
-        `shape_style` : voir generate_gantt_chart_png (BT02, 01/09).
+        PNG haute definition du planning REEL du projet (project_gantt_tasks), tel que
+        l'utilisateur l'a edite -- hierarchique depuis le 11/09 :
+
+        - phase avec detail visible : barre de synthese fine et foncee, crochets aux
+          extremites (convention MS Project / Primavera que les jurys connaissent) ;
+        - tache : barre pleine a la couleur de sa phase (ou de son lot) ;
+        - sous-tache : barre plus fine et plus claire, libelle indente.
+
+        `settings` (voir normalize_gantt_settings) : niveau de detail, coloration par
+        phase / lot / uniforme, palette, chemin critique, jalons, durees.
+        Au-dela de ROWS_PER_PAGE lignes, le planning est coupe en plusieurs images
+        (meme echelle de temps) : une seule image de 120 lignes serait illisible une
+        fois reduite a la largeur d'une page A4. La premiere image garde la cle
+        historique gantt_planning.png ; les suivantes sont listees dans "pages".
         """
+        cfg = normalize_gantt_settings(settings)
         if not tasks:
             return self.generate_gantt_chart_png(tenant_id, project_id, project_title, phases=[], brand_color=brand_color, shape_style=shape_style)
 
-        ordered = sorted(tasks, key=lambda t: (t.get("sequence", 0), t["start_date"]))
-        critical_ids = self.compute_critical_path(tasks)
+        ordered_all = order_gantt_hierarchy(tasks)
+        max_level = {"phases": 0, "taches": 1, "sous_taches": 3}[cfg["niveau_detail"]]
+        rows = [(t, lvl) for (t, lvl) in ordered_all if lvl <= max_level]
+        visible_ids = {str(t["id"]) for t, _ in rows}
+        has_visible_children = {
+            str(t.get("parent_id")) for t, _ in rows if t.get("parent_id") and str(t.get("parent_id")) in visible_ids
+        }
 
-        fig, ax = plt.subplots(figsize=(13, 6.5), dpi=300)
-        fig.patch.set_facecolor("#ffffff")
-        ax.set_facecolor("#f8fafc")
+        # Couleurs : chaque phase recoit une teinte ; ses descendants en heritent
+        # (ou prennent celle de leur lot). Une couleur posee sur la ligne l'emporte.
+        palette = resolve_gantt_palette(cfg, brand_color)
+        phase_color: Dict[str, str] = {}
+        lot_color: Dict[str, str] = {}
+        by_id = {str(t["id"]): t for t in tasks}
 
-        # Couleur de marque du client (branding_config.primary_color) en tete de palette
-        # (30/08, reponse a une demande explicite d'adaptation a la charte graphique) --
-        # les 4 teintes suivantes restent fixes pour garder les phases visuellement
-        # distinctes (un Gantt entierement monochrome perdrait sa lisibilite).
-        bar_colors = [brand_color or "#0284c7", "#0d9488", "#059669", "#d97706", "#4f46e5"]
-        y_positions = list(range(len(ordered) - 1, -1, -1))
+        def root_of(t):
+            seen = set()
+            cur = t
+            while cur.get("parent_id") and str(cur["parent_id"]) in by_id and str(cur["id"]) not in seen:
+                seen.add(str(cur["id"]))
+                cur = by_id[str(cur["parent_id"])]
+            return cur
 
-        overall_start = min(t["start_date"] for t in ordered)
-        overall_end = max(t["end_date"] for t in ordered)
+        for t, lvl in ordered_all:
+            if lvl == 0:
+                phase_color[str(t["id"])] = _hex_ok(t.get("color")) or palette[len(phase_color) % len(palette)]
+
+        def color_for(t, lvl):
+            own = _hex_ok(t.get("color"))
+            if own:
+                return own
+            if cfg["couleur_par"] == "uniforme":
+                base = palette[0]
+            elif cfg["couleur_par"] == "lot" and (t.get("lot") or "").strip():
+                key = t["lot"].strip().lower()
+                if key not in lot_color:
+                    lot_color[key] = palette[len(lot_color) % len(palette)]
+                base = lot_color[key]
+            else:
+                base = phase_color.get(str(root_of(t)["id"]), palette[0])
+            return _shade(base, 0.35) if lvl >= 2 else base
+
+        critical_ids = self.compute_critical_path(tasks) if cfg["chemin_critique"] else set()
+        # Un chemin critique qui couvre toutes les lignes ne distingue rien : on ne le
+        # dessine pas (meme regle que la vue interactive).
+        if critical_ids and visible_ids.issubset(critical_ids):
+            critical_ids = set()
+
+        overall_start = min(t["start_date"] for t in tasks)
+        overall_end = max(t["end_date"] for t in tasks)
+        total_days = max((overall_end - overall_start).days, 1)
+        x_margin = max(total_days * 0.02, 1)
+        # Place a droite pour le libelle des jalons.
+        x_right = max(total_days * 0.16, 10) if cfg["jalons"] else x_margin
+
+        pages = [rows[i:i + self.ROWS_PER_PAGE] for i in range(0, len(rows), self.ROWS_PER_PAGE)] or [[]]
+        keys: List[str] = []
+        total_bytes = 0
         use_rounded_bars = (shape_style or "").strip().lower() in ("arrondi", "pilule")
-        if use_rounded_bars:
-            x_margin_days = max((overall_end - overall_start).days * 0.02, 1)
+
+        for page_idx, page_rows in enumerate(pages):
+            n = len(page_rows)
+            fig_h = max(4.8, 1.9 + 0.34 * n)
+            fig, ax = plt.subplots(figsize=(13, fig_h), dpi=250)
+            fig.patch.set_facecolor("#ffffff")
+            ax.set_facecolor("#ffffff")
             ax.set_xlim(
-                mdates.date2num(overall_start - datetime.timedelta(days=x_margin_days)),
-                mdates.date2num(overall_end + datetime.timedelta(days=x_margin_days)),
+                mdates.date2num(overall_start - datetime.timedelta(days=x_margin)),
+                mdates.date2num(overall_end + datetime.timedelta(days=x_right)),
             )
-            ax.set_ylim(-0.5, len(y_positions) - 0.5)
-        mutation_aspect = _get_aspect(ax) if use_rounded_bars else 1.0
+            ax.set_ylim(-0.6, n - 0.4)
+            mutation_aspect = _get_aspect(ax) if use_rounded_bars else 1.0
 
-        for idx, y_pos in enumerate(y_positions):
-            t = ordered[idx]
-            p_start = t["start_date"]
-            p_end = t["end_date"]
-            duration_days = max((p_end - p_start).days, 1)
-            is_critical = t["id"] in critical_ids
-            color = "#dc2626" if is_critical else bar_colors[idx % len(bar_colors)]
+            labels = []
+            y_positions = []
+            band = False
+            for idx, (t, lvl) in enumerate(page_rows):
+                y = n - 1 - idx
+                y_positions.append(y)
+                tid = str(t["id"])
+                if lvl == 0:
+                    band = not band
+                if band:
+                    ax.axhspan(y - 0.5, y + 0.5, color="#f1f5f9", zorder=0, linewidth=0)
 
-            _draw_phase_bar(
-                ax, y_pos, p_start, duration_days, 0.45, color, "#0f172a",
-                1.6 if is_critical else 1.2, 0.92, 3, shape_style, mutation_aspect,
-            )
-            ax.text(
-                p_start + datetime.timedelta(days=duration_days / 2), y_pos,
-                f"{duration_days // 7} sem.", ha="center", va="center",
-                color="#ffffff", fontweight="bold", fontsize=9, zorder=4
-            )
-            milestone = t.get("milestone_label")
-            if milestone:
-                ax.plot(
-                    p_end, y_pos, marker=_milestone_marker(shape_style), markersize=10, color="#e11d48",
-                    markeredgecolor="#ffffff", markeredgewidth=1.5, zorder=5
+                p_start, p_end = t["start_date"], t["end_date"]
+                days = max((p_end - p_start).days, 1)
+                col = color_for(t, lvl)
+                is_summary = lvl == 0 and tid in has_visible_children
+                is_critical = tid in critical_ids
+                edge = "#dc2626" if is_critical else _shade(col, -0.35)
+                lw = 1.8 if is_critical else 0.8
+
+                if is_summary:
+                    dark = _shade(col, -0.25)
+                    x0 = mdates.date2num(p_start)
+                    ax.barh(y + 0.08, days, left=p_start, height=0.16, color=dark, zorder=3, linewidth=0)
+                    for xe in (x0, x0 + days):
+                        ax.add_patch(mpatches.Polygon(
+                            [(xe - total_days * 0.004, y + 0.16), (xe + total_days * 0.004, y + 0.16), (xe, y - 0.12)],
+                            closed=True, color=dark, zorder=4,
+                        ))
+                elif t.get("is_milestone") and p_end == p_start:
+                    ax.plot(p_start, y, marker="D", markersize=9, color=col, markeredgecolor="#0f172a", zorder=5)
+                else:
+                    height = {0: 0.56, 1: 0.5}.get(lvl, 0.34)
+                    _draw_phase_bar(ax, y, p_start, days, height, col, edge, lw, 0.95, 3, shape_style, mutation_aspect)
+                    if cfg["durees"]:
+                        weeks = days / 7
+                        txt = f"{round(weeks)} sem." if weeks >= 1.5 else f"{days} j"
+                        if days >= total_days * 0.06:
+                            ax.text(p_start + datetime.timedelta(days=days / 2), y, txt, ha="center", va="center",
+                                    color=_readable_text_color(col), fontsize=7.5 if lvl >= 2 else 8.5,
+                                    fontweight="bold", zorder=4)
+                        else:
+                            ax.text(p_end + datetime.timedelta(days=total_days * 0.005), y, txt, ha="left", va="center",
+                                    color="#475569", fontsize=7, zorder=4)
+
+                milestone = (t.get("milestone_label") or "").strip()
+                if cfg["jalons"] and milestone and lvl <= 1:
+                    ax.plot(p_end, y, marker=_milestone_marker(shape_style), markersize=8, color="#e11d48",
+                            markeredgecolor="#ffffff", markeredgewidth=1.2, zorder=6)
+                    ax.text(p_end + datetime.timedelta(days=total_days * 0.012), y - 0.02, milestone[:48],
+                            va="center", ha="left", color="#881337", fontsize=7.5, fontweight="semibold", zorder=6)
+
+                name = str(t.get("name") or "")
+                lot = (t.get("lot") or "").strip()
+                if lvl >= 1 and lot and cfg["couleur_par"] == "lot":
+                    name = f"{name} [{lot}]"
+                limit = 58 - 4 * lvl
+                name = name if len(name) <= limit else name[: limit - 1] + "…"
+                labels.append(("    " * lvl) + (name.upper() if lvl == 0 else name))
+
+            ax.set_yticks(y_positions)
+            tick_labels = ax.set_yticklabels(labels)
+            for (t, lvl), lab in zip(page_rows, tick_labels):
+                lab.set_fontsize({0: 9.5, 1: 8.8}.get(lvl, 8))
+                lab.set_fontweight({0: "bold", 1: "semibold"}.get(lvl, "normal"))
+                lab.set_color({0: "#0f172a", 1: "#1e293b"}.get(lvl, "#475569"))
+                lab.set_horizontalalignment("left")
+            ax.tick_params(axis="y", length=0, pad=0)
+            # Libelles alignes a gauche : on decale d'autant la zone de texte.
+            fig.canvas.draw()
+            # get_window_extent est en pixels, `pad` en points : conversion obligatoire,
+            # sinon l'ecart libelles/barres est multiplie par dpi/72 (~3,5).
+            max_w_px = max((lab.get_window_extent().width for lab in tick_labels), default=0)
+            ax.yaxis.set_tick_params(pad=max_w_px * 72.0 / fig.dpi + 4)
+
+            ax.xaxis_date()
+            span_months = total_days / 30.4
+            if span_months > 14:
+                ax.xaxis.set_major_locator(mdates.MonthLocator(interval=2))
+            else:
+                ax.xaxis.set_major_locator(mdates.MonthLocator())
+            ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %Y"))
+            if total_days <= 200:
+                ax.xaxis.set_minor_locator(mdates.WeekdayLocator(byweekday=mdates.MO))
+            ax.xaxis.tick_top()
+            plt.setp(ax.get_xticklabels(), rotation=0, fontsize=8.5, color="#475569")
+            ax.grid(axis="x", which="major", color="#cbd5e1", linestyle="-", linewidth=0.6, zorder=1)
+            ax.grid(axis="x", which="minor", color="#e2e8f0", linestyle=":", linewidth=0.5, zorder=1)
+            ax.set_axisbelow(True)
+            for side in ("right", "left", "bottom"):
+                ax.spines[side].set_visible(False)
+            ax.spines["top"].set_color("#94a3b8")
+
+            total_weeks = total_days // 7
+            if page_idx == 0:
+                nb = {0: 0, 1: 0, 2: 0}
+                for _, lvl in ordered_all:
+                    nb[min(lvl, 2)] += 1
+                detail = f"{nb[0]} phase(s)"
+                if nb[1]:
+                    detail += f", {nb[1]} tâche(s)"
+                if nb[2]:
+                    detail += f", {nb[2]} sous-tâche(s)"
+                crit = f" | Chemin critique : {len(critical_ids)} ligne(s)" if critical_ids else ""
+                fig.suptitle(
+                    f"PLANNING PRÉVISIONNEL D'EXÉCUTION — {str(project_title).upper()[:80]}\n"
+                    f"Durée globale : {total_weeks} semaines (~{round(total_weeks / 4.33, 1)} mois) | "
+                    f"Du {overall_start.strftime('%d/%m/%Y')} au {overall_end.strftime('%d/%m/%Y')} | {detail}{crit}",
+                    fontsize=11, fontweight="bold", color="#0f172a", y=0.995,
                 )
-                ax.text(
-                    p_end + datetime.timedelta(days=3), y_pos, f" {milestone}",
-                    va="center", ha="left", color="#881337", fontsize=8.5,
-                    fontweight="semibold", zorder=5
-                )
+            else:
+                fig.suptitle(f"PLANNING PRÉVISIONNEL (suite {page_idx + 1}/{len(pages)})",
+                             fontsize=10, fontweight="bold", color="#0f172a", y=0.995)
+            plt.tight_layout(rect=(0, 0, 1, 1 - 0.5 / fig_h))
 
-        ax.set_yticks(y_positions)
-        ax.set_yticklabels([t["name"] for t in ordered], fontsize=10, fontweight="bold", color="#1e293b")
-        ax.xaxis_date()
-        ax.xaxis.set_major_locator(mdates.MonthLocator())
-        ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %Y"))
-        ax.xaxis.set_minor_locator(mdates.WeekdayLocator(byweekday=mdates.MO))
-
-        plt.setp(ax.get_xticklabels(), rotation=0, fontsize=9, color="#475569")
-        ax.grid(axis="x", which="both", color="#cbd5e1", linestyle="--", linewidth=0.7, alpha=0.7, zorder=1)
-        ax.set_axisbelow(True)
-
-        total_weeks = (overall_end - overall_start).days // 7
-        total_months = round(total_weeks / 4.33, 1)
-        n_critical = len(critical_ids)
-        plt.title(
-            f"PLANNING PRÉVISIONNEL DE PHASAGE — {project_title.upper()}\n"
-            f"Durée globale : {total_weeks} semaines (~{total_months} mois) | Achèvement : {overall_end.strftime('%d/%m/%Y')} | "
-            f"Chemin critique : {n_critical} tâche(s)",
-            fontsize=12, fontweight="bold", color="#0f172a", pad=18
-        )
-        plt.tight_layout()
-
-        img_buffer = io.BytesIO()
-        plt.savefig(img_buffer, format="png", dpi=300, bbox_inches="tight")
-        img_buffer.seek(0)
-        img_bytes = img_buffer.read()
-        plt.close(fig)
-
-        s3_key = storage_service.upload_file(
-            tenant_id=tenant_id,
-            subpath=f"visuals/{project_id}/gantt_planning.png",
-            file_obj=img_bytes,
-            content_type="image/png"
-        )
+            img_buffer = io.BytesIO()
+            plt.savefig(img_buffer, format="png", dpi=250, bbox_inches="tight")
+            img_bytes = img_buffer.getvalue()
+            plt.close(fig)
+            total_bytes += len(img_bytes)
+            name = "gantt_planning.png" if page_idx == 0 else f"gantt_planning_p{page_idx + 1}.png"
+            keys.append(storage_service.upload_file(
+                tenant_id=tenant_id, subpath=f"visuals/{project_id}/{name}",
+                file_obj=img_bytes, content_type="image/png",
+            ))
 
         return {
-            "s3_key": s3_key,
-            "url": f"/api/visuals/file/{s3_key}",
-            "total_weeks": total_weeks,
+            "s3_key": keys[0],
+            "url": f"/api/visuals/file/{keys[0]}",
+            "pages": keys,
+            "total_weeks": total_days // 7,
             "completion_date": overall_end.strftime("%d/%m/%Y"),
-            "bytes_length": len(img_bytes),
-            "critical_task_count": n_critical,
+            "bytes_length": total_bytes,
+            "critical_task_count": len(critical_ids),
+            "rows": len(rows),
         }
 
 

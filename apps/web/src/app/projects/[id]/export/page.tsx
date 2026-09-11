@@ -29,12 +29,16 @@ import {
   XCircle,
   Cpu,
   FileCheck,
+  HelpCircle,
 } from 'lucide-react';
-import { api, fetchAuthenticatedBlobUrl } from '@/lib/api';
+import { api, fetchAuthenticatedBlobUrl, resolveBackendPath } from '@/lib/api';
 import { useTranslation } from '@/components/i18n-provider';
 import { MEMO_SECTIONS } from '@/lib/sections';
 import { WorkerHealthBanner, useWorkerHealth } from '@/components/editor/worker-health-banner';
 import { Project, SuggestedTemplate, GoNoGoAnalysis, GeneratedSection, ExportJob } from '@/lib/types';
+import { Bascule } from '@/components/ui/bascule';
+import { CadreAcheteurCard } from '@/components/export/cadre-acheteur-card';
+import { PiecesCard } from '@/components/export/pieces-card';
 
 const MANDATORY_SECTIONS = MEMO_SECTIONS;
 
@@ -51,7 +55,6 @@ export default function ExportPage() {
   const [calculatingGoNoGo, setCalculatingGoNoGo] = useState(false);
 
   // Standard Export States
-  const apiBase = (process.env.NEXT_PUBLIC_API_URL || '').replace(/\/$/, '');
   const [exporting, setExporting] = useState<'docx' | 'pdf' | null>(null);
   // Comme pour la rédaction : si le worker de fond est arrêté ou périmé, la
   // compilation passe par la route synchrone plutôt que d'attendre un worker qui ne
@@ -62,6 +65,14 @@ export default function ExportPage() {
   const [includeVisuals, setIncludeVisuals] = useState(true);
   const [includeCoverPage, setIncludeCoverPage] = useState(true);
   const [downloadingResult, setDownloadingResult] = useState(false);
+  // Compiler et télécharger sont deux opérations différentes : les mélanger
+  // affichait « Erreur de compilation » au-dessus de « compilé avec succès »
+  // (constaté le 10/09). Deux canaux, deux libellés, chacun effacé au bon moment.
+  const [erreurTelechargement, setErreurTelechargement] = useState<string | null>(null);
+  // La page proposait DEUX blocs d'export concurrents, visibles en même temps,
+  // avec deux paragraphes pour expliquer lequel ne pas utiliser. On choisit
+  // désormais la destination une fois, et un seul bloc reste à l'écran.
+  const [destination, setDestination] = useState<'standard' | 'golfe'>('standard');
 
   // Suggested Template State
   const [suggestedTemplate, setSuggestedTemplate] = useState<SuggestedTemplate | null>(null);
@@ -136,6 +147,7 @@ export default function ExportPage() {
   async function handleExport(format: 'docx' | 'pdf') {
     setExporting(format);
     setError(null);
+    setErreurTelechargement(null);
     setResult(null);
     try {
       if (moteurIndisponible) {
@@ -182,7 +194,13 @@ export default function ExportPage() {
   }
 
   async function handleDownloadResult() {
-    if (!result?.s3_docx_url) return;
+    setErreurTelechargement(null);
+    if (!result?.s3_docx_url) {
+      // Sans URL, l'ancien code composait `${apiBase}null` et l'appel partait
+      // quand même : l'utilisateur recevait un 404 incompréhensible.
+      setErreurTelechargement(t('projects.export.erreur_fichier_absent'));
+      return;
+    }
     setDownloadingResult(true);
     try {
       // Le endpoint /export/download/{id} exige un Bearer token (get_current_tenant_user) --
@@ -190,7 +208,7 @@ export default function ExportPage() {
       // échouerait systématiquement en 401. Même correctif que gantt-preview.tsx /
       // organigramme-preview.tsx : on récupère le fichier en tant que blob authentifié
       // avant de déclencher le téléchargement.
-      const blobUrl = await fetchAuthenticatedBlobUrl(`${apiBase}${result.s3_docx_url}`);
+      const blobUrl = await fetchAuthenticatedBlobUrl(resolveBackendPath(result.s3_docx_url));
       const ext = result.format === 'pdf' && result.s3_pdf_url ? 'pdf' : 'docx';
       const a = document.createElement('a');
       a.href = blobUrl;
@@ -200,7 +218,7 @@ export default function ExportPage() {
       document.body.removeChild(a);
       setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
     } catch (err: any) {
-      setError(err?.message || t('projects.export.error_export'));
+      setErreurTelechargement(err?.message || t('projects.export.erreur_telechargement'));
     } finally {
       setDownloadingResult(false);
     }
@@ -232,6 +250,11 @@ export default function ExportPage() {
   const isGo = gonogo?.recommendation === 'GO';
   const isReserves = gonogo?.recommendation === 'RESERVES' || gonogo?.recommendation === 'RÉSERVES';
   const isNoGo = gonogo?.recommendation === 'NO-GO';
+  // Un dossier sans RC n'a AUCUN critère éliminatoire extrait : afficher alors
+  // « 100 % des critères validés » revient à valider le vide. Troisième état
+  // nécessaire : « on ne sait pas », visuellement distinct du vert et du rouge.
+  const critereDce = gonogo?.factors?.find((f) => f.category === 'mandatory_criteria');
+  const criteresInconnus = critereDce?.status === 'missing_data';
 
   return (
     <div className="space-y-8 pb-20 max-w-5xl mx-auto font-sans">
@@ -365,7 +388,9 @@ export default function ExportPage() {
               {/* Factors Highlights */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
                 <div className="p-3.5 rounded-xl bg-sunken border border-line flex items-start gap-2.5">
-                  {gonogo.mandatory_criteria_met ? (
+                  {criteresInconnus ? (
+                    <HelpCircle className="w-4 h-4 text-muted-foreground shrink-0 mt-0.5" />
+                  ) : gonogo.mandatory_criteria_met ? (
                     <Check className="w-4 h-4 text-positive shrink-0 mt-0.5" />
                   ) : (
                     <XCircle className="w-4 h-4 text-danger shrink-0 mt-0.5" />
@@ -373,7 +398,11 @@ export default function ExportPage() {
                   <div>
                     <p className="font-bold text-foreground">{t('projects.export.mandatory_criteria')}</p>
                     <p className="text-[11px] text-muted-foreground">
-                      {gonogo.mandatory_criteria_met ? t('projects.export.mandatory_criteria_ok') : t('projects.export.mandatory_criteria_ko')}
+                      {criteresInconnus
+                        ? t('projects.export.mandatory_criteria_inconnus')
+                        : gonogo.mandatory_criteria_met
+                        ? t('projects.export.mandatory_criteria_ok')
+                        : t('projects.export.mandatory_criteria_ko')}
                     </p>
                   </div>
                 </div>
@@ -501,10 +530,22 @@ export default function ExportPage() {
                 </span>
               </div>
               <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider">
-                {suggestedTemplate.source_type === 'export_template' ? t('projects.export.template_source_official') : t('projects.export.template_source_history')}
+                {suggestedTemplate.source_type === 'export_template'
+                  ? t('projects.export.template_source_official')
+                  : suggestedTemplate.source_type === 'memoire_client'
+                  ? t('projects.export.template_source_memoire')
+                  : t('projects.export.template_source_history')}
               </span>
             </div>
             <p className="text-xs text-foreground">{suggestedTemplate.description}</p>
+            {suggestedTemplate.source_type !== 'export_template' && suggestedTemplate.source_type !== 'memoire_client' && (
+              // Sans gabarit Word enregistré, la mise en page est reprise du DERNIER
+              // document produit par l'outil lui-même — pas d'un modèle de l'entreprise.
+              // Le libellé « Modèle déduit » laissait croire le contraire.
+              <p className="text-[11px] text-hl leading-relaxed">
+                {t('projects.export.template_note_historique')}
+              </p>
+            )}
           </div>
         ) : null}
 
@@ -520,35 +561,63 @@ export default function ExportPage() {
           </p>
         )}
 
-        {/* Options Toggles */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <div className="flex items-center justify-between p-4 rounded-xl bg-sunken border border-line">
-            <div>
-              <p className="text-xs font-bold text-slate-900 dark:text-zinc-200">{t('projects.export.toggle_visuals_label')}</p>
-              <p className="text-[11px] text-muted-foreground mt-0.5">{t('projects.export.toggle_visuals_desc')}</p>
-            </div>
-            <button
-              type="button"
-              onClick={() => setIncludeVisuals(!includeVisuals)}
-              className={`w-11 h-6 rounded-full relative transition-colors cursor-pointer ${includeVisuals ? 'bg-hl' : 'bg-slate-300 dark:bg-slate-700'}`}
-            >
-              <span className={`absolute top-1 w-4 h-4 rounded-full bg-white shadow transition-transform ${includeVisuals ? 'translate-x-6' : 'translate-x-1'}`} />
-            </button>
+        {/* Destination du dossier : elle commande tout le reste de la page. */}
+        <div>
+          <p className="text-[12px] font-semibold text-foreground mb-2">
+            {t('projects.export.destination_label')}
+          </p>
+          <div role="radiogroup" aria-label={t('projects.export.destination_label')} className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {([
+              { cle: 'standard' as const, titre: t('projects.export.destination_standard'), desc: t('projects.export.destination_standard_desc') },
+              { cle: 'golfe' as const, titre: t('projects.export.destination_golfe'), desc: t('projects.export.destination_golfe_desc') },
+            ]).map((option) => (
+              <button
+                key={option.cle}
+                type="button"
+                role="radio"
+                aria-checked={destination === option.cle}
+                onClick={() => setDestination(option.cle)}
+                className={`text-start p-4 rounded-xl border transition-colors cursor-pointer ${
+                  destination === option.cle
+                    ? 'bg-hl/10 border-hl/50'
+                    : 'bg-sunken border-line hover:border-hl/30'
+                }`}
+              >
+                <span className="flex items-center gap-2">
+                  <span
+                    aria-hidden
+                    className={`w-3.5 h-3.5 rounded-full border-2 shrink-0 ${
+                      destination === option.cle ? 'border-hl bg-hl' : 'border-slate-400 dark:border-slate-600'
+                    }`}
+                  />
+                  <span className="text-[13px] font-bold text-foreground">{option.titre}</span>
+                </span>
+                <span className="block text-[11px] text-muted-foreground mt-1 ms-5.5">{option.desc}</span>
+              </button>
+            ))}
           </div>
+        </div>
 
-          <div className="flex items-center justify-between p-4 rounded-xl bg-sunken border border-line">
-            <div>
-              <p className="text-xs font-bold text-slate-900 dark:text-zinc-200">{t('projects.export.toggle_cover_label')}</p>
-              <p className="text-[11px] text-muted-foreground mt-0.5">{t('projects.export.toggle_cover_desc')}</p>
-            </div>
-            <button
-              type="button"
-              onClick={() => setIncludeCoverPage(!includeCoverPage)}
-              className={`w-11 h-6 rounded-full relative transition-colors cursor-pointer ${includeCoverPage ? 'bg-hl' : 'bg-slate-300 dark:bg-slate-700'}`}
-            >
-              <span className={`absolute top-1 w-4 h-4 rounded-full bg-white shadow transition-transform ${includeCoverPage ? 'translate-x-6' : 'translate-x-1'}`} />
-            </button>
-          </div>
+        {destination === 'standard' && (
+        <>
+        {/* Options d'assemblage du document */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <Bascule
+            actif={includeVisuals}
+            onChange={setIncludeVisuals}
+            titre={t('projects.export.toggle_visuals_label')}
+            description={t('projects.export.toggle_visuals_desc')}
+            libelleActif={t('projects.export.option_incluse')}
+            libelleInactif={t('projects.export.option_exclue')}
+          />
+          <Bascule
+            actif={includeCoverPage}
+            onChange={setIncludeCoverPage}
+            titre={t('projects.export.toggle_cover_label')}
+            description={t('projects.export.toggle_cover_desc')}
+            libelleActif={t('projects.export.option_incluse')}
+            libelleInactif={t('projects.export.option_exclue')}
+          />
         </div>
 
         {/* Export Buttons */}
@@ -603,11 +672,8 @@ export default function ExportPage() {
             )}
           </button>
         </div>
-
-        <p className="text-[11px] text-muted-foreground flex items-center gap-1.5">
-          <Globe className="w-3.5 h-3.5 shrink-0" />
-          {t('projects.export.pointer_to_mea')}
-        </p>
+        </>
+        )}
       </div>
 
       {/* Error Notification */}
@@ -617,6 +683,16 @@ export default function ExportPage() {
           <div>
             <p className="font-bold">{t('projects.export.error_title')}</p>
             <p className="text-[11px] text-danger mt-0.5">{error}</p>
+          </div>
+        </div>
+      )}
+
+      {erreurTelechargement && (
+        <div className="flex items-start gap-3 p-4 rounded-xl bg-danger/10 border border-danger/30 text-danger text-xs">
+          <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-danger" />
+          <div>
+            <p className="font-bold">{t('projects.export.erreur_telechargement_titre')}</p>
+            <p className="text-[11px] text-danger mt-0.5">{erreurTelechargement}</p>
           </div>
         </div>
       )}
@@ -687,7 +763,15 @@ export default function ExportPage() {
         </div>
       )}
 
-      {/* SECTION: MEA & INTERNATIONAL REGIONAL EXPORT */}
+      {/* Cadre de réponse imposé par l'acheteur (11/09). */}
+      <CadreAcheteurCard projectId={projectId} />
+
+      {/* Pièces administratives & formulaires officiels du pays (11/09). */}
+      <PiecesCard projectId={projectId} />
+
+      {/* Export régional : affiché uniquement quand la destination l'exige,
+          au lieu de cohabiter en permanence avec l'export standard. */}
+      {destination === 'golfe' && (
       <div className="card-modern p-6 sm:p-8 space-y-5">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200/60 dark:border-zinc-800/40 pb-4">
           <div className="flex items-center gap-3">
@@ -706,9 +790,7 @@ export default function ExportPage() {
           </span>
         </div>
 
-        <p className="text-[12px] text-muted-foreground">
-          {t('projects.export.mea_replaces_note')}
-        </p>
+
 
         <form onSubmit={handleMeaExport} className="space-y-4">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -765,6 +847,7 @@ export default function ExportPage() {
           </div>
         )}
       </div>
+      )}
     </div>
   );
 }

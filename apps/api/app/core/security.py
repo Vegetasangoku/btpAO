@@ -5,6 +5,7 @@ Live Database RBAC verification for sensitive tenant operations.
 """
 import time
 import uuid
+import logging
 from typing import Optional
 import httpx
 from fastapi import Depends, HTTPException, Request, status
@@ -57,6 +58,14 @@ class CurrentTenantUser(BaseModel):
     is_authenticated: bool = True
 
 
+logger = logging.getLogger(__name__)
+
+# Espace du jeu de donnees E2E. Le harnais de test se fait passer pour un
+# utilisateur precis (voir plus bas) : c'est SON espace, pas un repli general.
+# Aucun autre chemin de ce fichier n'a le droit de deviner un espace.
+ESPACE_JEU_DE_TEST_E2E = getattr(settings, "E2E_TENANT_ID", None) or "93365082-4489-4f0a-9e4b-9dbb219553aa"
+
+
 async def get_current_tenant_user(
     request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_scheme),
@@ -79,7 +88,7 @@ async def get_current_tenant_user(
         is_non_production_env = settings.APP_ENV in ("development", "test", "testing", "e2e")
         e2e_secret = request.headers.get("x-e2e-secret") or request.cookies.get("btp_e2e_secret")
         if is_non_production_env and e2e_secret and e2e_secret == "btp-e2e-strong-secret-prod-safe-2026":
-            target_tenant = request.headers.get("x-tenant-id") or "93365082-4489-4f0a-9e4b-9dbb219553aa"
+            target_tenant = request.headers.get("x-tenant-id") or ESPACE_JEU_DE_TEST_E2E
             return CurrentTenantUser(
                 user_id="7aac308a-1720-4db0-9f30-0e20c900d900",
                 tenant_id=target_tenant,
@@ -145,7 +154,31 @@ async def get_current_tenant_user(
             or email == "charbelakl@gmail.com"
         )
 
-        tenant_id = app_metadata.get("tenant_id") or user_metadata.get("tenant_id") or request.headers.get("x-tenant-id")
+        # Qui a le droit de designer l'espace consulte ?
+        #
+        # L'ancien ordre etait : claim du jeton, PUIS en-tete X-Tenant-ID. Deux
+        # consequences, opposees et toutes deux mauvaises :
+        #   - un administrateur ne pouvait PAS inspecter l'espace d'un client,
+        #     puisque son propre espace, porte par le jeton, gagnait toujours ;
+        #   - un utilisateur ordinaire DONT LE JETON N'AVAIT PAS DE TENANT
+        #     pouvait, lui, en designer un librement par simple en-tete HTTP.
+        #
+        # Regle desormais : seul un administrateur plateforme peut designer un
+        # espace par en-tete. Pour tout autre compte, le jeton fait foi et
+        # l'en-tete est ignore, quoi qu'il contienne.
+        tenant_du_jeton = app_metadata.get("tenant_id") or user_metadata.get("tenant_id")
+        tenant_demande = request.headers.get("x-tenant-id")
+
+        if is_platform_admin:
+            tenant_id = tenant_demande or tenant_du_jeton
+        else:
+            tenant_id = tenant_du_jeton
+            if tenant_demande and tenant_demande != tenant_du_jeton:
+                logger.warning(
+                    "[Auth] %s a demande l'espace %s alors que son jeton porte %s : "
+                    "en-tete ignore (seul un administrateur plateforme peut changer d'espace).",
+                    email or user_id, tenant_demande, tenant_du_jeton,
+                )
 
         if not user_id:
             raise HTTPException(
@@ -154,15 +187,27 @@ async def get_current_tenant_user(
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
-        # For platform admins without explicit tenant, allow defaulting to active tenant for tenant-scoped operations
-        if is_platform_admin and not tenant_id:
-            tenant_id = request.headers.get("x-tenant-id") or "93365082-4489-4f0a-9e4b-9dbb219553aa"
-
-        if not is_platform_admin and not tenant_id:
+        # ATTENTION -- ne jamais deviner un espace client ici.
+        #
+        # Ce bloc rabattait autrefois tout compte sans tenant_id sur un
+        # identifiant ecrit en dur, celui du premier client. Consequence reelle
+        # constatee le 10/09 : le compte d'administration, qui n'avait aucun
+        # espace, ouvrait et modifiait les donnees de ce client en croyant etre
+        # chez lui -- "Ouvrir l'espace entreprise" affichait le dossier d'un
+        # tiers. Ce n'etait pas un defaut d'affichage : c'etait le chemin de
+        # donnees reel. Deux comptes, un seul espace.
+        #
+        # Desormais : pas d'espace connu => refus explicite. Un administrateur
+        # qui veut inspecter un client envoie X-Tenant-ID en connaissance de
+        # cause (l'interface le lui fait choisir et le lui rappelle).
+        if not tenant_id:
             raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid token payload: missing tenant_id in JWT claims",
-                headers={"WWW-Authenticate": "Bearer"},
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "Aucun espace client rattaché à ce compte. "
+                    "Un administrateur doit choisir explicitement l'entreprise à consulter "
+                    "(en-tête X-Tenant-ID) ; aucun espace n'est choisi à sa place."
+                ),
             )
 
         return CurrentTenantUser(

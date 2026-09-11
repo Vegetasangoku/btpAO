@@ -65,7 +65,11 @@ export function Header() {
     ? user.email.substring(0, 2).toUpperCase()
     : 'BTP';
 
-  const isSuperAdmin = (user?.email || '').toLowerCase() === 'charbelakl@gmail.com' || role === 'platform_admin' || role === 'super_admin';
+  // Le rôle vient du jeton de la session en cours. On ne déduit plus la qualité
+  // d'administrateur d'une adresse e-mail écrite en dur : l'API, elle, ne la
+  // reconnaît pas forcément, et l'interface affichait des accès que le serveur
+  // refusait ensuite en 403 (constaté le 10/09).
+  const isSuperAdmin = role === 'platform_admin' || role === 'super_admin';
 
   return (
     <header className="h-14 border-b border-slate-200/70 dark:border-zinc-800/50 bg-white/80 dark:bg-[hsl(225,20%,5%)]/80 backdrop-blur-xl px-5 flex items-center justify-between sticky top-0 z-20 transition-colors duration-200">

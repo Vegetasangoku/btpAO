@@ -1,8 +1,11 @@
 'use client';
 
+import Link from 'next/link';
+
 import React from 'react';
-import { FileWarning, ImageIcon, ShieldAlert, CheckCircle2, Gauge } from 'lucide-react';
+import { FileWarning, ImageIcon, ShieldAlert, CheckCircle2, Gauge, ArrowRight, ChevronDown, ChevronRight } from 'lucide-react';
 import { useTranslation } from '@/components/i18n-provider';
+import { TexteAvecAcronymes } from '@/components/ui/acronyme';
 
 /**
  * Diagnostic d'une section générée (10/09).
@@ -16,7 +19,7 @@ import { useTranslation } from '@/components/i18n-provider';
  * rien d'affiché.
  */
 
-type Lacune = { missing?: string; impact?: string; how_to_fix?: string };
+type Lacune = { missing?: string; impact?: string; how_to_fix?: string; lien?: string; lien_libelle?: string };
 
 type BlocLacunes = { type: 'lacunes'; items?: Lacune[] };
 type BlocConso = {
@@ -36,6 +39,7 @@ type Bloc = BlocLacunes | BlocVisuels | BlocConso | { type?: string };
 
 export function SectionDiagnostics({ placeholders }: { placeholders: unknown }) {
   const { t } = useTranslation();
+  const [detailOuvert, setDetailOuvert] = React.useState(false);
   if (!Array.isArray(placeholders) || placeholders.length === 0) return null;
 
   const blocs = placeholders.filter(
@@ -83,17 +87,40 @@ export function SectionDiagnostics({ placeholders }: { placeholders: unknown }) 
             </h3>
           </div>
           <p className="text-[11px] text-muted-foreground leading-relaxed">{t('diag.lacunes_desc')}</p>
-          <ul className="space-y-2.5">
+          {/* Le plan d'action en tête de dossier dit QUOI faire et OÙ. Ce bloc-ci
+              garde le détail brut du moteur pour cette section précise : utile,
+              mais replié par défaut pour ne pas répéter neuf fois la même chose. */}
+          <button
+            type="button"
+            onClick={() => setDetailOuvert((v) => !v)}
+            aria-expanded={detailOuvert}
+            className="inline-flex items-center gap-1 text-[11px] font-semibold text-hl hover:underline"
+          >
+            {detailOuvert ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+            {detailOuvert ? t('diag.masquer_detail') : `${t('diag.voir_detail')} (${lacunes.length})`}
+          </button>
+          <ul className={`space-y-2.5 ${detailOuvert ? '' : 'hidden'}`}>
             {lacunes.map((l, i) => (
               <li key={i} className="border-l-2 border-hl/40 pl-3 py-0.5">
-                <p className="text-[12px] font-semibold text-foreground">{l.missing || '—'}</p>
+                <p className="text-[12px] font-semibold text-foreground"><TexteAvecAcronymes texte={l.missing || '—'} /></p>
                 {l.impact && (
                   <p className="text-[11px] text-muted-foreground mt-0.5">
-                    {t('diag.consequence')} {l.impact}
+                    {t('diag.consequence')} <TexteAvecAcronymes texte={l.impact} />
                   </p>
                 )}
                 {l.how_to_fix && (
-                  <p className="text-[11px] text-hl mt-0.5">{t('diag.a_faire')} {l.how_to_fix}</p>
+                  <p className="text-[11px] text-hl mt-0.5">{t('diag.a_faire')} <TexteAvecAcronymes texte={l.how_to_fix} /></p>
+                )}
+                {/* Dire quoi faire sans dire OÙ le faire laisse l'utilisateur
+                    chercher l'écran. Le bouton l'y emmène directement. */}
+                {l.lien && (
+                  <Link
+                    href={l.lien}
+                    className="inline-flex items-center gap-1 mt-1.5 text-[11px] font-semibold text-hl hover:underline"
+                  >
+                    <span>{l.lien_libelle || t('diag.a_faire')}</span>
+                    <ArrowRight className="w-3 h-3" />
+                  </Link>
                 )}
               </li>
             ))}

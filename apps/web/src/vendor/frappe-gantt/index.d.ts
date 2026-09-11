@@ -25,6 +25,16 @@ declare module "@/vendor/frappe-gantt/frappe-gantt.es.js" {
     on_date_change?: (task: FrappeGanttTask, start: Date, end: Date) => void;
     on_progress_change?: (task: FrappeGanttTask, progress: number) => void;
     on_view_change?: (mode: any) => void;
+    /* Options de géométrie réellement lues par le moteur (voir frappe-gantt.es.js :
+       `bar_height: 30` et `padding: 18` dans les valeurs par défaut, utilisées pour
+       calculer la hauteur des barres et l'espacement des lignes). Elles manquaient
+       dans cette déclaration écrite à la main, ce qui les rendait inutilisables
+       depuis TypeScript alors qu'elles fonctionnent à l'exécution. */
+    bar_height?: number;
+    padding?: number;
+    bar_corner_radius?: number;
+    arrow_curve?: number;
+    column_width?: number;
   }
 
   export default class Gantt {

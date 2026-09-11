@@ -337,6 +337,11 @@ export default function EditorPage() {
           const isKeyGenerating = generating.has(meta.key);
           const score = sec?.compliance_score;
           const isLocked = sec?.locked_for_export;
+          // Un canevas de secours n'est pas une rédaction : il ne doit jamais
+          // s'afficher comme une section terminée avec un score. Le moteur pose
+          // un bandeau reconnaissable en tête du corps ; on s'y raccroche plutôt
+          // que de deviner à partir du score.
+          const estCanevas = (sec?.content_html || '').includes('Canevas de secours');
 
           return (
             <button
@@ -351,7 +356,7 @@ export default function EditorPage() {
               <div className="mt-0.5 shrink-0">
                 {isKeyGenerating
                   ? <Loader2 className="w-3.5 h-3.5 text-hl animate-spin" />
-                  : hasFailed
+                  : hasFailed || estCanevas
                     ? <AlertTriangle className="w-3.5 h-3.5 text-danger" />
                     : isLocked
                       ? <Lock className="w-3.5 h-3.5 text-positive" />
@@ -366,10 +371,15 @@ export default function EditorPage() {
                   <p className="text-[10px] font-mono mt-0.5 text-hl">{t('editor.studio_visuals')}</p>
                 ) : hasFailed ? (
                   <p className="text-[10px] font-mono mt-0.5 text-danger">{t('editor.generation_failed')}</p>
+                ) : estCanevas ? (
+                  <p className="text-[10px] font-mono mt-0.5 text-danger">{t('editor.canevas_a_regenerer')}</p>
                 ) : isKeyGenerating ? (
                   <p className="text-[10px] font-mono mt-0.5 text-hl">{t('editor.generating')}</p>
                 ) : isDone && score !== undefined ? (
-                  <p className={`text-[10px] font-mono mt-0.5 ${score >= 90 ? 'text-positive' : score >= 70 ? 'text-hl' : 'text-danger'}`}>
+                  <p
+                    title={t('editor.score_rc_infobulle')}
+                    className={`text-[10px] font-mono mt-0.5 ${score >= 90 ? 'text-positive' : score >= 70 ? 'text-hl' : 'text-danger'}`}
+                  >
                     {t('editor.score_rc', { score })}
                   </p>
                 ) : (

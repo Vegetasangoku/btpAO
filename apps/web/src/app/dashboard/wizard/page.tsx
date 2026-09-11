@@ -19,7 +19,7 @@ import {
   Trash2,
   Info,
 } from 'lucide-react';
-import { api, fetchAuthenticatedBlobUrl } from '@/lib/api';
+import { api, fetchAuthenticatedBlobUrl, resolveBackendPath } from '@/lib/api';
 import { Project, GeneratedSection, SuggestedTemplate } from '@/lib/types';
 import { TiptapEditor } from '@/components/editor/tiptap-editor';
 import { useTranslation } from '@/components/i18n-provider';
@@ -312,8 +312,7 @@ function ResponseWizardContent() {
         throw new Error(finalJob.error_message || "Échec de la génération du document.");
       }
       if (finalJob.s3_docx_url) {
-        const apiBase = (process.env.NEXT_PUBLIC_API_URL || '').replace(/\/$/, '');
-        const blobUrl = await fetchAuthenticatedBlobUrl(`${apiBase}${finalJob.s3_docx_url}`);
+        const blobUrl = await fetchAuthenticatedBlobUrl(resolveBackendPath(finalJob.s3_docx_url));
         const a = document.createElement('a');
         a.href = blobUrl;
         a.download = `Memoire_Technique_${project.id}.docx`;

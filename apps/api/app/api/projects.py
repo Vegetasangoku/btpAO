@@ -977,6 +977,7 @@ async def ask_project_assistant(
             })
             corpus_text_parts.append(f"--- {citation_tag} ({cat}) ---\n{asset.description or asset.metadata_json or ''}")
 
+    motif_web_vide: Optional[str] = None
     # 4. Web Sources if mode is 'web' or 'corpus_web' / 'all_history_web'
     if is_web_only_mode or is_combined_mode:
         from app.services.web_search_service import web_search_service
@@ -998,24 +999,77 @@ async def ask_project_assistant(
         whitelist_domains = sorted({
             urlparse(s.portal_url).netloc for s in whitelist_res.scalars().all() if s.portal_url
         })
-        search_query = f"{project.title} BTP {clean_question}"
+        # 11/09 : la requete etait f"{project.title} BTP {question}", soit sur un vrai
+        # dossier « 71260018_CCTP_VDEF BTP Quelles sont les obligations du diagnostic
+        # PEMD avant démolition ? » -- un nom de fichier et une phrase entiere, restreints
+        # a dix domaines officiels : zero resultat, alors que la reponse est sur
+        # ecologie.gouv.fr et legifrance. Meme defaut que celui corrige le 10/09 dans la
+        # redaction (tasks.py::requete_sources_officielles). On garde les mots porteurs
+        # de la question, sans le nom du fichier.
+        import re as _re
+        _vides = {"quel", "quelle", "quels", "quelles", "est", "sont", "les", "des", "une", "un", "le", "la",
+                  "du", "de", "d", "l", "et", "ou", "en", "a", "au", "aux", "pour", "sur", "avec", "dans",
+                  "que", "qui", "quoi", "comment", "faut", "il", "doit", "on", "nous", "notre", "nos", "ce",
+                  "cette", "ces", "y", "t", "avant", "après", "apres", "par"}
+        _mots = [m for m in _re.findall(r"[\wÀ-ÿ'-]+", clean_question.lower()) if m not in _vides and len(m) > 1]
+        search_query = " ".join(_mots[:8]) or clean_question[:80]
+        # Les portails officiels hors francophonie (Qatar, Arabie saoudite, EAU,
+        # Allemagne...) sont en anglais / arabe / langue locale : une requete en
+        # francais n'y trouve que la page d'accueil (constate le 11/09 sur le Qatar).
+        # On traduit donc la requete en anglais pour ces pays.
+        if tenant_country_code and tenant_country_code.upper() not in ("FR", "BE", "LU", "MC", "CH"):
+            try:
+                import litellm as _litellm
+                from app.services.model_routing_service import model_routing_service
+                _res = await model_routing_service.resolve_model_for_tenant(db=db, tenant_id=t_uuid, task_type="extraction_gonogo")
+                _cred = await model_routing_service.get_credentials_for_model(db=db, model_string=_res["model_string"])
+                if _cred.get("api_key"):
+                    _kw = {"model": _res["model_string"], "api_key": _cred["api_key"], "max_tokens": 60,
+                           "messages": [{"role": "user", "content": "Translate these search keywords into English, "
+                                         "keep technical terms, answer with the keywords only: " + search_query}]}
+                    if _cred.get("api_base"):
+                        _kw["api_base"] = _cred["api_base"]
+                    _tr = await _litellm.acompletion(**_kw)
+                    _en = (_tr.choices[0].message.content or "").strip().strip('"')[:120]
+                    if _en:
+                        search_query = _en
+            except Exception as _exc:
+                logger.warning("[projects.py] Traduction de la requete web impossible : %s", _exc)
         web_results = await web_search_service.search(
             tenant_id=current_user.tenant_id,
             query=search_query,
-            num_results=3,
+            num_results=4,
             project_id=str(p_uuid),
             allowed_sites=whitelist_domains,
         )
+        if not web_results:
+            etat_moteur = await web_search_service.etat_moteurs()
+            motif_web_vide = (
+                f"Recherche web : aucun résultat sur les {len(whitelist_domains)} site(s) officiel(s) "
+                f"du pays {tenant_country_code} pour « {search_query} » ({etat_moteur})."
+            )
+        else:
+            motif_web_vide = None
+        # 11/09 : on lit la page officielle elle-meme (HTML, PDF ou Word) et on en
+        # garde les passages qui repondent a la question -- l'extrait du moteur seul
+        # (2-3 lignes) ne suffisait presque jamais a repondre.
+        from app.services.official_page_reader import lire_pages
+        pages_lues = {p["url"]: p for p in await lire_pages([w.url for w in web_results], clean_question)}
         for w in web_results:
             citation_tag = f"[Source web : {w.title} — {w.url}]"
+            page = pages_lues.get(w.url) or {}
+            contenu = page.get("texte") or w.snippet
             collected_sources.append({
                 "type": "web",
                 "title": w.title,
                 "url": w.url,
                 "citation": citation_tag,
                 "snippet": w.snippet[:200] + "..." if len(w.snippet) > 200 else w.snippet,
+                "page_lue": bool(page.get("texte")),
+                "format": page.get("type"),
+                "lecture_erreur": page.get("erreur"),
             })
-            web_text_parts.append(f"--- {citation_tag} ---\n{w.snippet}")
+            web_text_parts.append(f"--- {citation_tag} ---\n{contenu}")
 
     corpus_context = "\n\n".join(corpus_text_parts)
     web_context = "\n\n".join(web_text_parts)
@@ -1143,6 +1197,10 @@ DIRECTIVES DE RÉPONSE NON NÉGOCIABLES :
     await billing_service.increment_usage(current_user.tenant_id, "question", db)
     await db.commit()
 
+    # La recherche web vide n'est plus muette : la cause remonte a l'utilisateur.
+    if motif_web_vide:
+        is_degraded = True
+        degraded_reason = (degraded_reason + ' | ' if degraded_reason else '') + motif_web_vide
     return AskProjectResponse(
         id=msg_id,
         question=clean_question,

@@ -1,6 +1,7 @@
 import React from 'react';
 import { UserSidebar } from '@/components/layout/user-sidebar';
 import { Header } from '@/components/layout/header';
+import { BanniereEspaceConsulte } from '@/components/layout/banniere-espace-consulte';
 import { ProjectPipelineNav } from '@/components/layout/project-pipeline-nav';
 
 export default function ProjectsLayout({
@@ -13,6 +14,7 @@ export default function ProjectsLayout({
       <UserSidebar />
       <div className="flex-1 flex flex-col min-w-0">
         <Header />
+        <BanniereEspaceConsulte />
         <main className="flex-1 overflow-y-auto p-5 sm:p-6 lg:p-8 max-w-7xl w-full mx-auto">
           <ProjectPipelineNav />
           {children}

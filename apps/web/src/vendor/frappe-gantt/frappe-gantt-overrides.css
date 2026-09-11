@@ -52,6 +52,29 @@
   fill: var(--btp-gantt-milestone-progress);
 }
 
+/* Un jalon doit se voir d'un coup d'oeil sur un planning imprime en noir et blanc
+   comme a l'ecran : la couleur seule ne suffit pas. On epaissit donc le contour de
+   la barre qui porte le jalon, et son libelle passe en gras. Constat du 10/09 :
+   aucune tache n'etant marquee `is_milestone`, la classe n'etait jamais posee et
+   les jalons etaient strictement invisibles sur le planning. */
+.gantt-target .gantt .bar-wrapper.gantt-milestone .bar {
+  stroke-width: 2.5;
+}
+
+.gantt-target .gantt .bar-wrapper.gantt-milestone .bar-label,
+.gantt-target .gantt .bar-wrapper.gantt-milestone .bar-label.big {
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+/* Une barre a la fois critique ET porteuse d'un jalon garde le rouge du chemin
+   critique : c'est l'information la plus urgente des deux. */
+.gantt-target .gantt .bar-wrapper.gantt-critical.gantt-milestone .bar {
+  fill: var(--btp-gantt-critical);
+  stroke: var(--btp-gantt-critical-stroke);
+  stroke-width: 2.5;
+}
+
 /* Barres standard (ni critiques, ni jalons) */
 .gantt-target .gantt .bar-wrapper .bar {
   fill: var(--btp-gantt-bar);
@@ -197,4 +220,51 @@
   background: #111A24;
   color: #e2e8f0;
   border: 1px solid #243546;
+}
+
+/* Réglage « couleurs de la charte » désactivé (10/09).
+   Certains clients impriment leur planning en noir et blanc ou l'insèrent dans
+   un document qui a sa propre charte : les aplats de marque deviennent alors
+   illisibles. Cette classe rend les barres neutres sans toucher aux jalons ni
+   au chemin critique, qui restent des informations, pas de la décoration. */
+.gantt .bar-wrapper.gantt-neutre .bar {
+  fill: var(--gantt-neutre-barre, #94a3b8) !important;
+}
+.gantt .bar-wrapper.gantt-neutre .bar-progress {
+  fill: var(--gantt-neutre-progression, #475569) !important;
+}
+
+/* Couche de jalons (10/09).
+   Un jalon est une DATE, pas une phase : il se dessine comme un repère sur
+   l'axe du temps, pas comme une barre d'une autre couleur. Le losange est
+   volontairement plus haut que la barre pour rester visible même en mode
+   compact, et le trait vertical le rattache à l'échelle de temps. */
+.gantt .couche-jalons .jalon-repere {
+  fill: var(--gantt-jalon, #f59e0b);
+  stroke: var(--gantt-jalon-contour, #ffffff);
+  stroke-width: 1.5;
+  paint-order: stroke fill;
+}
+.gantt .couche-jalons .jalon-trait {
+  stroke: var(--gantt-jalon, #f59e0b);
+  stroke-width: 1.5;
+  stroke-dasharray: 3 2;
+  opacity: 0.75;
+}
+.gantt .couche-jalons .jalon-libelle {
+  fill: var(--gantt-jalon-texte, #b45309);
+  font-size: 10px;
+  font-weight: 700;
+  paint-order: stroke fill;
+  stroke: var(--gantt-jalon-halo, rgba(255, 255, 255, 0.85));
+  stroke-width: 3;
+}
+:root.dark .gantt .couche-jalons .jalon-libelle,
+.dark .gantt .couche-jalons .jalon-libelle {
+  fill: #fbbf24;
+  stroke: rgba(15, 23, 42, 0.85);
+}
+:root.dark .gantt .couche-jalons .jalon-repere,
+.dark .gantt .couche-jalons .jalon-repere {
+  stroke: #0f172a;
 }

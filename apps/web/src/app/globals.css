@@ -775,3 +775,31 @@
   --cost-accent: rgb(var(--hl-rgb));
   --cost-friction: rgb(var(--accent-rgb));
 }
+
+/* ------------------------------------------------------------------ */
+/* Ancres : atterrir au bon endroit, pas sous l'en-tête                */
+/* ------------------------------------------------------------------ */
+/* Constat du 10/09 : un clic vers une section amenait le titre visé SOUS
+   l'en-tête collant (56 px, plus le bandeau d'espace consulté quand il est
+   présent), donc l'utilisateur croyait avoir raté sa cible. `scroll-padding-top`
+   décale la destination de tout défilement — clic sur ancre comme
+   scrollIntoView() — sans toucher à la mise en page. */
+html {
+  scroll-padding-top: 6rem;
+}
+
+/* Un défilement instantané sur plusieurs écrans donne l'impression d'un saut ;
+   l'animation rend la relation entre le clic et la destination lisible. Respecte
+   les préférences système de réduction des animations. */
+@media (prefers-reduced-motion: no-preference) {
+  html {
+    scroll-behavior: smooth;
+  }
+}
+
+/* Les conteneurs qui défilent eux-mêmes (zone principale du tableau de bord,
+   listes internes) ont besoin de la même marge pour leurs propres ancres. */
+main,
+[data-scroll-container] {
+  scroll-padding-top: 1.5rem;
+}

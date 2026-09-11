@@ -909,7 +909,22 @@ async def get_suggested_template(
             "created_at": template.created_at.isoformat(),
         }
 
-    # 2. Check recent completed ExportJobs
+    # 2. (11/09) Le memoire de reference .docx le plus fourni du client, AVANT le dernier
+    # export de l'application : c'est son en-tete, son logo, ses styles et ses couleurs
+    # qu'on veut reprendre, pas une copie de notre propre production.
+    from app.services.template_source_service import memoire_client_le_plus_fourni
+    memoire = await memoire_client_le_plus_fourni(db, t_uuid)
+    if memoire:
+        return {
+            "has_template": True,
+            "source_type": "memoire_client",
+            "name": memoire.title,
+            "description": "Mise en page reprise de votre mémoire de référence le plus complet (en-tête, styles, couleurs)",
+            "id": str(memoire.id),
+            "created_at": memoire.created_at.isoformat(),
+        }
+
+    # 3. Check recent completed ExportJobs
     stmt_jobs = (
         select(ExportJob, Project)
         .join(Project, Project.id == ExportJob.project_id)

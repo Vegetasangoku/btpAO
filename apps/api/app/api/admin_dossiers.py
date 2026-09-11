@@ -53,9 +53,9 @@ async def export_dc1_dossier(
 
     tenant_dict = {
         "name": tenant.name,
-        "siret": tenant.siret or "Non renseigné",
+        "siret": tenant.siret or "[à compléter]",
         "country_code": tenant.country_code or "FR",
-        "city": "Paris",
+        "city": (tenant.branding_config or {}).get("city") or "[à compléter]",  # 11/09 : plus de ville inventée
     }
     project_dict = {
         "title": project.title,
@@ -222,3 +222,17 @@ async def get_project_regulatory_profile_endpoint(
         "mandatory_certifications": profile.mandatory_certifications or [],
         "tender_document_structure": profile.tender_document_structure or {},
     }
+
+
+@router.post("/{project_id}/pieces")
+async def verifier_pieces_et_formulaires(
+    project_id: str,
+    chercher: bool = True,
+    current_user: CurrentTenantUser = Depends(get_current_tenant_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Pièces exigées (DCE + pays du marché), ce qui est déjà disponible, et pour ce qui
+    manque, lien vers le formulaire sur les portails officiels du pays (11/09)."""
+    from app.services.pieces_service import analyser_pieces
+    tenant, project = await _get_project_and_tenant(project_id, current_user, db)
+    return await analyser_pieces(db, tenant.id, project, chercher=chercher)

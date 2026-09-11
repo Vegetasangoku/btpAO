@@ -433,7 +433,7 @@ export interface TeamInvitation {
 
 export interface SuggestedTemplate {
   has_template: boolean;
-  source_type?: 'export_template' | 'recent_dossier' | 'reference_document' | null;
+  source_type?: 'export_template' | 'recent_dossier' | 'reference_document' | 'memoire_client' | null;
   source?: string;
   name?: string | null;
   title?: string | null;
@@ -456,6 +456,67 @@ export interface GanttTask {
   milestone_label: string | null;
   depends_on: string[];
   is_critical: boolean;
+  /** 11/09 : planning hierarchique. null = phase. */
+  parent_id?: string | null;
+  lot?: string | null;
+  color?: string | null;
+  /** Profondeur calculee par l'API : 0 phase, 1 tache, 2 sous-tache. */
+  level?: number;
+}
+
+export interface GanttSettings {
+  niveau_detail: 'phases' | 'taches' | 'sous_taches';
+  couleur_par: 'phase' | 'lot' | 'uniforme';
+  /** Liste de couleurs #RRGGBB ; vide = charte du client. */
+  palette: string[];
+  chemin_critique: boolean;
+  jalons: boolean;
+  durees: boolean;
+  liens: boolean;
+}
+
+export interface GanttDetailReport {
+  created?: number;
+  taches?: number;
+  sous_taches?: number;
+  ajustements?: string[];
+  origine?: string;
+  sources?: string[];
+  references_utilisees?: string[];
+  deja_detaille?: boolean;
+  lignes_existantes?: number;
+  message?: string;
+}
+
+export interface PiecesRapport {
+  pays: string;
+  pays_nom: string;
+  portails: string[];
+  dce_analyse: boolean;
+  pieces_du_dce: number;
+  avertissement: string | null;
+  resume: { fourni: number; generable: number; manquant: number };
+  pieces: {
+    piece: string;
+    origine: string;
+    citation: string | null;
+    statut: 'fourni' | 'generable' | 'manquant';
+    fourni_par: string | null;
+    generable: string | null;
+    telechargements?: { code: string; libelle: string; chemin: string }[];
+    recherche: string | null;
+    liens: { titre: string; url: string; format: string; verifie: boolean; extrait: string; erreur: string | null }[];
+  }[];
+}
+
+export interface CadreRapport {
+  total_fields: number;
+  filled_fields: number;
+  pending_actions_count: number;
+  completeness_score_pct: number;
+  is_ready_for_submission: boolean;
+  message?: string | null;
+  sections: { section_name: string; status: 'filled' | 'action_required'; source_used?: string | null; missing_elements: string[]; kind?: string }[];
 }
 
 export interface OrganigrammeNode {

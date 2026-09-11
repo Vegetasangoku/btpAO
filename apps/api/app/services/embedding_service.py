@@ -46,6 +46,9 @@ class EmbeddingService:
         self._runtime_key: Optional[str] = None
         self._runtime_provider: Optional[str] = None
         self._runtime_cached_at: float = 0.0
+        # Resultat du dernier appel reel : None = jamais tente dans ce process.
+        self.last_error: Optional[str] = None
+        self.last_real_ok: Optional[bool] = None
 
     async def sync_platform_key(self, db) -> None:
         """
@@ -69,36 +72,58 @@ class EmbeddingService:
             ps = res.scalar_one_or_none()
             settings_dict = (ps.settings if ps and ps.settings else {}) or {}
 
+            # 11/09 : on collecte TOUTES les cles candidates (champ openai_api_key,
+            # champ mistral_api_key, fournisseurs personnalises OpenAI/Mistral avec leur
+            # api_base) puis on garde la premiere qui repond VRAIMENT a un appel
+            # d'embedding. Avant, la premiere cle trouvee etait retenue sans verification :
+            # le champ openai_api_key contenait une cle de test (« sk-test-…openai »),
+            # chaque embedding tombait en 401 et repartait en silence sur le vecteur de
+            # repli -- alors que la vraie cle OpenAI, celle qu'utilise la redaction, etait
+            # juste a cote dans custom_providers.
+            candidats: List[Tuple[str, str, Optional[str], str]] = []  # (cle, fournisseur, api_base, origine)
+            for champ, fournisseur in (("openai_api_key", "openai"), ("mistral_api_key", "mistral")):
+                brut = settings_dict.get(champ)
+                if brut:
+                    dec = decrypt_api_key(brut)
+                    if dec and not _looks_like_placeholder(dec):
+                        candidats.append((dec, fournisseur, None, champ))
+            for prov in settings_dict.get("custom_providers", []) or []:
+                if not prov.get("enabled", True):
+                    continue
+                prov_id = (prov.get("id") or "").lower()
+                litellm_id = (prov.get("litellm_id") or "").lower()
+                if "mistral" in prov_id or litellm_id.startswith("mistral"):
+                    fournisseur = "mistral"
+                elif "openai" in prov_id or litellm_id.startswith("openai") or "gpt" in litellm_id:
+                    fournisseur = "openai"
+                else:
+                    continue
+                dec = decrypt_api_key(prov.get("api_key", ""))
+                if dec and not _looks_like_placeholder(dec):
+                    candidats.append((dec, fournisseur, prov.get("api_base") or None, f"fournisseur « {prov.get('id')} »"))
+
             found_key: Optional[str] = None
             found_provider: Optional[str] = None
-
-            raw_openai = settings_dict.get("openai_api_key")
-            raw_mistral = settings_dict.get("mistral_api_key")
-
-            if raw_openai:
-                decrypted = decrypt_api_key(raw_openai)
-                if decrypted and not _looks_like_placeholder(decrypted):
-                    found_key, found_provider = decrypted, "openai"
-            if not found_key and raw_mistral:
-                decrypted = decrypt_api_key(raw_mistral)
-                if decrypted and not _looks_like_placeholder(decrypted):
-                    found_key, found_provider = decrypted, "mistral"
-
-            if not found_key:
-                for prov in settings_dict.get("custom_providers", []) or []:
-                    if not prov.get("enabled", True):
-                        continue
-                    prov_id = (prov.get("id") or "").lower()
-                    litellm_id = (prov.get("litellm_id") or "").lower()
-                    if "openai" not in prov_id and "openai" not in litellm_id:
-                        if "mistral" not in prov_id and "mistral" not in litellm_id:
-                            continue
-                    decrypted = decrypt_api_key(prov.get("api_key", ""))
-                    if decrypted and not _looks_like_placeholder(decrypted):
-                        found_key = decrypted
-                        found_provider = "mistral" if "mistral" in prov_id or "mistral" in litellm_id else "openai"
+            found_base: Optional[str] = None
+            empreinte = "|".join(hashlib.sha256(c[0].encode()).hexdigest()[:10] + c[1] for c in candidats)
+            if empreinte == getattr(self, "_candidats_empreinte", None) and getattr(self, "_candidat_valide", None):
+                found_key, found_provider, found_base, self.key_origin = self._candidat_valide
+            else:
+                essais = []
+                for cle, fournisseur, base, origine in candidats:
+                    try:
+                        kw = {"model": EMBEDDING_MODEL_BY_PROVIDER[fournisseur], "input": ["sonde"], "api_key": cle}
+                        if base:
+                            kw["api_base"] = base
+                        litellm.embedding(**kw)
+                        found_key, found_provider, found_base, self.key_origin = cle, fournisseur, base, origine
                         break
-
+                    except Exception as exc:
+                        essais.append(f"{origine} : {type(exc).__name__}")
+                self.key_trials = essais
+                self._candidats_empreinte = empreinte
+                self._candidat_valide = (found_key, found_provider, found_base, getattr(self, "key_origin", None)) if found_key else None
+            self._runtime_base = found_base
             self._runtime_key = found_key
             self._runtime_provider = found_provider
             self._runtime_cached_at = now
@@ -120,13 +145,24 @@ class EmbeddingService:
 
         return None, self.model
 
+    def probe(self) -> Dict[str, Any]:
+        """Un vrai appel d'embedding, pour que la supervision dise la verite plutot
+        que de deduire « real » de la seule presence d'une cle."""
+        vec = self.generate_embedding("probe embedding btpao")
+        non_nuls = sum(1 for x in vec if x)
+        return {"real": bool(self.last_real_ok), "non_zero_dims": non_nuls, "error": self.last_error,
+                "key_origin": getattr(self, "key_origin", None), "key_trials": getattr(self, "key_trials", [])}
+
     def get_embedding_status(self) -> Dict[str, Any]:
         """État courant (pour affichage admin) : les prochains embeddings seront-ils
         de vrais vecteurs sémantiques (mode 'real') ou le repli pseudo-aléatoire
         déterministe basé sur des hashs de mots (mode 'degraded_fallback') ?"""
         key, model = self._resolve_key_and_model()
         if not key:
-            return {"mode": "degraded_fallback", "provider": None, "model": None}
+            return {"mode": "degraded_fallback", "provider": None, "model": None, "reason": "aucune clé OpenAI/Mistral configurée"}
+        if self.last_real_ok is False:
+            return {"mode": "degraded_fallback", "provider": None, "model": model,
+                    "reason": f"clé présente mais l'appel d'embedding échoue : {self.last_error}"}
         if model == EMBEDDING_MODEL_BY_PROVIDER.get("mistral"):
             provider = "mistral"
         else:
@@ -145,19 +181,26 @@ class EmbeddingService:
         api_key, model_to_use = self._resolve_key_and_model()
         if api_key:
             try:
-                response = litellm.embedding(
-                    model=model_to_use,
-                    input=[text],
-                    api_key=api_key,
-                )
+                kw = {"model": model_to_use, "input": [text], "api_key": api_key}
+                if getattr(self, "_runtime_base", None) and api_key == self._runtime_key:
+                    kw["api_base"] = self._runtime_base
+                response = litellm.embedding(**kw)
                 if response and response.data and len(response.data) > 0:
                     embedding = response.data[0]["embedding"]
+                    self.last_error = None
+                    self.last_real_ok = True
                     # Pad or truncate to 1536 if needed
                     if len(embedding) < self.dimension:
                         embedding = embedding + [0.0] * (self.dimension - len(embedding))
                     return embedding[:self.dimension]
             except Exception as e:
                 print(f"[EmbeddingService] LiteLLM embedding call notice (model={model_to_use}): {e}, using fallback vector.")
+                # 11/09 : cet echec etait silencieux. Constat : 100 % des vecteurs en
+                # base etaient des vecteurs de repli (hash de mots, ~150 composantes
+                # non nulles sur 1536) alors que la supervision affichait « real ».
+                # On garde la cause pour l'afficher.
+                self.last_error = f"{type(e).__name__}: {str(e)[:300]}"
+                self.last_real_ok = False
 
         # 2. Deterministic high-entropy pseudo-embedding fallback
         return self._generate_deterministic_vector(text)

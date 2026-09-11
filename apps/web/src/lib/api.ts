@@ -1,3 +1,4 @@
+import { resoudreEspace } from '@/lib/espace-actif';
 /**
  * Typed API Client for btpAO FastAPI Backend
  */
@@ -21,6 +22,10 @@ import {
   TeamInvitation,
   SuggestedTemplate,
   GanttTask,
+  GanttSettings,
+  GanttDetailReport,
+  CadreRapport,
+  PiecesRapport,
   OrganigrammeNode,
   ProjectCountryState,
 } from './types';
@@ -67,6 +72,45 @@ export function buildApiUrl(path: string): string {
   return `${API_BASE_URL}${clean}`;
 }
 
+
+/**
+ * URL absolue a partir d'un chemin RENVOYE PAR LE BACKEND (ex. s3_docx_url =
+ * "/api/export/download/<id>"). Ces chemins portent deja le prefixe "/api".
+ *
+ * Bug du 11/09 (« Le telechargement n'a pas abouti — HTTP 404 », Word ET PDF) :
+ * sous docker-compose, NEXT_PUBLIC_API_URL vaut "http://localhost:8000/api" ; la
+ * page d'export concatenait `${NEXT_PUBLIC_API_URL}${s3_docx_url}` et appelait
+ * donc "/api/api/export/download/<id>" -> 404, alors que le fichier etait bien
+ * compile et stocke. Meme famille que le bug du 04/09 sur les visuels.
+ * Toute URL issue d'une reponse API doit passer par ici.
+ */
+export function resolveBackendPath(path: string): string {
+  if (/^https?:\/\//i.test(path)) return path;
+  let clean = path.startsWith('/') ? path : `/${path}`;
+  if (clean === '/api' || clean.startsWith('/api/')) clean = clean.slice(4) || '/';
+  return buildApiUrl(clean);
+}
+
+
+/**
+ * Espace client utilisé quand le jeton de session ne porte aucun tenant.
+ *
+ * Cet identifiant était écrit en dur à six endroits de ce fichier et à deux
+ * endroits de l'API (core/security.py). Conséquence constatée le 10/09 : un
+ * compte sans `tenant_id` dans ses claims — typiquement le compte
+ * d'administration de la plateforme — atterrissait SILENCIEUSEMENT dans les
+ * données du premier client, et tout ce qu'il y faisait s'y écrivait. C'est
+ * ce qui donnait l'impression d'un « duplicata » entre deux comptes : il n'y
+ * en avait qu'un seul, vu sous deux étiquettes.
+ *
+ * Le repli est conservé pour ne rien casser en développement, mais il est
+ * désormais nommé, commenté, paramétrable par variable d'environnement, et
+ * il n'existe qu'ici.
+ */
+// Plus AUCUN identifiant d'espace écrit en dur. Un compte sans espace n'est
+// plus rabattu en silence sur celui du premier client : l'API refuse et le dit.
+// Voir lib/espace-actif.ts pour l'historique de ce défaut.
+
 async function fetcher<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers || {});
   
@@ -75,12 +119,9 @@ async function fetcher<T>(endpoint: string, options: RequestInit = {}): Promise<
     const { data } = await supabase.auth.getSession();
     if (data?.session?.access_token) {
       headers.set('Authorization', `Bearer ${data.session.access_token}`);
-      const tenantId = (data.session.user.app_metadata as any)?.tenant_id || (data.session.user.user_metadata as any)?.tenant_id;
-      if (tenantId) {
-        headers.set('X-Tenant-ID', tenantId);
-      } else {
-        headers.set('X-Tenant-ID', '93365082-4489-4f0a-9e4b-9dbb219553aa');
-      }
+      const tenantDuJeton = (data.session.user.app_metadata as any)?.tenant_id || (data.session.user.user_metadata as any)?.tenant_id;
+      const espace = resoudreEspace(tenantDuJeton);
+      if (espace) headers.set('X-Tenant-ID', espace);
     } else if (typeof document !== 'undefined' && process.env.NODE_ENV !== 'production') {
       // E2E test runner sets this cookie deliberately before running tests (non-production only).
       // No hardcoded-secret fallback here: an unauthenticated request must simply stay unauthenticated.
@@ -88,7 +129,8 @@ async function fetcher<T>(endpoint: string, options: RequestInit = {}): Promise<
       const e2eSecret = match ? match[1] : undefined;
       if (e2eSecret) {
         headers.set('x-e2e-secret', e2eSecret);
-        headers.set('X-Tenant-ID', '93365082-4489-4f0a-9e4b-9dbb219553aa');
+        const espaceE2E = resoudreEspace(null);
+        if (espaceE2E) headers.set('X-Tenant-ID', espaceE2E);
       }
     }
 
@@ -96,7 +138,8 @@ async function fetcher<T>(endpoint: string, options: RequestInit = {}): Promise<
       const stored = localStorage.getItem('btp_auth_token') || localStorage.getItem('access_token') || sessionStorage.getItem('access_token');
       if (stored) {
         headers.set('Authorization', `Bearer ${stored}`);
-        headers.set('X-Tenant-ID', '93365082-4489-4f0a-9e4b-9dbb219553aa');
+        const espaceStocke = resoudreEspace(null);
+        if (espaceStocke) headers.set('X-Tenant-ID', espaceStocke);
       }
     }
   } catch (error) {
@@ -113,10 +156,35 @@ async function fetcher<T>(endpoint: string, options: RequestInit = {}): Promise<
 
   const url = `${API_BASE_URL}${endpoint}`;
   try {
-    const res = await fetch(url, {
+    let res = await fetch(url, {
       ...options,
       headers,
     });
+
+    // Le rattachement à un espace vit dans les claims du jeton. Quand il change
+    // côté serveur (création de l'espace d'un compte, changement d'entreprise),
+    // le jeton déjà en main est périmé et l'API répond « aucun espace rattaché ».
+    // Un rafraîchissement suffit : on le tente une fois, puis on rejoue l'appel.
+    // Sans cela, l'utilisateur resterait bloqué jusqu'à l'expiration naturelle
+    // de son jeton, sans comprendre pourquoi.
+    if (res.status === 400 && !headers.has('X-Tenant-ID')) {
+      try {
+        const { data: rafraichi } = await supabase.auth.refreshSession();
+        const nouveauJeton = rafraichi?.session?.access_token;
+        const nouvelEspace = resoudreEspace(
+          (rafraichi?.session?.user?.app_metadata as any)?.tenant_id
+            || (rafraichi?.session?.user?.user_metadata as any)?.tenant_id
+        );
+        if (nouveauJeton && nouvelEspace) {
+          headers.set('Authorization', `Bearer ${nouveauJeton}`);
+          headers.set('X-Tenant-ID', nouvelEspace);
+          res = await fetch(url, { ...options, headers });
+        }
+      } catch {
+        // Rafraîchissement impossible : on laisse la réponse d'origine parler.
+      }
+    }
+
     if (!res.ok) {
       let detail = `API error ${res.status}: ${res.statusText}`;
       try {
@@ -143,27 +211,62 @@ async function fetcher<T>(endpoint: string, options: RequestInit = {}): Promise<
 // silencieuse) même quand la génération a réellement réussi côté serveur. Copie volontairement
 // la même logique d'auth que fetcher() ci-dessus plutôt que de la partager, pour ne pas avoir
 // à toucher au corps de fetcher().
+/**
+ * Envoie un fichier (multipart) et recupere un fichier en retour, avec les memes
+ * en-tetes d'authentification et d'espace que fetchAuthenticatedBlobUrl. Sert au
+ * remplissage du cadre de reponse de l'acheteur (11/09).
+ */
+export async function postFormForBlob(path: string, form: FormData): Promise<{ blob: Blob; headers: Headers }> {
+  const probe = await authHeadersForBlob();
+  const res = await fetch(buildApiUrl(path), { method: 'POST', headers: probe, body: form });
+  if (!res.ok) {
+    let detail = '';
+    try { const b = await res.clone().json(); detail = typeof b?.detail === 'string' ? b.detail : ''; } catch { /* non JSON */ }
+    throw new ApiError(detail ? `HTTP ${res.status} — ${detail}` : `HTTP ${res.status}`, res.status);
+  }
+  return { blob: await res.blob(), headers: res.headers };
+}
+
+async function authHeadersForBlob(): Promise<Headers> {
+  const headers = new Headers();
+  try {
+    const { data } = await supabase.auth.getSession();
+    if (data?.session?.access_token) {
+      headers.set('Authorization', `Bearer ${data.session.access_token}`);
+      const tenantDuJeton = (data.session.user.app_metadata as any)?.tenant_id || (data.session.user.user_metadata as any)?.tenant_id;
+      const espace = resoudreEspace(tenantDuJeton);
+      if (espace) headers.set('X-Tenant-ID', espace);
+    }
+  } catch {
+    /* sans session : l'API repondra 401 et l'appelant l'affichera */
+  }
+  return headers;
+}
+
 export async function fetchAuthenticatedBlobUrl(absoluteUrl: string): Promise<string> {
   const headers = new Headers();
   try {
     const { data } = await supabase.auth.getSession();
     if (data?.session?.access_token) {
       headers.set('Authorization', `Bearer ${data.session.access_token}`);
-      const tenantId = (data.session.user.app_metadata as any)?.tenant_id || (data.session.user.user_metadata as any)?.tenant_id;
-      headers.set('X-Tenant-ID', tenantId || '93365082-4489-4f0a-9e4b-9dbb219553aa');
+      const tenantDuJeton = (data.session.user.app_metadata as any)?.tenant_id || (data.session.user.user_metadata as any)?.tenant_id;
+      const espace = resoudreEspace(tenantDuJeton);
+      if (espace) headers.set('X-Tenant-ID', espace);
     } else if (typeof document !== 'undefined' && process.env.NODE_ENV !== 'production') {
       const match = document.cookie.match(/btp_e2e_secret=([^;]+)/);
       const e2eSecret = match ? match[1] : undefined;
       if (e2eSecret) {
         headers.set('x-e2e-secret', e2eSecret);
-        headers.set('X-Tenant-ID', '93365082-4489-4f0a-9e4b-9dbb219553aa');
+        const espaceE2E = resoudreEspace(null);
+        if (espaceE2E) headers.set('X-Tenant-ID', espaceE2E);
       }
     }
     if (!headers.has('Authorization') && typeof window !== 'undefined') {
       const stored = localStorage.getItem('btp_auth_token') || localStorage.getItem('access_token') || sessionStorage.getItem('access_token');
       if (stored) {
         headers.set('Authorization', `Bearer ${stored}`);
-        headers.set('X-Tenant-ID', '93365082-4489-4f0a-9e4b-9dbb219553aa');
+        const espaceStocke = resoudreEspace(null);
+        if (espaceStocke) headers.set('X-Tenant-ID', espaceStocke);
       }
     }
   } catch (error) {
@@ -172,7 +275,15 @@ export async function fetchAuthenticatedBlobUrl(absoluteUrl: string): Promise<st
   }
   const res = await fetch(absoluteUrl, { headers });
   if (!res.ok) {
-    throw new ApiError(`HTTP ${res.status}`, res.status);
+    // Un "HTTP 404" nu ne permet aucun diagnostic (11/09) : on remonte le `detail`
+    // FastAPI quand il existe, et l'URL appelée pour qu'un doublon "/api/api" se voie.
+    let detail = '';
+    try {
+      const body = await res.clone().json();
+      detail = typeof body?.detail === 'string' ? body.detail : '';
+    } catch { /* corps non JSON */ }
+    const chemin = (() => { try { return new URL(absoluteUrl).pathname; } catch { return absoluteUrl; } })();
+    throw new ApiError(detail ? `HTTP ${res.status} — ${detail}` : `HTTP ${res.status} (${chemin})`, res.status);
   }
   const blob = await res.blob();
   return URL.createObjectURL(blob);
@@ -397,6 +508,9 @@ export const api = {
       is_milestone?: boolean;
       milestone_label?: string | null;
       depends_on?: string[];
+      parent_id?: string | null;
+      lot?: string | null;
+      color?: string | null;
     }
   ) =>
     fetcher<GanttTask>(`/visuals/gantt-tasks/${projectId}`, {
@@ -414,6 +528,9 @@ export const api = {
       is_milestone: boolean;
       milestone_label: string | null;
       depends_on: string[];
+      parent_id: string;
+      lot: string;
+      color: string;
     }>
   ) =>
     fetcher<GanttTask>(`/visuals/gantt-tasks/${projectId}/${taskId}`, {
@@ -423,6 +540,28 @@ export const api = {
   deleteGanttTask: (projectId: string, taskId: string) =>
     fetcher<{ success: boolean }>(`/visuals/gantt-tasks/${projectId}/${taskId}`, {
       method: 'DELETE',
+    }),
+  // Planning detaille (11/09) : decomposition des phases en taches / sous-taches.
+  detailGantt: (projectId: string, niveau: 'taches' | 'sous_taches', remplacer = false) =>
+    fetcher<GanttDetailReport>(`/visuals/gantt-tasks/${projectId}/detail`, {
+      method: 'POST',
+      body: JSON.stringify({ niveau, remplacer }),
+    }),
+  getGanttSettings: (projectId: string) =>
+    fetcher<{ settings: GanttSettings; palettes: Record<string, string[]>; brand_color: string | null; projet_personnalise: boolean }>(
+      `/visuals/gantt-settings/${projectId}`
+    ),
+  verifierPieces: (projectId: string) =>
+    fetcher<PiecesRapport>(`/dossiers/${projectId}/pieces`, { method: 'POST' }),
+  analyserCadreAcheteur: (projectId: string, fichier: File) => {
+    const fd = new FormData();
+    fd.append('file', fichier);
+    return fetcher<CadreRapport>(`/client-templates/${projectId}/analyze-completeness`, { method: 'POST', body: fd });
+  },
+  saveGanttSettings: (projectId: string, settings: GanttSettings, portee: 'projet' | 'entreprise' = 'projet') =>
+    fetcher<{ settings: GanttSettings; portee: string }>(`/visuals/gantt-settings/${projectId}`, {
+      method: 'PUT',
+      body: JSON.stringify({ ...settings, portee }),
     }),
   generateOrganigramme: (projectId: string, title: string, nodes: any[]) =>
     fetcher<{ s3_key: string; url: string }>('/visuals/organigramme', {

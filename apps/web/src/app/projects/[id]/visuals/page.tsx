@@ -19,7 +19,9 @@ export default function VisualsPage() {
           {t('projects.visuals.subtitle')}
         </p>
       </div>
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+      {/* 11/09 : le planning detaille (phases > taches > sous-taches) ne tient plus
+          dans une demi-colonne -- il prend toute la largeur, l'organigramme en dessous. */}
+      <div className="grid grid-cols-1 gap-6">
         <InteractiveGanttChart projectId={projectId} />
         <OrganigrammePreview projectId={projectId} />
       </div>

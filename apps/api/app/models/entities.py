@@ -182,6 +182,10 @@ class ProjectGanttTask(Base):
     is_milestone = Column(Boolean, nullable=False, default=False)
     milestone_label = Column(Text, nullable=True)
     depends_on = Column(ARRAY(UUID(as_uuid=True)), nullable=False, default=list)
+    # Migration 00037 (11/09) : planning hierarchique phases > taches > sous-taches.
+    parent_id = Column(UUID(as_uuid=True), ForeignKey("project_gantt_tasks.id", ondelete="CASCADE"), nullable=True)
+    lot = Column(Text, nullable=True)
+    color = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 

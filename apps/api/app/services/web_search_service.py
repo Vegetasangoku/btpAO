@@ -248,6 +248,32 @@ class WebSearchService:
         )
         return []
 
+    async def etat_moteurs(self) -> str:
+        """Décrit en une phrase l'état des moteurs de recherche configurés.
+
+        Sert au diagnostic remonté à l'utilisateur quand une génération se
+        termine sans aucune source externe : sans cela, un « 0 résultat » ne
+        permet pas de distinguer une clé absente, une clé illisible (coffre
+        changé), un fournisseur désactivé, ou une requête simplement trop
+        étroite. Lecture seule, aucun appel réseau.
+        """
+        await self._resolve_config()
+        total = len(self._providers)
+        actifs = [p for p in self._providers if p.get("enabled")]
+        avec_cle = [p for p in actifs if p.get("api_key")]
+        if total == 0:
+            return "aucun moteur de recherche n'est configuré"
+        if not actifs:
+            return f"les {total} moteur(s) configuré(s) sont tous désactivés"
+        if not avec_cle:
+            noms = ", ".join(str(p.get("name") or p.get("id")) for p in actifs)
+            return (
+                f"le(s) moteur(s) actif(s) ({noms}) n'ont aucune clé exploitable — "
+                "clé absente, ou illisible avec la clé de chiffrement actuelle"
+            )
+        noms = ", ".join(str(p.get("name") or p.get("id")) for p in avec_cle)
+        return f"moteur(s) prêt(s) : {noms}"
+
     @staticmethod
     def _filter_by_allowed_sites(
         results: List[WebSearchResult], allowed_sites: Optional[List[str]]

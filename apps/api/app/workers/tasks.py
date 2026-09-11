@@ -10,7 +10,7 @@ import logging
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
-from sqlalchemy import select
+from sqlalchemy import func, select
 from fastapi import HTTPException
 from app.core.celery_app import celery_app
 from app.core.db import get_worker_db_session, AsyncSessionLocal
@@ -99,6 +99,12 @@ def parse_dce_task(
                 chunks = chunking_service.chunk_document_pages(pages)
 
                 # 5. Generate embeddings and save to PostgreSQL
+                # 11/09 : une relance d'analyse AJOUTAIT les fragments aux anciens
+                # (constate : 38 -> 76 fragments pour le meme CCTP), doublant les
+                # passages dans la recherche et dans le contexte de redaction. On
+                # remplace desormais les fragments du document.
+                from sqlalchemy import delete as _delete
+                await db.execute(_delete(DCEEmbedding).where(DCEEmbedding.document_id == doc_uuid))
                 await embedding_service.sync_platform_key(db)
                 for c in chunks:
                     vec = embedding_service.generate_embedding(c["content"])
@@ -112,7 +118,7 @@ def parse_dce_task(
                         section_title=c.get("section_title", "Section"),
                         content=c["content"],
                         embedding=vec,
-                        metadata_json={"embedding": vec},
+                        metadata_json={},  # 11/09 : le vecteur est dans `embedding`, plus dupliqué en JSON
                         created_at=datetime.utcnow(),
                     )
                     db.add(embedding_row)
@@ -174,6 +180,80 @@ def parse_dce_task(
                 raise e
 
     return asyncio.run(_async_parse())
+
+
+# ---------------------------------------------------------------------------
+# Intitulé et rang réels d'une section
+# ---------------------------------------------------------------------------
+# Constat du 10/09 : le worker passait `section_title=f"Section {section_key}"`.
+# Le modèle recevait donc « Section rse_environnement » comme intitulé — un
+# identifiant technique, pas un titre de mémoire — et c'est ce qui s'affichait
+# en <h2> dans le document remis à l'acheteur. Les vrais intitulés existaient
+# pourtant déjà dans SECTION_DEFINITIONS, utilisés par l'API mais jamais par le
+# worker. Même chose pour l'ordre : tout était créé avec order_index=1, si bien
+# que l'ordre des chapitres à l'export ne voulait rien dire.
+def titre_section(section_key: str) -> str:
+    from app.api.generate import SECTION_DEFINITIONS
+    meta = SECTION_DEFINITIONS.get(section_key)
+    return meta["title"] if meta else section_key.replace("_", " ").capitalize()
+
+
+def ordre_section(section_key: str) -> int:
+    from app.api.generate import SECTION_DEFINITIONS
+    meta = SECTION_DEFINITIONS.get(section_key)
+    return int(meta["order"]) if meta else 99
+
+
+# ---------------------------------------------------------------------------
+# Requête de recherche sur les sources officielles
+# ---------------------------------------------------------------------------
+# Constat du 10/09 : la requête envoyée au moteur de recherche était
+#     f"{project.title} {section_key} BTP normes {standards[:25]}"
+# soit, sur un vrai dossier :
+#     "71260018_CCTP_VDEF securite_ppsps BTP normes NF DTU / Eurocodes / Rè"
+# — un nom de fichier, un identifiant technique et une chaîne coupée au milieu
+# d'un mot, le tout restreint à quatre domaines officiels. Résultat mesuré sur
+# toutes les générations de la journée : zéro source externe (web_chars = 0),
+# alors qu'une clé de recherche est bien configurée et que la promesse produit
+# est justement de s'appuyer sur les sources officielles.
+#
+# Une requête doit être formulée comme la formulerait un conducteur de travaux,
+# dans le vocabulaire employé PAR les pages officielles visées — textes de loi,
+# fiches des autorités techniques — et non dans celui de notre base de données.
+# Volontairement courte, aussi : une requête de onze mots combinée à quatre
+# filtres `site:` rendait zéro résultat là où les cinq mots du sujet en
+# rendaient une dizaine.
+MOTS_CLES_RECHERCHE_PAR_SECTION = {
+    "presentation_entreprise": "capacité professionnelle candidature marché public travaux",
+    "references_similaires": "attestation de bonne exécution références travaux",
+    "moyens_humains": "encadrement de chantier qualification du personnel",
+    "moyens_materiels": "engins de chantier conformité vérification périodique",
+    "methodologie_phasage": "organisation et phasage des travaux chantier",
+    "qualite_controle": "plan assurance qualité réception des travaux",
+    "securite_ppsps": "coordination sécurité protection santé chantier PPSPS",
+    "rse_environnement": "déchets de chantier diagnostic PEMD valorisation",
+    "qse_environnement": "déchets de chantier diagnostic PEMD valorisation",
+    "sous_traitance": "sous-traitance marché public paiement direct",
+}
+
+_CARACTERES_PARASITES = str.maketrans({"(": " ", ")": " ", "/": " ", ",": " ",
+                                       ";": " ", ":": " ", "«": " ", "»": " ", "\"": " "})
+
+
+def requete_sources_officielles(section_key: str, reg_profile, project) -> str:
+    """Formule une requête courte, dans le vocabulaire des sources officielles.
+
+    N'utilise NI le nom du fichier du projet, NI la clé technique de section :
+    aucun des deux n'apparaît dans les pages recherchées. Ne concatène pas non
+    plus le cadre réglementaire ni la liste des normes : ces ajouts allongeaient
+    la requête sans rien cibler, et faisaient tomber le nombre de résultats à
+    zéro une fois combinés aux filtres de domaine.
+    """
+    base = MOTS_CLES_RECHERCHE_PAR_SECTION.get(section_key) or titre_section(section_key)
+    mots = base.translate(_CARACTERES_PARASITES).split()
+    # Au-delà d'une petite dizaine de mots, la recherche restreinte à quelques
+    # domaines ne rend plus rien : on borne délibérément.
+    return " ".join(mots[:8]).strip()
 
 
 @celery_app.task(bind=True, name="tasks.generate_section_task")
@@ -461,6 +541,17 @@ def generate_section_task(
                 # du MARCHE : ce n'est pas de l'internet ouvert, c'est la verification de
                 # conformite. Zero domaine whitelist => zero recherche (jamais de repli
                 # vers l'internet ouvert).
+                # Valeurs par défaut : le bloc « lacunes » plus bas les lit toujours,
+                # y compris si un chemin d'erreur saute la lecture des sites.
+                web_sources_payload = []
+                client_sites_payload = []
+                sites_ref_configures = 0
+                sites_ref_utiles = 0
+                # Pourquoi il n'y a pas de source externe. Un zero silencieux a coute
+                # une journee d'enquete le 10/09 : la recherche etait bien appelee,
+                # bien configuree, et rendait zero -- sans que rien ne le dise.
+                motif_absence_web = "recherche non tentée"
+
                 from app.services.web_search_service import web_search_service
                 from app.models.entities import CountryOfficialSource
                 from urllib.parse import urlparse
@@ -479,15 +570,15 @@ def generate_section_task(
                         "-- recherche web desactivee (jamais de repli vers l'internet ouvert).",
                         reg_profile.country_code,
                     )
-                    web_sources_payload = []
+                    motif_absence_web = (
+                        f"aucun portail officiel actif n'est déclaré pour le pays "
+                        f"{reg_profile.country_code}"
+                    )
                 else:
                     # reg_profile.technical_standards_reference peut etre NULL tant que le
                     # profil pays n'est pas rempli : l'ancien [:25] levait alors un
                     # TypeError ('NoneType' object is not subscriptable) en pleine tache.
-                    standards_hint = (reg_profile.technical_standards_reference or "")[:25].strip()
-                    search_query = f"{project.title} {section_key} BTP normes {standards_hint}".strip()
-                    if custom_instructions:
-                        search_query += f" {custom_instructions[:60]}"
+                    search_query = requete_sources_officielles(section_key, reg_profile, project)
                     logger.info(
                         "[GenerateSectionTask] Recherche sources officielles %s sur %d domaine(s) "
                         "(corpus client : %d savoir-faire, %d enseignements -- les deux sont fournis au modele).",
@@ -502,13 +593,32 @@ def generate_section_task(
                             project_id=project_id,
                             allowed_sites=whitelist_domains,
                         )
+                        if not web_results:
+                            etat = await web_search_service.etat_moteurs()
+                            motif_absence_web = (
+                                f"{etat} ; aucun résultat sur les {len(whitelist_domains)} portail(s) "
+                                f"officiel(s) du pays {reg_profile.country_code} pour la requête "
+                                f"« {search_query} »"
+                            )
                     except Exception as exc:
                         # Une recherche indisponible ne doit jamais faire echouer la
-                        # generation : on continue avec le seul corpus client.
+                        # generation : on continue avec le seul corpus client. Mais la
+                        # cause exacte remonte desormais jusqu'a l'utilisateur.
                         logger.warning("[GenerateSectionTask] Recherche officielle indisponible : %s", exc)
                         web_results = []
+                        motif_absence_web = f"le moteur de recherche a renvoyé une erreur : {exc}"
+                    # 11/09 : contenu reel des pages officielles (HTML/PDF/Word), pas
+                    # seulement l'extrait du moteur -- voir official_page_reader.py.
+                    try:
+                        from app.services.official_page_reader import lire_pages
+                        _pages = {p["url"]: p for p in await lire_pages(
+                            [r.url for r in web_results], search_query, budget_par_page=2000, maximum=3)}
+                    except Exception as _exc:
+                        logger.warning("[GenerateSectionTask] Lecture des pages officielles impossible : %s", _exc)
+                        _pages = {}
                     web_sources_payload = [
-                        {"title": r.title, "url": r.url, "snippet": r.snippet}
+                        {"title": r.title, "url": r.url,
+                         "snippet": (_pages.get(r.url) or {}).get("texte") or r.snippet}
                         for r in web_results
                     ]
 
@@ -525,6 +635,13 @@ def generate_section_task(
                     TenantReferenceUrl.status == "active",
                     TenantReferenceUrl.content_excerpt.isnot(None),
                 ).order_by(TenantReferenceUrl.added_at.desc())
+                sites_ref_configures = int(
+                    (await db.execute(
+                        select(func.count()).select_from(TenantReferenceUrl).where(
+                            TenantReferenceUrl.tenant_id == tenant_uuid
+                        )
+                    )).scalar() or 0
+                )
                 client_sites_res = await db.execute(client_sites_stmt)
                 client_sites_payload = [
                     {
@@ -534,6 +651,11 @@ def generate_section_task(
                     }
                     for u in client_sites_res.scalars().all()
                 ]
+                # « Utile » = au moins un extrait substantiel. Un site qui répond mais
+                # ne rend que deux lignes ne nourrit rien : il ne doit pas compter.
+                sites_ref_utiles = sum(
+                    1 for s in client_sites_payload if len((s.get("content") or "").strip()) >= 400
+                )
 
                 # 8. Retrieve Tenant Custom System Prompt and Model Tier
                 tenant_rec = (await db.execute(select(Tenant).where(Tenant.id == tenant_uuid))).scalars().first()
@@ -601,7 +723,7 @@ def generate_section_task(
                     project_title=project.title,
                     reference_code=project.reference_code,
                     section_key=section_key,
-                    section_title=f"Section {section_key}",
+                    section_title=titre_section(section_key),
                     decision_form=decision_form,
                     dce_criteria=dce_criteria_payload,
                     rag_dce_chunks=dce_chunks,
@@ -667,6 +789,10 @@ def generate_section_task(
                     visuels_rapport = await materialize_visual_specs(
                         db=db, tenant_id=tenant_uuid, project_id=proj_uuid,
                         visual_specs=gen_result.get("visual_specs"),
+                        # Ce que le client a saisi dans l'assistant fait foi : le
+                        # modele complete, il ne corrige pas (10/09 -- il avait
+                        # requalifie une collaboratrice de 7 a 11 ans d'experience).
+                        declarations=decision_form,
                     )
                 except Exception as vis_exc:
                     logger.warning("[GenerateSectionTask] Materialisation des schemas ignoree : %s", vis_exc)
@@ -683,6 +809,8 @@ def generate_section_task(
                         "impact": "Aucun critère de notation connu : la grille de conformité "
                                   "ne peut s'appuyer que sur les exigences du CCTP.",
                         "how_to_fix": "Charger le RC dans les pièces du marché, puis relancer la génération.",
+                        "lien": f"/projects/{project_id}/dce",
+                        "lien_libelle": "Ouvrir les pièces du marché",
                     })
                 # Ces deux constats sont etablis cote serveur, pas demandes au modele :
                 # ce sont des faits sur la base, il n'y a aucune raison de payer des
@@ -699,6 +827,8 @@ def generate_section_task(
                                   "elle ne peut donc répondre à aucune exigence propre à ce marché.",
                         "how_to_fix": "Vérifier l'onglet Pièces du marché : un document resté en cours "
                                       "d'analyse doit être relancé, sinon le recharger.",
+                        "lien": f"/projects/{project_id}/dce",
+                        "lien_libelle": "Ouvrir les pièces du marché",
                     })
                 if not any(
                     str(a.get("category") or "").lower() in CATEGORIES_MEMOIRES for a in company_assets
@@ -709,6 +839,36 @@ def generate_section_task(
                                   "précédents ne peuvent pas être reproduits : le texte reste générique.",
                         "how_to_fix": "Déposer 2 ou 3 mémoires déjà remis dans la base de connaissances "
                                       "(catégorie « mémoire de référence »), puis relancer la génération.",
+                        "lien": "/dashboard/company",
+                        "lien_libelle": "Ouvrir Mon entreprise",
+                    })
+                # Sources externes : promesse produit explicite du client. Mesuré le
+                # 10/09 sur toutes les générations de la journée : web_chars = 0 alors
+                # qu'une clé de recherche était bien configurée. Un zéro silencieux est
+                # pire qu'une erreur : il laisse croire que les sources ont été lues.
+                if not web_sources_payload:
+                    lacunes.append({
+                        "missing": f"Aucune source officielle externe consultée — {motif_absence_web}",
+                        "impact": "La section ne s'appuie sur aucun texte officiel en ligne : "
+                                  "les exigences réglementaires citées proviennent uniquement du "
+                                  "profil pays enregistré, qui peut être incomplet ou daté.",
+                        "how_to_fix": "Vérifier dans l'Espace Super Admin que le moteur de recherche "
+                                      "répond (bouton « Tester »), et que le pays du marché a bien des "
+                                      "portails officiels actifs.",
+                    })
+                # Sites de référence : configurés mais muets. Cas réel du 10/09 :
+                # 3 sites déclarés, 2 en erreur 404, le troisième ne rendant que
+                # 132 caractères — soit un apport nul, jamais signalé.
+                if sites_ref_configures and sites_ref_utiles == 0:
+                    lacunes.append({
+                        "missing": f"Vos {sites_ref_configures} site(s) de référence n'apportent aucun contenu",
+                        "impact": "Les pages déclarées sont inaccessibles ou vides : elles ne "
+                                  "participent pas à la rédaction, contrairement à ce que laisse "
+                                  "penser leur présence dans les réglages.",
+                        "how_to_fix": "Ouvrir Mon Entreprise › Sites de référence : corriger les URL "
+                                      "en erreur puis relancer leur lecture.",
+                        "lien": "/dashboard/company",
+                        "lien_libelle": "Ouvrir Mon entreprise",
                     })
                 if not tenant_learnings_payload:
                     lacunes.append({
@@ -734,7 +894,11 @@ def generate_section_task(
                 if section:
                     section.visual_placeholders = placeholders_payload
                     section.content_html = gen_result["content_html"]
-                    section.compliance_score = gen_result.get("compliance_score", 98.0)
+                    # Défaut 0 et non 98 : une section sans score calculé n'est pas
+                    # une section excellente, c'est une section non évaluée.
+                    section.compliance_score = gen_result.get("compliance_score", 0.0)
+                    section.title = titre_section(section_key)
+                    section.order_index = ordre_section(section_key)
                     section.compliance_notes = gen_result.get("compliance_notes", "Généré en tâche de fond")
                     section.status = "generated"
                     section.updated_at = now
@@ -744,10 +908,10 @@ def generate_section_task(
                         tenant_id=tenant_uuid,
                         project_id=proj_uuid,
                         section_key=section_key,
-                        title=f"Section {section_key}",
-                        order_index=1,
+                        title=titre_section(section_key),
+                        order_index=ordre_section(section_key),
                         content_html=gen_result["content_html"],
-                        compliance_score=gen_result.get("compliance_score", 98.0),
+                        compliance_score=gen_result.get("compliance_score", 0.0),
                         compliance_notes=gen_result.get("compliance_notes", "Généré en tâche de fond"),
                         status="generated",
                         locked_for_export=False,
@@ -781,8 +945,8 @@ def generate_section_task(
                             tenant_id=tenant_uuid,
                             project_id=proj_uuid,
                             section_key=section_key,
-                            title=f"Section {section_key}",
-                            order_index=1,
+                            title=titre_section(section_key),
+                            order_index=ordre_section(section_key),
                             content_html="",
                         )
                         db.add(section)
@@ -891,45 +1055,20 @@ def build_export_doc_task(
                         "id": str(r.id), "name": r.name, "start_date": r.start_date, "end_date": r.end_date,
                         "sequence": r.sequence, "milestone_label": r.milestone_label,
                         "depends_on": [str(d) for d in (r.depends_on or [])],
+                        "is_milestone": r.is_milestone,
+                        # 11/09 : hierarchie, lot et couleur -- sans eux le Word
+                        # retombait sur une liste plate de toutes les lignes.
+                        "parent_id": str(r.parent_id) if r.parent_id else None,
+                        "lot": r.lot, "color": r.color,
                     }
                     for r in gantt_task_rows
                 ] or None
 
-                tmpl_stmt = select(ExportTemplate).where(
-                    ExportTemplate.tenant_id == tenant_uuid,
-                    ExportTemplate.is_default == True,
-                )
-                tmpl_res = await db.execute(tmpl_stmt)
-                template = tmpl_res.scalar_one_or_none()
-                template_bytes = None
-                if template and template.s3_docx_key:
-                    try:
-                        template_bytes = storage_service.download_file(tenant_id, template.s3_docx_key)
-                    except Exception:
-                        template_bytes = None
-
-                # Repli : aucun template client explicite (ou téléchargement en échec) -> réutiliser
-                # la structure du plus récent export .docx déjà complété pour ce tenant plutôt qu'un
-                # document vierge générique (même logique que export.py::stream_project_docx, voir
-                # commentaire jumeau là-bas pour le détail).
-                if not template_bytes:
-                    try:
-                        fallback_stmt = (
-                            select(ExportJob)
-                            .where(
-                                ExportJob.tenant_id == tenant_uuid,
-                                ExportJob.status == "completed",
-                                ExportJob.s3_docx_url.isnot(None),
-                            )
-                            .order_by(ExportJob.completed_at.desc())
-                            .limit(1)
-                        )
-                        fallback_res = await db.execute(fallback_stmt)
-                        fallback_job = fallback_res.scalar_one_or_none()
-                        if fallback_job and fallback_job.s3_docx_url:
-                            template_bytes = storage_service.download_file(tenant_id, fallback_job.s3_docx_url)
-                    except Exception:
-                        template_bytes = None
+                # 11/09 : ordre de choix du modele centralise (template_source_service) --
+                # le memoire de reference le plus fourni du client passe desormais AVANT
+                # le dernier export de l'application.
+                from app.services.template_source_service import choisir_modele
+                template_bytes, _source_modele = await choisir_modele(db, tenant_uuid, tenant_id)
 
                 tenant_res = await db.execute(select(Tenant).where(Tenant.id == tenant_uuid))
                 tenant_row = tenant_res.scalar_one_or_none()
@@ -948,6 +1087,15 @@ def build_export_doc_task(
                 brand_color = branding.get("primary_color")
                 shape_style = branding.get("shape_style")
 
+                # Reglages d'affichage du planning (niveau de detail, couleurs...) :
+                # memes valeurs que la vue interactive, pour que l'ecran et le Word
+                # montrent le meme planning.
+                from app.services.gantt_service import normalize_gantt_settings
+                gantt_settings = normalize_gantt_settings(
+                    ((tenant_row.branding_config or {}).get("gantt") if tenant_row else None),
+                    (project.metadata_json or {}).get("gantt"),
+                )
+
                 # 4. Build Word document
                 project_dict = {
                     "id": str(project.id),
@@ -955,6 +1103,8 @@ def build_export_doc_task(
                     "reference_code": project.reference_code,
                     "client_name": project.client_name,
                     "location": project.location,
+                    "lot_number": project.lot_number,
+                    "budget_estimate": float(project.budget_estimate) if project.budget_estimate is not None else None,
                     "company_name": company_name,
                 }
                 from app.api.generate import SECTION_DEFINITIONS
@@ -970,6 +1120,7 @@ def build_export_doc_task(
                     include_cover_page=include_cover_page,
                     required_section_titles=required_section_titles,
                     gantt_tasks=gantt_tasks,
+                    gantt_settings=gantt_settings,
                     language=getattr(project, "output_language", None) or "fr",
                     brand_color=brand_color,
                     shape_style=shape_style,

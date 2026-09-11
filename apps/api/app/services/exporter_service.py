@@ -114,6 +114,64 @@ class ExporterService:
         },
     }
 
+    @staticmethod
+    def _delai_declare(decision_form: Dict[str, Any], EXP: Dict[str, str]) -> Optional[str]:
+        """Delai tel que declare : somme du phasage saisi, sinon delai_mois saisi."""
+        semaines = 0
+        for p in (decision_form or {}).get("phasage_travaux") or []:
+            try:
+                semaines += int(float(p.get("duree_semaines") or 0))
+            except (TypeError, ValueError, AttributeError):
+                pass
+        if semaines > 0:
+            return f"{semaines} sem. (~{round(semaines / 4.33, 1)} {EXP['unit_mois']})"
+        if (decision_form or {}).get("delai_mois"):
+            return f"{decision_form['delai_mois']} {EXP['unit_mois']}"
+        return None
+
+    STYLES_REQUIS = ("Normal", "Title", "Heading 1", "Heading 2", "Heading 3", "List Paragraph",
+                     "List Bullet", "Table Grid", "Normal Table")
+
+    @classmethod
+    def _garantir_styles(cls, doc) -> None:
+        try:
+            import copy as _copy
+            from docx.styles import BabelFish
+            # Des documents produits hors de Word (LibreOffice, generateurs) nomment le
+            # style « Heading 1 » au lieu du nom interne « heading 1 » : python-docx le
+            # liste mais ne le trouve pas (constate le 11/09 sur un memoire client).
+            # On normalise le nom -- c'est alors le style DU CLIENT qui est utilise.
+            for el in doc.styles.element.style_lst:
+                brut = el.name_val
+                if brut and BabelFish.ui2internal(brut) != brut:
+                    interne = BabelFish.ui2internal(brut)
+                    if not any(e.name_val == interne for e in doc.styles.element.style_lst):
+                        el.name_val = interne
+            presents = set()
+            for nom in cls.STYLES_REQUIS:
+                try:
+                    doc.styles[nom]
+                    presents.add(nom)
+                except KeyError:
+                    pass
+            manquants = [n for n in cls.STYLES_REQUIS if n not in presents]
+            if not manquants:
+                return
+            defaut = docx.Document()
+            for nom in manquants:
+                try:
+                    src = defaut.styles[nom]
+                except KeyError:
+                    continue
+                elm = _copy.deepcopy(src.element)
+                # La numerotation des puces du modele par defaut n'existe pas dans le
+                # document client : on retire la reference plutot que de pointer dans le vide.
+                for num in elm.xpath('.//w:numPr'):
+                    num.getparent().remove(num)
+                doc.styles.element.append(elm)
+        except Exception as exc:
+            print(f"[ExporterService] Styles manquants non recopies : {exc}")
+
     def build_memo_docx(
         self,
         tenant_id: str,
@@ -129,6 +187,7 @@ class ExporterService:
         language: str = "fr",
         brand_color: Optional[str] = None,
         shape_style: Optional[str] = None,
+        gantt_settings: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Compiles all validated sections, metadata, Gantt planning, and organigramme into a Word .docx document.
@@ -153,6 +212,23 @@ class ExporterService:
                     if element.tag.endswith('}sectPr'):
                         continue  # preserve section properties (margins, headers)
                     doc.element.body.remove(element)
+                # 11/09 : vider le corps ne supprimait pas les IMAGES du corps, qui
+                # restaient dans le paquet (word/media) sans etre affichees. Comme le
+                # repli prend l'export precedent comme modele, chaque export embarquait
+                # les images de tous les precedents : 417 Ko -> 1,5 Mo -> 1,9 Mo, dont
+                # un ancien planning illisible de 96 lignes. On retire les liens image
+                # du corps ; ceux des en-tetes/pieds (logo) sont portes par leurs
+                # propres parties et restent intacts.
+                from docx.opc.constants import RELATIONSHIP_TYPE as _RT
+                for _rid, _rel in list(doc.part.rels.items()):
+                    if _rel.reltype == _RT.IMAGE:
+                        doc.part.rels.pop(_rid)
+                # 11/09 : un vrai document client ne contient pas forcement les styles
+                # que le generateur utilise (« Table Grid », « List Bullet »...). Premier
+                # essai avec le memoire de reference d'un client : export en echec,
+                # « no style with name 'Table Grid' ». On recopie les styles manquants
+                # depuis le modele par defaut, sans toucher a ceux du client.
+                self._garantir_styles(doc)
                 self._replace_company_placeholders(doc, project_data.get('company_name') or EXP['default_company'])
             except Exception as e:
                 print(f"[ExporterService] Template load error, using blank: {e}")
@@ -194,7 +270,14 @@ class ExporterService:
 
             p_ref = doc.add_paragraph()
             p_ref.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            r_ref = p_ref.add_run(f"{EXP['ref_label']} {project_data.get('reference_code', EXP['default_ref'])}\n{EXP['moa_label']} {project_data.get('client_name', EXP['default_client'])}\n{EXP['lot_label']} {project_data.get('lot_number', EXP['default_lot'])}\n")
+            # 11/09 : les valeurs par defaut de l'assistant (« Acheteur Public Détecté »,
+            # « Lot 01 - Gros Œuvre », 6 mois, 3 500 000 € HT) partaient sur la page de
+            # garde comme des faits. Une donnee absente est desormais dite absente.
+            _A_COMPLETER = "[à compléter]"
+            _DEFAUTS = {"acheteur public détecté", "acheteur public detecte", "lot 01 - gros œuvre", "lot 01 - gros oeuvre", ""}
+            def _reel(v):
+                return v if v is not None and str(v).strip().lower() not in _DEFAUTS else None
+            r_ref = p_ref.add_run(f"{EXP['ref_label']} {project_data.get('reference_code') or _A_COMPLETER}\n{EXP['moa_label']} {_reel(project_data.get('client_name')) or _A_COMPLETER}\n{EXP['lot_label']} {_reel(project_data.get('lot_number')) or _A_COMPLETER}\n")
             r_ref.font.size = Pt(12)
             r_ref.font.color.rgb = RGBColor(51, 65, 85)
 
@@ -206,8 +289,9 @@ class ExporterService:
             summary_table.style = 'Light Shading Accent 1' if 'Light Shading Accent 1' in [s.name for s in doc.styles] else 'Table Grid'
 
             rows_data = [
-                (EXP['row_delai'], f"{decision_form.get('delai_mois', 6)} {EXP['unit_mois']}"),
-                (EXP['row_budget'], f"{project_data.get('budget_estimate', 3500000.0):,.2f} € HT"),
+                (EXP['row_delai'], self._delai_declare(decision_form, EXP) or _A_COMPLETER),
+                (EXP['row_budget'], f"{float(project_data['budget_estimate']):,.2f} € HT".replace(",", " ")
+                 if project_data.get('budget_estimate') else _A_COMPLETER),
                 (EXP['row_materiel'], decision_form.get('materiel_principal', EXP['default_materiel'])),
                 (EXP['row_dechets'], EXP['val_dechets']),
             ]
@@ -245,6 +329,7 @@ class ExporterService:
 
         # 4. Generate Visuals if requested
         gantt_path = None
+        gantt_extra_paths: List[str] = []
         organigramme_path = None
         gantt_error = None
         organigramme_error = None
@@ -270,6 +355,7 @@ class ExporterService:
                         tasks=gantt_tasks,
                         brand_color=brand_color,
                         shape_style=shape_style,
+                        settings=gantt_settings,
                     )
                 else:
                     gantt_res = gantt_service.generate_gantt_chart_png(
@@ -285,6 +371,13 @@ class ExporterService:
                 temp_gantt.write(gantt_bytes)
                 temp_gantt.close()
                 gantt_path = temp_gantt.name
+                # 11/09 : un planning detaille est coupe en plusieurs images (meme
+                # echelle de temps) pour rester lisible a la largeur d'une page.
+                for extra_key in (gantt_res.get("pages") or [])[1:]:
+                    extra = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+                    extra.write(storage_service.download_file(tenant_id, extra_key))
+                    extra.close()
+                    gantt_extra_paths.append(extra.name)
             except Exception as e:
                 # 10/09 : l'erreur n'etait QUE printee dans les logs du conteneur worker.
                 # Cote utilisateur, le planning manquait simplement du document exporte,
@@ -354,6 +447,9 @@ class ExporterService:
                 if gantt_path and os.path.exists(gantt_path):
                     doc.add_paragraph(EXP['figure2_caption']).runs[0].italic = True
                     doc.add_picture(gantt_path, width=Inches(6.5))
+                    for extra_path in gantt_extra_paths:
+                        if os.path.exists(extra_path):
+                            doc.add_picture(extra_path, width=Inches(6.5))
                     doc.add_paragraph("\n")
                 elif gantt_error:
                     warn_p = doc.add_paragraph()
@@ -374,7 +470,7 @@ class ExporterService:
         docx_bytes = docx_buffer.read()
 
         # Clean up temporary visual files
-        for p in [gantt_path, organigramme_path]:
+        for p in [gantt_path, organigramme_path, *gantt_extra_paths]:
             if p and os.path.exists(p):
                 try:
                     os.remove(p)

@@ -18,6 +18,7 @@ from app.core.config import settings
 from app.core.db import get_db
 from app.core.security import CurrentTenantUser, get_current_tenant_user
 from app.core.storage import storage_service
+from app.services.gantt_service import normalize_gantt_settings
 from app.models.entities import ExportJob, ExportTemplate, GeneratedSection, Project, ProjectDecision, ProjectGanttTask, Tenant
 from app.models.schemas import ExportDocumentRequest, ExportJobOut
 from app.services.billing_service import billing_service
@@ -428,51 +429,18 @@ async def stream_project_docx(
             "id": str(r.id), "name": r.name, "start_date": r.start_date, "end_date": r.end_date,
             "sequence": r.sequence, "milestone_label": r.milestone_label,
             "depends_on": [str(d) for d in (r.depends_on or [])],
+            "is_milestone": r.is_milestone,
+            "parent_id": str(r.parent_id) if r.parent_id else None,
+            "lot": r.lot, "color": r.color,
         }
         for r in gantt_task_rows
     ] or None
 
-    tmpl_stmt = select(ExportTemplate).where(
-        ExportTemplate.tenant_id == t_uuid,
-        ExportTemplate.is_default == True,
-    )
-    tmpl_res = await db.execute(tmpl_stmt)
-    template = tmpl_res.scalar_one_or_none()
-    template_bytes = None
-    if template and template.s3_docx_key:
-        try:
-            template_bytes = storage_service.download_file(current_user.tenant_id, template.s3_docx_key)
-        except Exception:
-            template_bytes = None
-
-    # Repli : aucun template client explicite (ou son téléchargement a échoué) -> réutiliser
-    # la structure du plus récent export .docx déjà généré et complété pour ce tenant, plutôt
-    # qu'un document vierge générique. build_memo_docx applique déjà à tout template_bytes fourni
-    # ici la même logique de remplacement de placeholders / détection de sections manquantes /
-    # préservation d'en-tête-pied-de-page (voir plus haut dans ce fichier) — aucun changement
-    # nécessaire côté générateur, seule la source du template change.
-    used_fallback_template_job_id: Optional[str] = None
-    if not template_bytes:
-        try:
-            fallback_stmt = (
-                select(ExportJob)
-                .where(
-                    ExportJob.tenant_id == t_uuid,
-                    ExportJob.status == "completed",
-                    ExportJob.s3_docx_url.isnot(None),
-                )
-                .order_by(ExportJob.completed_at.desc())
-                .limit(1)
-            )
-            fallback_res = await db.execute(fallback_stmt)
-            fallback_job = fallback_res.scalar_one_or_none()
-            if fallback_job and fallback_job.s3_docx_url:
-                template_bytes = storage_service.download_file(current_user.tenant_id, fallback_job.s3_docx_url)
-                used_fallback_template_job_id = str(fallback_job.id)
-                print(f"[Export] Aucun template explicite pour tenant={current_user.tenant_id} -- repli sur l'export complete le plus recent (job={used_fallback_template_job_id}) comme template.")
-        except Exception:
-            template_bytes = None
-            used_fallback_template_job_id = None
+    # 11/09 : meme ordre de choix du modele que l'export compile (template_source_service) :
+    # modele configure, puis memoire de reference le plus fourni du client, puis dernier export.
+    from app.services.template_source_service import choisir_modele
+    template_bytes, _source_modele = await choisir_modele(db, t_uuid, current_user.tenant_id)
+    used_fallback_template_job_id: Optional[str] = _source_modele.get("nom") if _source_modele.get("source") == "export_precedent" else None
 
     tenant_res = await db.execute(select(Tenant).where(Tenant.id == t_uuid))
     tenant_row = tenant_res.scalar_one_or_none()
@@ -516,6 +484,7 @@ async def stream_project_docx(
         include_visuals=True,
         required_section_titles=required_section_titles,
         gantt_tasks=gantt_tasks,
+        gantt_settings=normalize_gantt_settings(branding.get("gantt"), (project.metadata_json or {}).get("gantt")),
         language=getattr(project, "output_language", None) or "fr",
         brand_color=brand_color,
         shape_style=shape_style,

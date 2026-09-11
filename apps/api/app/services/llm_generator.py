@@ -145,6 +145,40 @@ DIRECTIVES ET POSITIONNEMENT SPÉCIFIQUES DE L'ENTREPRISE (PROMPT SYSTÈME PERSO
 # precisement ce qui permet de reproduire son style. ~57 000 caracteres au total,
 # soit de l'ordre de 16 000 tokens d'entree : largement dans la fenetre de tous les
 # modeles vises, pour un cout d'entree qui reste tres inferieur au cout de sortie.
+# ---------------------------------------------------------------------------
+# Moteur de secours : un canevas n'est PAS une rédaction
+# ---------------------------------------------------------------------------
+# Constat du 10/09 : un tiers des sections en base portaient un score inventé
+# (75, 96, 97, 98, 98,5 ou 99 %) alors que leur contenu était le canevas de
+# repli — deux mille caractères de texte générique, parfois avec des « None »
+# en plein milieu. Dans l'interface, rien ne les distinguait d'une vraie
+# rédaction : même vignette verte, même score flatteur. L'utilisateur croyait
+# lire un mémoire ; il lisait un gabarit.
+#
+# Un canevas n'a aucune conformité à mesurer : il ne répond à aucun critère du
+# marché. Son score est donc 0, sans exception, et son texte s'ouvre par un
+# bandeau qui le dit. C'est moins flatteur et infiniment plus utile.
+SCORE_CANEVAS = 0.0
+
+BANDEAU_CANEVAS = (
+    "<p style='color:#92400e;background:#fffbeb;padding:10px;"
+    "border-left:4px solid #f59e0b;margin:0 0 12px 0;'>"
+    "<strong>⚠ Canevas de secours — ceci n'est pas une rédaction.</strong> "
+    "La rédaction par l'IA n'a pas abouti pour cette section : le texte ci-dessous "
+    "est un gabarit générique construit à partir de votre saisie, il ne répond à "
+    "aucun critère de ce marché. Relancez la génération, et ne l'exportez pas en l'état."
+    "</p>"
+)
+
+
+def note_canevas(precision: str = "") -> str:
+    """Note de conformité d'un canevas : elle dit ce qu'est le texte, pas ce
+    qu'on aimerait qu'il soit."""
+    base = ("Canevas de secours — aucune rédaction par l'IA n'a abouti. "
+            "Aucune conformité n'a pu être vérifiée : le score est nul par construction.")
+    return f"{base} {precision}".strip()
+
+
 CONTEXT_LIMITS = {
     "dce": 20000,
     "anciens_memoires": 20000,
@@ -577,13 +611,21 @@ C. "visual_specs" — LES SCHÉMAS SONT CRÉÉS AUTOMATIQUEMENT À PARTIR DE CE 
    restent modifiables par l'utilisateur dans l'application. Ne décris donc pas un schéma
    en texte : produis ses données. Deux types sont acceptés, uniquement quand la section
    les justifie et quand le contexte fournit de quoi les remplir :
-   - Planning :
+   - Planning (HIÉRARCHIQUE : phases, puis tâches, puis sous-tâches) :
      {{"type": "gantt", "title": "Planning prévisionnel des travaux",
        "tasks": [{{"name": "Installation de chantier", "start": "2026-03-02",
                   "end": "2026-03-20", "progress": 0, "is_milestone": false,
+                  "depends_on": []}},
+                 {{"name": "Clôtures et signalisation", "parent": "Installation de chantier",
+                  "lot": "Lot 00 — Installation", "start": "2026-03-02", "end": "2026-03-06",
                   "depends_on": []}}]}}
      Dates réelles au format AAAA-MM-JJ, déduites du délai d'exécution du marché.
-     "depends_on" cite le "name" exact des tâches précédentes.
+     "depends_on" cite le "name" exact des tâches précédentes. "parent" cite le "name"
+     exact de la phase (ou de la tâche) qui contient la ligne. Un planning réduit à 4 ou 5
+     phases est trop macro pour un jury : détaille CHAQUE phase en 3 à 8 tâches issues des
+     ouvrages du CCTP (et en sous-tâches quand l'ouvrage le justifie), dates comprises dans
+     la phase. Si des phases figurent dans les données déclarées par le client, reprends
+     leurs noms EXACTS comme "parent" : leurs dates font foi, seul le détail vient de toi.
    - Organigramme de chantier :
      {{"type": "organigramme", "title": "Organigramme d'encadrement",
        "nodes": [{{"nom": "À pourvoir", "role": "Conducteur de travaux",
@@ -927,6 +969,9 @@ D. IMPÉRATIF SUR "compliance_checklist" : la conformité doit être vérifiable
         # code, pas d'une evaluation. Un gabarit ne prouve aucune conformite, donc
         # il n'a pas de score -- et on le dit.
         if _llm_error_detail:
+            # Le canevas porte deja score 0, bandeau et note honnete (voir
+            # SCORE_CANEVAS / BANDEAU_CANEVAS) : on ne fait ici qu'ajouter la
+            # cause technique exacte, qui n'est connue qu'a ce niveau.
             res["compliance_score"] = 0.0
             res["compliance_notes"] = (
                 "Aucune rédaction par l'IA n'a abouti : le texte affiché est un canevas, "
@@ -1088,8 +1133,8 @@ D. IMPÉRATIF SUR "compliance_checklist" : la conformité doit être vérifiable
             {web_cites_html}
             {client_sites_html}
             """
-            score = 98.5
-            notes = "Encadrement expérimenté avec ratios de présence validés."
+            score = SCORE_CANEVAS
+            notes = note_canevas("Encadrement repris de votre saisie dans l'assistant.")
 
         elif section_key == "moyens_materiels":
             html = f"""
@@ -1104,8 +1149,8 @@ D. IMPÉRATIF SUR "compliance_checklist" : la conformité doit être vérifiable
             {web_cites_html}
             {client_sites_html}
             """
-            score = 96.0
-            notes = "Fiches techniques matériels intégrées avec citations."
+            score = SCORE_CANEVAS
+            notes = note_canevas("Parc matériel repris de votre saisie dans l'assistant.")
 
         elif section_key == "methodologie_phasage" or section_key == "planning_phasage":
             phases_html = "".join([
@@ -1123,8 +1168,8 @@ D. IMPÉRATIF SUR "compliance_checklist" : la conformité doit être vérifiable
             {web_cites_html}
             {client_sites_html}
             """
-            score = 97.0
-            notes = "Chemin critique validé avec citations techniques."
+            score = SCORE_CANEVAS
+            notes = note_canevas("Phasage repris de votre saisie dans l'assistant.")
 
         elif section_key in ("qse_environnement", "rse_environnement"):
             html = f"""
@@ -1140,8 +1185,8 @@ D. IMPÉRATIF SUR "compliance_checklist" : la conformité doit être vérifiable
             {web_cites_html}
             {client_sites_html}
             """
-            score = 99.0
-            notes = "Taux de valorisation 88%, béton bas carbone et sources web intégrées."
+            score = SCORE_CANEVAS
+            notes = note_canevas("Démarche RSE reprise de votre saisie dans l'assistant.")
 
         elif section_key == "securite_ppsps":
             html = f"""
@@ -1155,8 +1200,8 @@ D. IMPÉRATIF SUR "compliance_checklist" : la conformité doit être vérifiable
             {client_sites_html}
             """
 
-            score = 98.0
-            notes = "Procédure de sécurité complète avec PAQ et causeries hebdomadaires."
+            score = SCORE_CANEVAS
+            notes = note_canevas("Mesures de sécurité reprises de votre saisie dans l'assistant.")
 
         else:
             # Gabarit générique mais honnête pour toute clé sans template dédié
@@ -1178,14 +1223,17 @@ D. IMPÉRATIF SUR "compliance_checklist" : la conformité doit être vérifiable
             {web_cites_html}
             {client_sites_html}
             """
-            score = 75.0
-            notes = "Contenu généré par le moteur de secours générique — relecture et complément manuel recommandés."
+            score = SCORE_CANEVAS
+            notes = note_canevas()
 
+        # Le bandeau est DANS le corps du texte, pas seulement dans les notes :
+        # c'est le corps que l'utilisateur lit, qu'il copie et qu'il exporte.
         return {
             "title": section_title,
-            "content_html": html.strip(),
+            "content_html": (BANDEAU_CANEVAS + html).strip(),
             "compliance_score": score,
             "compliance_notes": notes,
+            "degraded": True,
             "visual_placeholders": ["gantt_chart", "organigramme_chantier"],
             "web_sources_used": [{"title": w.get("title", ""), "url": w.get("url", "")} for w in web_sources],
             "client_sources_used": [{"title": c.get("title", ""), "url": c.get("url", "")} for c in client_sites],

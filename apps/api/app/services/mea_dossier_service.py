@@ -4,6 +4,7 @@ Supports Saudi Arabia (SA), Qatar (QA), UAE (AE), and Lebanon (LB) in English an
 Injects native OpenXML RTL attributes (w:bidi, w:rtl) for Arabic document rendering.
 """
 import io
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -16,6 +17,72 @@ from docx.oxml.ns import nsdecls, qn
 
 
 class MEADossierService:
+    # ------------------------------------------------------------------
+    # Le mémoire technique lui-même
+    # ------------------------------------------------------------------
+    # Constat du 10/09 : cet export produisait UNIQUEMENT la page administrative
+    # (form of tender) — 3 Ko, quatre paragraphes — alors que l'interface le
+    # présentait comme « générez des mémoires adaptés aux juridictions » et
+    # invitait à l'utiliser À LA PLACE de l'export Word. Un utilisateur suivant
+    # cette consigne déposait donc une page de garde au lieu de son mémoire.
+    # Le dossier régional contient désormais les deux : la page administrative
+    # propre au pays, puis le mémoire technique complet, en RTL quand la langue
+    # est l'arabe.
+    @staticmethod
+    def _texte_depuis_html(html_text: str) -> List[str]:
+        """Paragraphes lisibles à partir du HTML d'une section rédigée."""
+        texte = (html_text or "")
+        texte = texte.replace("</li>", "\n").replace("<li>", "• ")
+        for balise in ("</h2>", "</h3>", "</h4>", "</p>", "</tr>"):
+            texte = texte.replace(balise, "\n\n")
+        texte = texte.replace("</td>", " | ")
+        texte = texte.replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n")
+        texte = re.sub(r"<[^>]+>", "", texte)
+        for entite, remplacement in (("&nbsp;", " "), ("&amp;", "&"), ("&quot;", '"'),
+                                     ("&#39;", "'"), ("&gt;", ">"), ("&lt;", "<")):
+            texte = texte.replace(entite, remplacement)
+        return [ligne.strip() for ligne in texte.split("\n\n") if ligne.strip()]
+
+    @staticmethod
+    def _contient_arabe(texte: str) -> bool:
+        """Vrai si le texte porte de l'écriture arabe (blocs Unicode arabes)."""
+        return any(
+            "\u0600" <= c <= "\u06ff" or "\u0750" <= c <= "\u077f"
+            or "\ufb50" <= c <= "\ufdff" or "\ufe70" <= c <= "\ufeff"
+            for c in (texte or "")
+        )
+
+    @classmethod
+    def _ajouter_memoire_technique(cls, doc, sections: Optional[List[Dict[str, Any]]], is_ar: bool):
+        """Ajoute les chapitres rédigés après la page administrative."""
+        if not sections:
+            return
+        doc.add_page_break()
+        titre = doc.add_paragraph()
+        run_titre = titre.add_run("المذكرة الفنية" if is_ar else "Mémoire technique")
+        run_titre.bold = True
+        run_titre.font.size = Pt(16)
+        if is_ar:
+            cls._apply_rtl_to_paragraph(titre)
+            cls._apply_rtl_to_run(run_titre)
+
+        for section in sections:
+            p_titre = doc.add_paragraph()
+            titre_section = str(section.get("title") or "")
+            run_st = p_titre.add_run(titre_section)
+            run_st.bold = True
+            run_st.font.size = Pt(13)
+            if cls._contient_arabe(titre_section):
+                cls._apply_rtl_to_paragraph(p_titre)
+                cls._apply_rtl_to_run(run_st)
+
+            for paragraphe in cls._texte_depuis_html(section.get("content_html") or ""):
+                p = doc.add_paragraph()
+                run = p.add_run(paragraphe)
+                if cls._contient_arabe(paragraphe):
+                    cls._apply_rtl_to_paragraph(p)
+                    cls._apply_rtl_to_run(run)
+
     @staticmethod
     def _apply_rtl_to_paragraph(paragraph):
         """
@@ -43,6 +110,7 @@ class MEADossierService:
         tenant: Dict[str, Any],
         project: Dict[str, Any],
         language: str = "en",
+        sections: Optional[List[Dict[str, Any]]] = None
     ) -> bytes:
         """
         Saudi Arabia (SA) - Government Tender & Procurement Law (GTPL) Dossier.
@@ -134,6 +202,7 @@ class MEADossierService:
             doc.add_paragraph().add_run("3. Mandatory Statutory Compliances: ZATCA Zakat Certificate, GOSI Social Insurance, MOMRAH Contractor Classification & Nitaqat Saudization status verified.")
             doc.add_paragraph().add_run("4. Technical Commitment: Full compliance with the Saudi Building Code (SBC 201/801) and Local Content and Government Procurement Authority (LCGPA) standards.")
 
+        self._ajouter_memoire_technique(doc, sections, is_ar)
         buffer = io.BytesIO()
         doc.save(buffer)
         return buffer.getvalue()
@@ -143,6 +212,7 @@ class MEADossierService:
         tenant: Dict[str, Any],
         project: Dict[str, Any],
         language: str = "en",
+        sections: Optional[List[Dict[str, Any]]] = None
     ) -> bytes:
         """
         Qatar (QA) - Tender Law No. 24 of 2015 & Ashghal Directives.
@@ -219,6 +289,7 @@ class MEADossierService:
             doc.add_paragraph().add_run("3. In-Country Value (ICV): Certified In-Country Value score and local procurement compliance documentation attached.")
             doc.add_paragraph().add_run("4. Standards Compliance: Strict execution according to QCS 2018 and GSAS 4-Star Sustainability Rating.")
 
+        self._ajouter_memoire_technique(doc, sections, is_ar)
         buffer = io.BytesIO()
         doc.save(buffer)
         return buffer.getvalue()
@@ -228,6 +299,7 @@ class MEADossierService:
         tenant: Dict[str, Any],
         project: Dict[str, Any],
         language: str = "en",
+        sections: Optional[List[Dict[str, Any]]] = None
     ) -> bytes:
         """
         United Arab Emirates (UAE) - Federal Procurement Law No. 11/2023 & MoF / DED Directives.
@@ -303,6 +375,7 @@ class MEADossierService:
             doc.add_paragraph().add_run("3. Emiratisation & Labour Compliance: Full compliance with MOHRE Emiratisation quotas and Wage Protection System (WPS).")
             doc.add_paragraph().add_run("4. Green Building Codes: Certified compliance with Estidama Pearl Rating (Abu Dhabi) & Dubai Green Building Regulations (Al Sa'fat).")
 
+        self._ajouter_memoire_technique(doc, sections, is_ar)
         buffer = io.BytesIO()
         doc.save(buffer)
         return buffer.getvalue()
@@ -312,6 +385,7 @@ class MEADossierService:
         tenant: Dict[str, Any],
         project: Dict[str, Any],
         language: str = "fr",
+        sections: Optional[List[Dict[str, Any]]] = None
     ) -> bytes:
         """
         Lebanon (LB) - Public Procurement Authority (PPA - Loi n° 244/2021).
@@ -389,6 +463,7 @@ class MEADossierService:
             doc.add_paragraph().add_run("3. Attestations Légales : Quitus fiscal Ministère des Finances, bordeaux CNSS et visas de l'Ordre des Ingénieurs et Architectes de Beyrouth/Tripoli (OIA).")
             doc.add_paragraph().add_run("4. Déclaration sur l'honneur : Non-faillite, absence de conflit d'intérêts et régularité juridique complète selon les articles 14 à 18 de la Loi 244/2021.")
 
+        self._ajouter_memoire_technique(doc, sections, is_ar)
         buffer = io.BytesIO()
         doc.save(buffer)
         return buffer.getvalue()

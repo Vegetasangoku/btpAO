@@ -16,11 +16,13 @@ import {
   Sparkles,
   ExternalLink,
   Sliders,
+  LogIn,
 } from 'lucide-react';
 import { api } from '@/lib/api';
 import { Tenant } from '@/lib/types';
 import { useTranslation } from '@/components/i18n-provider';
 import { DismissibleNotice } from '@/components/ui/dismissible-notice';
+import { ecrireEspaceConsulte } from '@/lib/espace-actif';
 
 export default function AdminTenantsListPage() {
   const { t } = useTranslation();
@@ -247,7 +249,21 @@ export default function AdminTenantsListPage() {
                       : '—'}
                   </td>
                   <td className="text-end whitespace-nowrap">
-                    {/* Actions secondaires révélées au survol : le tableau reste lisible. */}
+                    {/* Consulter l'espace d'un client est un acte EXPLICITE : il se
+                        déclenche ici, et un bandeau le rappelle ensuite sur chaque
+                        écran. Rien n'est choisi à la place de l'administrateur. */}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        ecrireEspaceConsulte({ id: tenant.id, nom: tenant.name });
+                        window.location.href = '/dashboard';
+                      }}
+                      title={t('espace.inspecter')}
+                      className="inline-flex items-center gap-1 p-1.5 rounded-[4px] text-[11px] text-[hsl(var(--muted-foreground))] hover:text-hl transition-colors duration-150 cursor-pointer"
+                    >
+                      <LogIn className="w-3.5 h-3.5" strokeWidth={1.5} />
+                      <span className="hidden lg:inline">{t('espace.inspecter')}</span>
+                    </button>
                     <button
                       type="button"
                       onClick={(e) => handleQuickDelete(e, tenant)}

@@ -170,24 +170,16 @@ services:
     volumes:
       - ./apps/api:/app
       - api_local_storage:/app/local_storage
-    # 10/09 : le worker Celery ne recharge PAS le code a chaud, contrairement a
-    # l'API lancee avec --reload. Chaque correctif cote generation exigeait donc un
-    # `docker compose restart worker` manuel, facile a oublier -- on croyait tester
-    # le nouveau code alors que l'ancien tournait encore. watchmedo relance le worker
-    # des qu'un fichier .py change dans le volume monte.
-    # watchdog est installe au demarrage s'il manque, pour qu'un simple
-    # `docker compose up -d worker` suffise : pas de reconstruction d'image a
-    # demander, et repli automatique sur celery seul si l'installation echoue
-    # (reseau coupe par exemple) -- le worker demarre dans tous les cas.
-    command: >
-      sh -c "python -c 'import watchdog' 2>/dev/null || pip install --no-cache-dir --quiet 'watchdog>=4.0.0' || true;
-             if command -v watchmedo >/dev/null 2>&1; then
-               exec watchmedo auto-restart --directory=/app/app --pattern='*.py' --recursive --signal SIGTERM --
-                 celery -A app.core.celery_app worker --loglevel=info --concurrency=2 -Q default,ocr,generation;
-             else
-               echo 'watchmedo indisponible : demarrage sans rechargement a chaud';
-               exec celery -A app.core.celery_app worker --loglevel=info --concurrency=2 -Q default,ocr,generation;
-             fi"
+    # 10/09 : j'avais ajoute ici un demarrage sous `watchmedo auto-restart` pour que
+    # le worker recharge le code a chaud. Deux tentatives, deux echecs de demarrage
+    # (un scalaire YAML replie qui coupait la commande, puis un conteneur non recree),
+    # pour un confort de developpement. Le vrai probleme -- ne pas savoir que le worker
+    # tourne sur du code perime -- est desormais resolu autrement, et mieux : l'API
+    # compare l'empreinte du code charge par le worker a celle du disque et le signale
+    # dans /health, dans la console d'infrastructure et par un bandeau dans l'editeur
+    # (voir main.py::health et worker-health-banner.tsx). On revient donc a la commande
+    # d'origine, celle qui a toujours fonctionne.
+    command: celery -A app.core.celery_app worker --loglevel=info --concurrency=2 -Q default,ocr,generation
     networks:
       - btpao_net
 

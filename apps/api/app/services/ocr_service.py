@@ -32,6 +32,48 @@ LOW_TEXT_YIELD_CHARS_PER_PAGE = 40
 # local partiel plutot que de bloquer indefiniment sur un seul document.
 MAX_AZURE_ESCALATION_PAGES = 400
 
+# ---------------------------------------------------------------------------
+# Compter des caracteres ne suffit pas : encore faut-il qu'ils veuillent dire
+# quelque chose
+# ---------------------------------------------------------------------------
+# Constat du 10/09, en testant l'arabe : quand la police embarquee d'un PDF n'a
+# pas de table ToUnicode -- cas frequent des documents arabes produits par des
+# outils anciens, et de beaucoup de fichiers deja passes par un OCR tiers --
+# pdfplumber rend une page entiere de caracteres NUL ou de U+FFFD. Ce texte
+# n'apprend rien a personne, mais il est LONG : l'ancien test de "faible
+# rendement" comptait sa longueur, concluait que la page etait riche, et
+# n'escaladait jamais vers Azure. Le charabia partait alors directement dans
+# l'index de recherche et dans le prompt, sans que rien ne le signale.
+#
+# On juge desormais une page sur ses caracteres EXPLOITABLES.
+_CARACTERES_ININTERPRETABLES = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ufffd]")
+
+# En deca de cette part de caracteres exploitables, la page est traitee comme
+# illisible meme si elle est longue.
+PART_MINIMALE_CARACTERES_EXPLOITABLES = 0.60
+
+
+def texte_exploitable(texte: Optional[str]) -> str:
+    """Le texte debarrasse des caracteres qui ne representent aucun glyphe lisible."""
+    return _CARACTERES_ININTERPRETABLES.sub("", texte or "")
+
+
+def page_illisible(texte: Optional[str]) -> bool:
+    """Vrai quand une page n'apporte pas de texte utilisable a la generation.
+
+    Deux motifs, volontairement distincts :
+      - trop peu de caracteres : page probablement scannee ;
+      - beaucoup de caracteres mais majoritairement inexploitables : police sans
+        table ToUnicode, texte illisible malgre son apparence a l'ecran.
+    """
+    brut = (texte or "").strip()
+    utile = texte_exploitable(brut).strip()
+    if len(utile) < LOW_TEXT_YIELD_CHARS_PER_PAGE:
+        return True
+    if brut and (len(utile) / len(brut)) < PART_MINIMALE_CARACTERES_EXPLOITABLES:
+        return True
+    return False
+
 
 class OCRService:
     def __init__(self):
@@ -54,7 +96,7 @@ class OCRService:
         weak_page_numbers = [
             p.get("page_number")
             for p in local_pages
-            if len((p.get("text") or "").strip()) < LOW_TEXT_YIELD_CHARS_PER_PAGE
+            if page_illisible(p.get("text"))
         ]
         weak_page_numbers = [pn for pn in weak_page_numbers if pn is not None][:MAX_AZURE_ESCALATION_PAGES]
 
@@ -77,6 +119,15 @@ class OCRService:
             except Exception as e:
                 print(f"[OCRService] Azure Document Intelligence escalation notice (kept local text for weak pages): {e}")
 
+        # Même après escalade, une page peut rester illisible (aucune clé Azure,
+        # quota atteint…). On ne propage pas ces caractères : ils pollueraient
+        # l'index de recherche et le prompt sans rien apporter.
+        pages_illisibles = 0
+        for page in local_pages:
+            page["text"] = texte_exploitable(page.get("text"))
+            if page_illisible(page.get("text")):
+                pages_illisibles += 1
+
         full_text = "\n\n".join(p.get("text", "") for p in local_pages).strip()
         if not full_text:
             raise RuntimeError(
@@ -91,6 +142,10 @@ class OCRService:
                 "pages_total": len(local_pages),
                 "pages_azure": pages_azure_used,
                 "pages_local": max(len(local_pages) - pages_azure_used, 0),
+                # Pages dont on n'a RIEN tire d'exploitable, meme apres escalade.
+                # Le compter permet de le dire a l'utilisateur au lieu de lui
+                # laisser croire que la piece a ete lue en entier.
+                "pages_illisibles": pages_illisibles,
             },
         }
 

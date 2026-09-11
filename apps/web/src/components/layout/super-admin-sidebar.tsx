@@ -29,6 +29,7 @@ import { supabase } from '@/lib/supabase/client';
 import { useTheme } from '@/components/theme-provider';
 import { useTranslation, Language } from '@/components/i18n-provider';
 
+import { ecrireEspaceConsulte } from '@/lib/espace-actif';
 const ICON = 'w-[15px] h-[15px] shrink-0';
 
 export function SuperAdminSidebar() {
@@ -127,13 +128,19 @@ export function SuperAdminSidebar() {
               {t('layout.admin_sidebar.same_session_notice', { email: userEmail })}
             </p>
           )}
-          <Link
-            href="/dashboard"
-            prefetch={false}
-            className="mt-3 mx-1.5 btn-secondary w-[calc(100%-0.75rem)] !text-[12.5px]"
+          {/* Ce bouton ouvre bien SON espace : on efface d'abord toute inspection
+              d'espace client en cours, sinon on retomberait chez le client que
+              l'on regardait — exactement le défaut signalé le 10/09. */}
+          <button
+            type="button"
+            onClick={() => {
+              ecrireEspaceConsulte(null);
+              window.location.href = '/dashboard';
+            }}
+            className="mt-3 mx-1.5 btn-secondary w-[calc(100%-0.75rem)] !text-[12.5px] cursor-pointer"
           >
             {t('layout.admin_sidebar.open_btp_space')}
-          </Link>
+          </button>
         </div>
       </nav>
 

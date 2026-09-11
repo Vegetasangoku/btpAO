@@ -1,6 +1,7 @@
 """
 Visuals, Gantt & Organigramme Generator Endpoints
 """
+import asyncio
 import uuid
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional
@@ -25,6 +26,9 @@ from app.models.schemas import (
     GanttTaskCreate,
     GanttTaskOut,
     GanttTaskUpdate,
+    GanttDetailRequest,
+    GanttSettings,
+    GanttSettingsUpdate,
     LearningProposal,
     OrganigrammeLearningCheckResponse,
     OrganigrammeNodeCreate,
@@ -32,7 +36,7 @@ from app.models.schemas import (
     OrganigrammeNodeUpdate,
 )
 from app.services.diagram_service import diagram_service
-from app.services.gantt_service import gantt_service
+from app.services.gantt_service import gantt_service, order_gantt_hierarchy, normalize_gantt_settings, GANTT_PALETTES, _hex_ok
 from app.services.learning_service import learning_service
 
 router = APIRouter(prefix="/visuals", tags=["Visuals & Planning"])
@@ -60,10 +64,24 @@ def _row_to_task_dict(row: ProjectGanttTask) -> Dict[str, Any]:
         "is_milestone": row.is_milestone,
         "milestone_label": row.milestone_label,
         "depends_on": [str(d) for d in (row.depends_on or [])],
+        "parent_id": str(row.parent_id) if row.parent_id else None,
+        "lot": row.lot,
+        "color": row.color,
     }
 
 
-def _row_to_out(row: ProjectGanttTask, critical_ids: Optional[set] = None) -> GanttTaskOut:
+def _levels(rows) -> Dict[str, int]:
+    """Profondeur de chaque ligne (0 = phase) -- calculee, jamais stockee."""
+    return {str(t["id"]): lvl for t, lvl in order_gantt_hierarchy([_row_to_task_dict(r) for r in rows])}
+
+
+def _ordered_rows(rows):
+    """Lignes dans l'ordre d'affichage hierarchique (phase, ses taches, leurs sous-taches)."""
+    by_id = {str(r.id): r for r in rows}
+    return [by_id[str(t["id"])] for t, _ in order_gantt_hierarchy([_row_to_task_dict(r) for r in rows])]
+
+
+def _row_to_out(row: ProjectGanttTask, critical_ids: Optional[set] = None, level: int = 0) -> GanttTaskOut:
     return GanttTaskOut(
         id=str(row.id),
         project_id=str(row.project_id),
@@ -76,6 +94,10 @@ def _row_to_out(row: ProjectGanttTask, critical_ids: Optional[set] = None) -> Ga
         milestone_label=row.milestone_label,
         depends_on=[str(d) for d in (row.depends_on or [])],
         is_critical=bool(critical_ids and str(row.id) in critical_ids),
+        parent_id=str(row.parent_id) if row.parent_id else None,
+        lot=row.lot,
+        color=row.color,
+        level=level,
     )
 
 
@@ -161,7 +183,8 @@ async def list_gantt_tasks(
 
     task_dicts = [_row_to_task_dict(r) for r in rows]
     critical_ids = gantt_service.compute_critical_path(task_dicts)
-    return [_row_to_out(r, critical_ids) for r in rows]
+    levels = _levels(rows)
+    return [_row_to_out(r, critical_ids, levels.get(str(r.id), 0)) for r in _ordered_rows(rows)]
 
 
 @router.get("/gantt-tasks/{project_id}/learning-check", response_model=GanttLearningCheckResponse)
@@ -249,6 +272,16 @@ async def create_gantt_task(
 
     existing_ids = {str(r.id) for r in existing}
     depends_on_uuids = [uuid.UUID(d) for d in payload.depends_on if d in existing_ids]
+    parent_uuid = None
+    if payload.parent_id:
+        if payload.parent_id not in existing_ids:
+            raise HTTPException(status_code=400, detail="Tâche parente introuvable sur ce projet.")
+        parent_uuid = uuid.UUID(payload.parent_id)
+        # Rangee juste apres le dernier enfant de ce parent (voir _ordered_rows).
+        siblings = [r for r in existing if r.parent_id == parent_uuid]
+        next_sequence = (max((r.sequence for r in siblings), default=-1) + 1)
+    else:
+        next_sequence = max((r.sequence for r in existing if r.parent_id is None), default=-1) + 1
 
     row = ProjectGanttTask(
         tenant_id=t_uuid,
@@ -257,14 +290,17 @@ async def create_gantt_task(
         start_date=start_d,
         end_date=end_d,
         progress=payload.progress,
-        sequence=len(existing),
+        sequence=next_sequence,
         is_milestone=payload.is_milestone,
         milestone_label=payload.milestone_label,
         depends_on=depends_on_uuids,
+        parent_id=parent_uuid,
+        lot=(payload.lot or "").strip() or None,
+        color=_hex_ok(payload.color),
     )
     db.add(row)
     await db.commit()
-    return _row_to_out(row)
+    return _row_to_out(row, level=1 if parent_uuid else 0)
 
 
 @router.patch("/gantt-tasks/{project_id}/{task_id}", response_model=GanttTaskOut)
@@ -313,6 +349,25 @@ async def update_gantt_task(
         existing = await _fetch_gantt_task_rows(db, current_user.tenant_id, project_id)
         existing_ids = {str(r.id) for r in existing}
         row.depends_on = [uuid.UUID(d) for d in payload.depends_on if d in existing_ids and d != task_id]
+    if payload.parent_id is not None:
+        if payload.parent_id == "":
+            row.parent_id = None
+        else:
+            existing = await _fetch_gantt_task_rows(db, current_user.tenant_id, project_id)
+            by_id = {str(r.id): r for r in existing}
+            if payload.parent_id not in by_id or payload.parent_id == task_id:
+                raise HTTPException(status_code=400, detail="Tâche parente invalide.")
+            # Interdit de se rattacher a l'un de ses propres descendants (cycle).
+            cur = by_id[payload.parent_id]
+            while cur is not None and cur.parent_id is not None:
+                if str(cur.parent_id) == task_id:
+                    raise HTTPException(status_code=400, detail="Une tâche ne peut pas dépendre hiérarchiquement d'une de ses sous-tâches.")
+                cur = by_id.get(str(cur.parent_id))
+            row.parent_id = uuid.UUID(payload.parent_id)
+    if payload.lot is not None:
+        row.lot = payload.lot.strip() or None
+    if payload.color is not None:
+        row.color = _hex_ok(payload.color)
     row.updated_at = datetime.utcnow()
 
     await db.commit()
@@ -357,6 +412,7 @@ async def generate_project_gantt(
     shape_style = await _get_tenant_shape_style(db, current_user.tenant_id)
     if rows:
         task_dicts = [_row_to_task_dict(r) for r in rows]
+        settings = await load_gantt_settings(db, current_user.tenant_id, payload.project_id)
         result = gantt_service.generate_gantt_chart_png_from_tasks(
             tenant_id=current_user.tenant_id,
             project_id=payload.project_id,
@@ -364,6 +420,7 @@ async def generate_project_gantt(
             tasks=task_dicts,
             brand_color=brand_color,
             shape_style=shape_style,
+            settings=settings,
         )
         return result
 
@@ -691,3 +748,112 @@ async def get_visual_file(
     elif resolved_path.endswith(".docx"):
         content_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     return Response(content=data, media_type=content_type)
+
+
+# ---------------------------------------------------------------------------
+# Planning detaille et reglages d'affichage (11/09)
+# ---------------------------------------------------------------------------
+
+_DETAIL_LOCKS: Dict[str, asyncio.Lock] = {}
+
+
+async def load_gantt_settings(db: AsyncSession, tenant_id: str, project_id: str) -> Dict[str, Any]:
+    """Reglages effectifs : defaut < entreprise (branding_config.gantt) < projet
+    (projects.metadata_json.gantt). Ne leve jamais : au pire, les valeurs par defaut."""
+    tenant_layer, project_layer = None, None
+    try:
+        tenant = await db.get(Tenant, uuid.UUID(tenant_id))
+        tenant_layer = (tenant.branding_config or {}).get("gantt") if tenant else None
+    except Exception:
+        pass
+    try:
+        project = await db.get(Project, uuid.UUID(project_id))
+        if project and str(project.tenant_id) == str(tenant_id):
+            project_layer = (project.metadata_json or {}).get("gantt")
+    except Exception:
+        pass
+    return normalize_gantt_settings(tenant_layer, project_layer)
+
+
+@router.get("/gantt-settings/{project_id}")
+async def get_gantt_settings(
+    project_id: str,
+    current_user: CurrentTenantUser = Depends(get_current_tenant_user),
+    db: AsyncSession = Depends(get_db),
+):
+    project = await db.get(Project, uuid.UUID(project_id))
+    if not project or str(project.tenant_id) != current_user.tenant_id:
+        raise HTTPException(status_code=404, detail="Projet introuvable.")
+    settings = await load_gantt_settings(db, current_user.tenant_id, project_id)
+    brand = await _get_tenant_brand_color(db, current_user.tenant_id)
+    return {
+        "settings": settings,
+        "palettes": GANTT_PALETTES,
+        "brand_color": brand,
+        "projet_personnalise": bool((project.metadata_json or {}).get("gantt")),
+    }
+
+
+@router.put("/gantt-settings/{project_id}")
+async def save_gantt_settings(
+    project_id: str,
+    payload: GanttSettingsUpdate,
+    current_user: CurrentTenantUser = Depends(get_current_tenant_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Enregistre les reglages pour CE projet, ou comme defaut de l'entreprise.
+    Ce sont eux qu'utilise le PNG insere dans le Word/PDF exporte."""
+    project = await db.get(Project, uuid.UUID(project_id))
+    if not project or str(project.tenant_id) != current_user.tenant_id:
+        raise HTTPException(status_code=404, detail="Projet introuvable.")
+    clean = normalize_gantt_settings(payload.dict(exclude={"portee"}))
+    if payload.portee == "entreprise":
+        tenant = await db.get(Tenant, uuid.UUID(current_user.tenant_id))
+        cfg = dict(tenant.branding_config or {})
+        cfg["gantt"] = clean
+        tenant.branding_config = cfg  # nouvel objet : SQLAlchemy detecte la modification
+        meta = dict(project.metadata_json or {})
+        meta.pop("gantt", None)       # le projet suit desormais le defaut entreprise
+        project.metadata_json = meta
+    else:
+        meta = dict(project.metadata_json or {})
+        meta["gantt"] = clean
+        project.metadata_json = meta
+    await db.commit()
+    return {"settings": clean, "portee": payload.portee}
+
+
+@router.post("/gantt-tasks/{project_id}/detail")
+async def detail_gantt(
+    project_id: str,
+    payload: GanttDetailRequest,
+    current_user: CurrentTenantUser = Depends(get_current_tenant_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Decompose chaque phase en taches (et sous-taches) a partir du CCTP du projet,
+    des anciens dossiers de l'entreprise et du phasage declare. Les dates des phases
+    ne bougent jamais : le detail est construit a l'interieur."""
+    from app.services.gantt_detail_service import detailler_planning
+
+    project = await db.get(Project, uuid.UUID(project_id))
+    if not project or str(project.tenant_id) != current_user.tenant_id:
+        raise HTTPException(status_code=404, detail="Projet introuvable.")
+    niveau = payload.niveau if payload.niveau in ("taches", "sous_taches") else "taches"
+    # Un seul detail a la fois par projet : deux appels simultanes (double clic,
+    # ou un premier appel encore en cours) lisaient chacun « aucun detail » et
+    # inseraient chacun le leur -- constate le 11/09, 159 lignes dont des doublons.
+    verrou = _DETAIL_LOCKS.setdefault(project_id, asyncio.Lock())
+    if verrou.locked():
+        raise HTTPException(status_code=409, detail="Un détail du planning est déjà en cours pour ce projet. Patientez quelques secondes.")
+    async with verrou:
+        rapport = await detailler_planning(
+            db=db,
+            tenant_id=uuid.UUID(current_user.tenant_id),
+            project=project,
+            niveau=niveau,
+            remplacer=payload.remplacer,
+        )
+        if rapport.get("erreur"):
+            raise HTTPException(status_code=400, detail=rapport["erreur"])
+        await db.commit()
+    return rapport

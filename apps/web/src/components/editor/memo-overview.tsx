@@ -9,6 +9,9 @@ import { OrganigrammePreview } from '@/components/visuals/organigramme-preview';
 import { MEMO_SECTIONS } from '@/lib/sections';
 import { useTranslation } from '@/components/i18n-provider';
 import { GeneratedSection } from '@/lib/types';
+import { Acronyme, definitionAcronyme } from '@/components/ui/acronyme';
+import { PlanDAction } from '@/components/editor/plan-action';
+import { construireRecommandations } from '@/lib/recommandations';
 
 /**
  * Aperçu global du mémoire (10/09).
@@ -45,7 +48,7 @@ export function MemoOverview({
   onSectionSaved,
   onRegenerate,
 }: MemoOverviewProps) {
-  const { t } = useTranslation();
+  const { t, language } = useTranslation();
   const trouver = (key: string) => sections.find((s) => s.section_key === key);
 
   const bilan = useMemo(() => {
@@ -60,16 +63,12 @@ export function MemoOverview({
     const moyenne = scores.length
       ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length)
       : null;
-    const lacunes = sections.reduce((total, s) => {
-      const blocs = Array.isArray(s.visual_placeholders) ? s.visual_placeholders : [];
-      const bloc = blocs.find(
-        (b): b is { type: string; items?: unknown[] } =>
-          typeof b === 'object' && b !== null && (b as { type?: string }).type === 'lacunes',
-      );
-      return total + (Array.isArray(bloc?.items) ? bloc!.items!.length : 0);
-    }, 0);
+    // On compte les ACTIONS distinctes, pas les lacunes brutes : le moteur
+    // répète la même demande section par section, et afficher « 74 points »
+    // décourage sans informer. Après regroupement il en reste une dizaine.
+    const lacunes = construireRecommandations(sections, projectId).length;
     return { total: redigees.length, pretes: pretes.length, moyenne, lacunes };
-  }, [sections]);
+  }, [sections, projectId]);
 
   return (
     <div className="space-y-6">
@@ -109,6 +108,10 @@ export function MemoOverview({
         </div>
       </div>
 
+      {/* Le plan d'action passe AVANT les sections : c'est la première chose
+          à lire quand on ouvre un dossier incomplet. */}
+      <PlanDAction sections={sections} projectId={projectId} />
+
       {MEMO_SECTIONS.map((meta) => {
         const section = trouver(meta.key);
         const enCours = generating.has(meta.key) || section?.status === 'processing';
@@ -131,10 +134,14 @@ export function MemoOverview({
                   </span>
                 )}
                 {typeof score === 'number' && prete && (
-                  <span className={`text-[10px] font-mono font-bold shrink-0 ${
-                    score >= 90 ? 'text-positive' : score >= 70 ? 'text-hl' : 'text-danger'
-                  }`}>
-                    {score}% RC
+                  <span
+                    title={`${score} % des critères de notation du règlement de consultation sont couverts par cette section. ${definitionAcronyme('RC', language)}`}
+                    className={`text-[10px] font-semibold shrink-0 cursor-help whitespace-nowrap ${
+                      score >= 90 ? 'text-positive' : score >= 70 ? 'text-hl' : 'text-danger'
+                    }`}
+                  >
+                    <span className="font-mono font-bold">{score} %</span>{' '}
+                    <span className="font-normal">{t('apercu.des_criteres_notation')}</span>
                   </span>
                 )}
               </div>

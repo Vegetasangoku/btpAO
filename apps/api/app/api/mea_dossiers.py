@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
 from app.core.security import CurrentTenantUser, get_current_tenant_user
-from app.models.entities import Project, Tenant
+from app.models.entities import GeneratedSection, Project, Tenant
 from app.services.mea_dossier_service import mea_dossier_service
 
 router = APIRouter(prefix="/dossiers", tags=["MEA Administrative Dossiers"])
@@ -46,6 +46,30 @@ async def export_mea_tender_dossier(
 
     target_country = (country_code or tenant.country_code or "SA").upper()
 
+    # --- Mémoire technique -------------------------------------------------
+    # Constat du 10/09 : ce dossier régional n'embarquait QUE la page
+    # administrative (form of tender). L'interface invitait pourtant à
+    # l'utiliser À LA PLACE de l'export Word. On y joint désormais les
+    # sections effectivement rédigées pour le projet.
+    sections_res = await db.execute(
+        select(GeneratedSection)
+        .where(
+            GeneratedSection.project_id == p_uuid,
+            GeneratedSection.tenant_id == t_uuid,
+        )
+        .order_by(GeneratedSection.order_index)
+    )
+    sections_payload = [
+        {
+            "title": s.title,
+            "content_html": s.content_html,
+            "section_key": s.section_key,
+        }
+        for s in sections_res.scalars().all()
+        if (s.status or "") not in ("failed", "processing")
+        and (s.content_html or "").strip()
+    ]
+
     tenant_dict = {
         "name": tenant.name,
         "siret": tenant.siret or "CR-001",
@@ -60,16 +84,16 @@ async def export_mea_tender_dossier(
     }
 
     if target_country == "SA":
-        docx_bytes = mea_dossier_service.generate_saudi_tender_dossier(tenant_dict, project_dict, language=language)
+        docx_bytes = mea_dossier_service.generate_saudi_tender_dossier(tenant_dict, project_dict, language=language, sections=sections_payload)
         filename = f"Saudi_GTPL_FormOfTender_{project.reference_code or 'SA'}_{language}.docx"
     elif target_country == "QA":
-        docx_bytes = mea_dossier_service.generate_qatar_tender_dossier(tenant_dict, project_dict, language=language)
+        docx_bytes = mea_dossier_service.generate_qatar_tender_dossier(tenant_dict, project_dict, language=language, sections=sections_payload)
         filename = f"Qatar_Ashghal_FormOfTender_{project.reference_code or 'QA'}_{language}.docx"
     elif target_country == "AE":
-        docx_bytes = mea_dossier_service.generate_uae_tender_dossier(tenant_dict, project_dict, language=language)
+        docx_bytes = mea_dossier_service.generate_uae_tender_dossier(tenant_dict, project_dict, language=language, sections=sections_payload)
         filename = f"UAE_Federal_FormOfTender_{project.reference_code or 'UAE'}_{language}.docx"
     elif target_country == "LB":
-        docx_bytes = mea_dossier_service.generate_lebanon_tender_dossier(tenant_dict, project_dict, language=language)
+        docx_bytes = mea_dossier_service.generate_lebanon_tender_dossier(tenant_dict, project_dict, language=language, sections=sections_payload)
         filename = f"Lebanon_PPA_Dossier_{project.reference_code or 'LB'}_{language}.docx"
     else:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Pays MEA '{target_country}' non supporté (disponibles: SA, QA, AE, LB)")

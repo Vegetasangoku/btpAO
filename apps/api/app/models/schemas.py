@@ -427,6 +427,10 @@ class GanttTaskBase(BaseModel):
     is_milestone: bool = False
     milestone_label: Optional[str] = None
     depends_on: List[str] = Field(default_factory=list)
+    # 11/09 : hierarchie (phase > tache > sous-tache), lot et couleur de ligne.
+    parent_id: Optional[str] = None
+    lot: Optional[str] = None
+    color: Optional[str] = None
 
 
 class GanttTaskCreate(GanttTaskBase):
@@ -441,6 +445,10 @@ class GanttTaskUpdate(BaseModel):
     is_milestone: Optional[bool] = None
     milestone_label: Optional[str] = None
     depends_on: Optional[List[str]] = None
+    # "" (chaine vide) = effacer la valeur ; None = ne pas toucher.
+    parent_id: Optional[str] = None
+    lot: Optional[str] = None
+    color: Optional[str] = None
 
 
 class GanttTaskOut(GanttTaskBase):
@@ -448,6 +456,28 @@ class GanttTaskOut(GanttTaskBase):
     project_id: str
     sequence: int
     is_critical: bool = False
+    level: int = 0
+
+
+class GanttDetailRequest(BaseModel):
+    """Decomposition automatique du planning (11/09)."""
+    niveau: str = Field(default="taches", description="'taches' ou 'sous_taches'")
+    remplacer: bool = Field(default=False, description="Remplacer le detail existant des phases")
+
+
+class GanttSettings(BaseModel):
+    """Reglages d'affichage du planning, partages par la vue interactive et le PNG exporte."""
+    niveau_detail: str = "sous_taches"          # 'phases' | 'taches' | 'sous_taches'
+    couleur_par: str = "phase"                  # 'phase' | 'lot' | 'uniforme'
+    palette: List[str] = Field(default_factory=list)  # vide = charte du client
+    chemin_critique: bool = True
+    jalons: bool = True
+    durees: bool = True
+    liens: bool = True
+
+
+class GanttSettingsUpdate(GanttSettings):
+    portee: str = "projet"                      # 'projet' | 'entreprise'
 
 
 class DiagramGenerationRequest(BaseModel):

@@ -40,7 +40,7 @@ import {
 
 import { TiptapEditor } from '@/components/editor/tiptap-editor';
 import { GeneratedSection, Project, GoNoGoAnalysis, ProjectDecisionsForm, DCECriterion } from '@/lib/types';
-import { api, fetchAuthenticatedBlobUrl } from '@/lib/api';
+import { api, fetchAuthenticatedBlobUrl, resolveBackendPath, buildApiUrl } from '@/lib/api';
 import { supabase } from '@/lib/supabase/client';
 import { useTranslation } from '@/components/i18n-provider';
 
@@ -791,9 +791,8 @@ function WorkspaceContent() {
                 try {
                   const { data: { session } } = await supabase.auth.getSession();
                   const token = session?.access_token;
-                  const apiBase = (process.env.NEXT_PUBLIC_API_URL || '').replace(/\/$/, '');
                   const res = await fetch(
-                    `${apiBase}/api/export/stream/${project.id}.docx`,
+                    buildApiUrl(`/export/stream/${project.id}.docx`),
                     { headers: { Authorization: `Bearer ${token}` } }
                   );
                   if (!res.ok) throw new Error(await res.text());
@@ -838,8 +837,7 @@ function WorkspaceContent() {
                     window.location.href = `/projects/${project.id}/export`;
                     return;
                   }
-                  const apiBase = (process.env.NEXT_PUBLIC_API_URL || '').replace(/\/$/, '');
-                  const blobUrl = await fetchAuthenticatedBlobUrl(`${apiBase}${finalJob.s3_docx_url}`);
+                  const blobUrl = await fetchAuthenticatedBlobUrl(resolveBackendPath(finalJob.s3_docx_url));
                   const ext = finalJob.format === 'pdf' && finalJob.s3_pdf_url ? 'pdf' : 'docx';
                   const a = document.createElement('a');
                   a.href = blobUrl;

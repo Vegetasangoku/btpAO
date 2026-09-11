@@ -45,7 +45,8 @@ async def _gather_context(
     assets = assets_res.scalars().all()
     company_assets_dict = {
         "name": tenant.name,
-        "siret": tenant.siret or "Non renseigné",
+        # Pas de valeur de remplacement : un SIRET absent doit rester « à compléter ».
+        "siret": tenant.siret or None,
     }
     for a in assets:
         if a.validated_by_user and a.metadata_json:
@@ -96,9 +97,56 @@ async def _gather_context(
         "client_name": project.client_name,
         "reference_code": project.reference_code,
         "lot_number": project.lot_number,
+        "location": project.location,
     }
 
     return tenant, project, project_data, company_assets_dict, learnings, rag_chunks
+
+
+async def _contenu_du_dossier(project, tenant, current_user: CurrentTenantUser, db: AsyncSession, avec_planning: bool):
+    """Sections redigees, equipe, donnees declarees et planning du projet : ce qui sert
+    a remplir les PARTIES du cadre de l'acheteur (11/09), pas seulement ses champs."""
+    from app.models.entities import GeneratedSection, ProjectDecision, ProjectGanttTask, ProjectOrganigrammeNode
+    t_uuid = uuid.UUID(current_user.tenant_id)
+    secs = (await db.execute(
+        select(GeneratedSection).where(GeneratedSection.project_id == project.id, GeneratedSection.tenant_id == t_uuid)
+        .order_by(GeneratedSection.order_index)
+    )).scalars().all()
+    sections = [{"section_key": s.section_key, "title": s.title, "content_html": s.content_html, "status": s.status} for s in secs]
+    noeuds = (await db.execute(
+        select(ProjectOrganigrammeNode).where(ProjectOrganigrammeNode.project_id == project.id,
+                                              ProjectOrganigrammeNode.tenant_id == t_uuid)
+        .order_by(ProjectOrganigrammeNode.sequence)
+    )).scalars().all()
+    equipe = [{"role": n.role, "nom": n.nom, "experience_ans": n.experience_ans,
+               "presence_hebdo_pct": n.presence_hebdo_pct, "qualif": n.qualif} for n in noeuds]
+    dec = (await db.execute(
+        select(ProjectDecision).where(ProjectDecision.project_id == project.id, ProjectDecision.tenant_id == t_uuid)
+    )).scalar_one_or_none()
+    declarations = (dec.form_data if dec and dec.form_data else {}) or {}
+    planning_png = None
+    if avec_planning:
+        try:
+            from app.services.gantt_service import gantt_service, normalize_gantt_settings
+            from app.core.storage import storage_service
+            rows = (await db.execute(
+                select(ProjectGanttTask).where(ProjectGanttTask.project_id == project.id, ProjectGanttTask.tenant_id == t_uuid)
+            )).scalars().all()
+            if rows:
+                taches = [{"id": str(r.id), "name": r.name, "start_date": r.start_date, "end_date": r.end_date,
+                           "sequence": r.sequence, "milestone_label": r.milestone_label, "is_milestone": r.is_milestone,
+                           "depends_on": [str(d) for d in (r.depends_on or [])],
+                           "parent_id": str(r.parent_id) if r.parent_id else None, "lot": r.lot, "color": r.color} for r in rows]
+                branding = tenant.branding_config or {}
+                res = gantt_service.generate_gantt_chart_png_from_tasks(
+                    tenant_id=current_user.tenant_id, project_id=str(project.id), project_title=project.title,
+                    tasks=taches, brand_color=branding.get("primary_color"), shape_style=branding.get("shape_style"),
+                    settings=normalize_gantt_settings(branding.get("gantt"), (project.metadata_json or {}).get("gantt")),
+                )
+                planning_png = storage_service.download_file(current_user.tenant_id, res["s3_key"])
+        except Exception as exc:
+            logger.warning("[client_templates.py] Planning non inséré dans le cadre : %s", exc)
+    return sections, equipe, declarations, planning_png
 
 
 @router.post("/{project_id}/fill")
@@ -120,6 +168,7 @@ async def fill_client_template(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Fichier template vide ou invalide")
 
     tenant, project, project_data, assets, learnings, rag_chunks = await _gather_context(project_id, current_user, db)
+    sections, equipe, declarations, planning_png = await _contenu_du_dossier(project, tenant, current_user, db, avec_planning=True)
 
     filled_docx, report = client_template_filler_service.fill_docx_template_inplace(
         template_bytes=template_bytes,
@@ -127,6 +176,10 @@ async def fill_client_template(
         rag_chunks=rag_chunks,
         company_assets=assets,
         tenant_learnings=learnings,
+        sections=sections,
+        equipe=equipe,
+        declarations=declarations,
+        planning_png=planning_png,
     )
 
     filename = f"Memoire_Technique_Rempli_{project.reference_code or 'AO'}.docx"
@@ -137,6 +190,7 @@ async def fill_client_template(
             "Content-Disposition": f'attachment; filename="{filename}"',
             "X-Completeness-Score": str(report.completeness_score_pct),
             "X-Pending-Actions": str(report.pending_actions_count),
+            "Access-Control-Expose-Headers": "X-Completeness-Score, X-Pending-Actions, Content-Disposition",
         },
     )
 
@@ -156,6 +210,7 @@ async def analyze_template_completeness(
 
     template_bytes = await file.read()
     tenant, project, project_data, assets, learnings, rag_chunks = await _gather_context(project_id, current_user, db)
+    sections, equipe, declarations, _ = await _contenu_du_dossier(project, tenant, current_user, db, avec_planning=False)
 
     _, report = client_template_filler_service.fill_docx_template_inplace(
         template_bytes=template_bytes,
@@ -163,6 +218,9 @@ async def analyze_template_completeness(
         rag_chunks=rag_chunks,
         company_assets=assets,
         tenant_learnings=learnings,
+        sections=sections,
+        equipe=equipe,
+        declarations=declarations,
     )
 
     return report

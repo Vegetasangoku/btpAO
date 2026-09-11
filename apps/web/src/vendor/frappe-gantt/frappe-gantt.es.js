@@ -309,7 +309,7 @@ class F {
     this.set_defaults(t, e), this.prepare_wrappers(), this.prepare_helpers(), this.refresh();
   }
   refresh() {
-    this.bar_group.innerHTML = "", this.handle_group.innerHTML = "", this.task.custom_class ? this.group.classList.add(this.task.custom_class) : this.group.classList = ["bar-wrapper"], this.prepare_values(), this.draw(), this.bind();
+    this.bar_group.innerHTML = "", this.handle_group.innerHTML = "", /* btpAO 11/09 : custom_class peut contenir plusieurs classes ; classList.add() levait InvalidCharacterError au refresh et gardait les classes perimees. */ this.group.setAttribute("class", "bar-wrapper" + (this.task.custom_class ? " " + this.task.custom_class : "")), this.prepare_values(), this.draw(), this.bind();
   }
   set_defaults(t, e) {
     this.action_completed = !1, this.gantt = t, this.task = e, this.name = this.name || "";

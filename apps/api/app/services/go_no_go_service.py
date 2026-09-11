@@ -340,6 +340,9 @@ class GoNoGoService:
         # signal réel). Le frontend masque le composant Score Stratégique quand ce flag est False,
         # tout en affichant toujours le Taux de Complétion (donnée factuelle, jamais arbitraire).
         # ---------------------------------------------------------------------
+        # En deçà de ce taux de couverture, aucune recommandation GO n'est délivrée :
+        # la conclusion est suspendue et présentée comme telle (voir plus bas).
+        COUVERTURE_MINIMALE_POUR_UN_GO = 50.0
         real_data_factors = sum(1 for f in factors if f.status != "missing_data")
         has_sufficient_data = real_data_factors >= 1
         facteurs_sans_donnee = [f.title for f in factors if f.status == "missing_data"]
@@ -364,7 +367,7 @@ class GoNoGoService:
                 f"Recommandation NO-GO : {len(blocking_issues)} point(s) bloquant(s) identifié(s) "
                 f"({'; '.join(blocking_issues[:2])})."
             )
-        elif final_score >= 70.0:
+        elif final_score >= 70.0 and couverture_pct >= COUVERTURE_MINIMALE_POUR_UN_GO:
             recommendation = "GO"
             # L'ancien texte affirmait "Excellente adequation des qualifications, delai
             # maitrise et conformite DCE" quelle que soit la realite -- y compris sans
@@ -374,6 +377,21 @@ class GoNoGoService:
                 summary = "Recommandation GO, sur la base de : " + " ; ".join(verifies[:3]) + "."
             else:
                 summary = "Recommandation GO : aucun point bloquant identifié."
+        elif final_score >= 70.0:
+            # Score eleve mais assis sur trop peu de choses. Un bandeau vert "GO
+            # CONFIRME 85/100" calcule sur un seul facteur sur quatre est un faux
+            # signal, et c'est exactement ce que le client a releve le 10/09 :
+            # "tu dis 85 % de confirmed go, tu devrais avoir plus de matiere".
+            # Le chiffre n'est pas truque -- c'est la conclusion qui est suspendue
+            # tant que la matiere manque.
+            recommendation = "RESERVES"
+            # La couverture chiffrée est déjà détaillée par la réserve d'interprétation
+            # ajoutée juste après : ne pas la répéter ici.
+            summary = (
+                f"Conclusion suspendue faute de matière : le score atteint {final_score:g}/100 "
+                "mais ne peut pas fonder un GO en l'état. Compléter le dossier "
+                "(pièces du marché, échéance, historique) avant de décider."
+            )
         else:
             recommendation = "RESERVES"
             summary = "Recommandation sous RÉSERVES : candidature possible, sous vigilance sur les points signalés ci-dessous."

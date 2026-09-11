@@ -2,7 +2,9 @@ import { NextResponse } from 'next/server';
 import { createServerClient } from '@supabase/ssr';
 import { cookies } from 'next/headers';
 
-const PYTHON_API = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000').replace(/\/$/, '') + '/api';
+// NEXT_PUBLIC_API_URL contient deja "/api" sous docker-compose : ne pas le doubler.
+const _rawApi = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000').replace(/\/$/, '');
+const PYTHON_API = _rawApi.endsWith('/api') ? _rawApi : `${_rawApi}/api`;
 
 export async function POST(request: Request) {
   try {
