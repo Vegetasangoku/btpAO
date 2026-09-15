@@ -342,11 +342,20 @@ export default function EnterpriseSettingsPage() {
                   className="input-field"
                 >
                   <option value="FR">🇫🇷 France (Code de la Commande Publique)</option>
+                  <option value="BE">🇧🇪 Belgique (Loi Marchés Publics 2016)</option>
+                  <option value="DE">🇩🇪 Allemagne (GWB / VOB)</option>
+                  <option value="ES">🇪🇸 Espagne (LCSP – Ley 9/2017)</option>
+                  <option value="IT">🇮🇹 Italie (Codice dei Contratti Pubblici)</option>
+                  <option value="LU">🇱🇺 Luxembourg (Loi Marchés Publics 2018)</option>
+                  <option value="NL">🇳🇱 Pays-Bas (Aanbestedingswet 2012)</option>
                   <option value="SA">🇸🇦 Arabie Saoudite (GTPL / Local Content Authority)</option>
                   <option value="QA">🇶🇦 Qatar (Ashghal QCS 2014)</option>
                   <option value="AE">🇦🇪 Émirats Arabes Unis (FIDIC)</option>
                   <option value="LB">🇱🇧 Liban (CDR)</option>
                 </select>
+                <p className="text-[11px] text-muted-foreground leading-snug pt-0.5">
+                  Repli uniquement : chaque dossier essaie d'abord de détecter automatiquement le pays du marché (bandeau sur la page du dossier). Ce choix ne s'applique que si la détection ne trouve rien de fiable.
+                </p>
               </div>
 
               <div className="space-y-1.5">
