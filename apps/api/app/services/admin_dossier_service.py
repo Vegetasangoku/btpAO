@@ -332,4 +332,115 @@ class AdminDossierService:
         return out.getvalue()
 
 
+    # 15/09 : redaction d'une piece administrative QUELCONQUE (lettre, declaration,
+    # attestation sur l'honneur...) pour un pays SANS formulaire national fixe (voir
+    # pieces_service.GENERABLES -- aujourd'hui FR/BE/LU seulement). Contrairement a
+    # generate_dc1_docx/generate_dc2_docx (structure figee, donnees injectees), ici la
+    # STRUCTURE elle-meme depend de ce que le dossier de consultation demande -- d'ou
+    # un appel au modele, avec la meme discipline anti-invention que le reste du
+    # fichier : aucun fait chiffre/nominatif non fourni n'est invente (placeholder
+    # explicite a la place), et aucune declaration sur l'honneur n'est jamais
+    # pre-affirmee comme vraie pour l'entreprise -- seule sa formulation standard est
+    # redigee, a l'utilisateur de l'attester en signant.
+    _LABELS = {
+        "fr": {"soustitre": "Projet rédigé à partir du dossier de consultation — à vérifier, compléter et signer",
+               "avertissement": "PROJET rédigé automatiquement à partir du dossier de consultation. Relisez, complétez tout champ marqué [À COMPLÉTER] et faites signer par le représentant légal habilité avant tout dépôt. Vérifiez en particulier toute affirmation chiffrée ou factuelle avant signature.",
+               "exigence": "Exigence du dossier de consultation : ", "fait_a": "Fait à ",
+               "le": ", le ", "signataire": "Nom et qualité du signataire : ",
+               "signataire_val": "Représentant légal habilité", "signature": "Signature & cachet de l'entreprise : "},
+        "en": {"soustitre": "Draft prepared from the tender documents — to be checked, completed and signed",
+               "avertissement": "DRAFT prepared automatically from the tender documents. Review it, complete every field marked [TO BE COMPLETED], and have it signed by the authorized legal representative before submission. Verify any figure or factual statement before signing.",
+               "exigence": "Tender requirement: ", "fait_a": "Done at ",
+               "le": ", on ", "signataire": "Name and role of signatory: ",
+               "signataire_val": "Authorized legal representative", "signature": "Signature & company stamp: "},
+        "ar": {"soustitre": "مسودة أُعدت استناداً إلى ملف المناقصة — يجب مراجعتها وإكمالها وتوقيعها",
+               "avertissement": "مسودة أُعدت تلقائياً استناداً إلى ملف المناقصة. راجعها، أكمل كل حقل مؤشَّر بـ [يُستكمل]، ووقّعها الممثل القانوني المخوَّل قبل أي إيداع. تحقق خصوصاً من أي رقم أو تصريح واقعي قبل التوقيع.",
+               "exigence": "متطلب من ملف المناقصة: ", "fait_a": "حُرر في ",
+               "le": "، بتاريخ ", "signataire": "اسم وصفة الموقّع: ",
+               "signataire_val": "الممثل القانوني المخوَّل", "signature": "التوقيع وختم الشركة: "},
+    }
+
+    async def generate_declaration_docx(
+        self,
+        db,
+        tenant_uuid: uuid.UUID,
+        tenant: Dict[str, Any],
+        project: Dict[str, Any],
+        piece_title: str,
+        citation: Optional[str],
+        langue: str = "fr",
+    ) -> Optional[bytes]:
+        from app.services.pieces_service import _llm_json
+        L = langue if langue in self._LABELS else "fr"
+        lib = self._LABELS[L]
+        langue_nom = {"fr": "français", "en": "English", "ar": "Arabic"}.get(L, "français")
+        marqueur = {"fr": "[À COMPLÉTER : description]", "en": "[TO BE COMPLETED: description]",
+                    "ar": "[يُستكمل: الوصف]"}[L]
+
+        faits = [
+            ("Dénomination sociale / Company name", tenant.get("name")),
+            ("Numéro d'immatriculation (SIRET ou équivalent) / Registration number", tenant.get("siret")),
+            ("Pays / Country", tenant.get("country_code")),
+            ("Ville / City", tenant.get("city")),
+        ]
+        faits_connus = "\n".join(f"- {k} : {v}" for k, v in faits if v)
+
+        consigne = f"""Tu rédiges un PROJET de « {piece_title} » pour un dossier de candidature d'entreprise BTP répondant à un appel d'offres.
+{"Le passage exact du dossier de consultation qui exige cette pièce est : « " + citation + " »" if citation else "Aucune citation precise du dossier n'est disponible ; redige un document standard correspondant a ce titre."}
+
+Rédige ce document EN {langue_nom.upper()}, dans un style professionnel et juridique approprié.
+
+Faits réels connus sur l'entreprise (utilise-les tel quels, n'en invente STRICTEMENT aucun autre) :
+{faits_connus or "(aucun fait connu — utilise des repères génériques)"}
+
+Règles impératives :
+1. Pour toute information specifique a l'entreprise qui n'est PAS dans la liste ci-dessus (chiffres, dates, noms de personnes, numeros, montants), ecris EXACTEMENT le texte "{marqueur}" (en remplacant "description" par ce qui manque) a la place -- n'invente JAMAIS une valeur.
+2. Si ce document comporte une declaration sur l'honneur ou une attestation de conformite (ex: absence de condamnation, etre a jour de ses impots), redige la formule standard que le signataire s'apprete a attester, SANS jamais affirmer toi-meme que ce fait est vrai pour cette entreprise.
+3. Format lettre/declaration officielle en paragraphes de prose ; pas de markdown, pas de listes a puces sauf si le type de document l'exige naturellement.
+
+Reponds UNIQUEMENT en JSON, sans texte autour : {{"titre": "titre court du document", "paragraphes": ["paragraphe 1", "paragraphe 2", ...]}}"""
+
+        out = await _llm_json(db, tenant_uuid, consigne, 1400)
+        paragraphes = (out or {}).get("paragraphes") or []
+        if not paragraphes:
+            return None
+
+        doc = docx.Document()
+        self._create_styled_header(doc, title=(out.get("titre") or piece_title).upper(), subtitle=lib["soustitre"])
+
+        avert = doc.add_paragraph()
+        r = avert.add_run(lib["avertissement"])
+        r.italic = True
+        r.font.size = Pt(9)
+        r.font.color.rgb = RGBColor(185, 28, 28)
+
+        if citation:
+            cit = doc.add_paragraph()
+            rc = cit.add_run(f"{lib['exigence']}« {citation} »")
+            rc.italic = True
+            rc.font.size = Pt(9)
+            rc.font.color.rgb = RGBColor(100, 116, 139)
+
+        doc.add_paragraph()
+        for para in paragraphes:
+            p = doc.add_paragraph()
+            run = p.add_run(str(para))
+            if marqueur.split(":")[0] in str(para):
+                # Signale visuellement les placeholders restants dans le paragraphe entier
+                # (plus simple et plus fiable qu'un sur-lignage partiel du seul marqueur).
+                run.font.color.rgb = RGBColor(185, 28, 28)
+
+        doc.add_paragraph()
+        p_sig = doc.add_paragraph()
+        p_sig.add_run(f"{lib['fait_a']}{tenant.get('city') or marqueur}{lib['le']}{datetime.now(timezone.utc).strftime('%d/%m/%Y')}")
+        p_sig2 = doc.add_paragraph()
+        p_sig2.add_run(f"{lib['signataire']}{lib['signataire_val']}")
+        p_sig3 = doc.add_paragraph()
+        p_sig3.add_run(lib["signature"])
+
+        buffer = io.BytesIO()
+        doc.save(buffer)
+        return buffer.getvalue()
+
+
 admin_dossier_service = AdminDossierService()

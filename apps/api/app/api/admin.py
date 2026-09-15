@@ -136,6 +136,10 @@ class SystemPromptPayload(BaseModel):
     system_prompt: str
 
 
+class UserCostCapPayload(BaseModel):
+    monthly_llm_cost_cap_usd: Optional[float] = None
+
+
 
 async def _record_audit_log(
     db: AsyncSession,
@@ -1940,6 +1944,123 @@ async def update_tenant_subscription_admin(
     return {
         "success": True,
         "message": f"Abonnement du tenant {tenant_id} mis à jour avec succès (statut: {payload.status}, quota: {payload.custom_quota_dossiers})",
+    }
+
+
+@router.get("/tenants/{tenant_id}/users")
+async def list_tenant_users(
+    tenant_id: str,
+    request: Request,
+    admin_user: CurrentTenantUser = Depends(require_platform_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Liste les comptes utilisateurs d'un tenant avec, pour chacun, son plafond de cout LLM
+    individuel actuel (users.monthly_llm_cost_cap_usd, NULL = aucun) et sa depense reelle du
+    mois en cours (15/09, demande explicite : "rajouter une limite par compte cote admin").
+    Complementaire a GET /admin/tenants/{tenant_id}/subscription qui expose le plafond au
+    niveau tenant.
+    """
+    from app.services.billing_service import billing_service
+
+    try:
+        t_uuid = uuid.UUID(tenant_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid tenant UUID")
+
+    tenant = (await db.execute(select(Tenant).where(Tenant.id == t_uuid))).scalar_one_or_none()
+    if not tenant:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found")
+
+    users = (
+        await db.execute(select(User).where(User.tenant_id == t_uuid).order_by(User.created_at.asc()))
+    ).scalars().all()
+
+    results = []
+    for u in users:
+        spend = await billing_service.get_user_current_month_spend_usd(u.id, db)
+        results.append({
+            "id": str(u.id),
+            "email": u.email,
+            "full_name": u.full_name,
+            "role": u.role,
+            "status": u.status,
+            "monthly_llm_cost_cap_usd": float(u.monthly_llm_cost_cap_usd) if u.monthly_llm_cost_cap_usd is not None else None,
+            "current_month_spend_usd": spend,
+            "created_at": u.created_at,
+        })
+
+    await _record_audit_log(
+        db=db,
+        admin_user=admin_user,
+        action="list_tenant_users",
+        entity_type="tenant",
+        entity_id=t_uuid,
+        tenant_id=t_uuid,
+        details={"count": len(results)},
+        ip_address=request.client.host if request.client else None,
+    )
+
+    return {"tenant_id": str(t_uuid), "users": results}
+
+
+@router.put("/tenants/{tenant_id}/users/{user_id}/cost-cap")
+async def update_user_cost_cap(
+    tenant_id: str,
+    user_id: str,
+    payload: UserCostCapPayload,
+    request: Request,
+    admin_user: CurrentTenantUser = Depends(require_platform_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Definit (ou efface, si null) le plafond de cout LLM mensuel individuel d'UN compte
+    (users.monthly_llm_cost_cap_usd) -- 15/09, demande explicite : "rajouter une limite par
+    compte cote admin genre tu vois". S'applique EN PLUS du plafond tenant existant (les deux
+    sont independants, voir billing_service.check_and_enforce_cost_cap) et n'est aujourd'hui
+    reellement fait respecter que sur la generation de section (le principal poste de cout LLM
+    du produit) -- voir workers/tasks.py::generate_section_task.
+    """
+    try:
+        t_uuid = uuid.UUID(tenant_id)
+        u_uuid = uuid.UUID(user_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid tenant or user UUID")
+
+    if payload.monthly_llm_cost_cap_usd is not None and payload.monthly_llm_cost_cap_usd < 0:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Le plafond ne peut pas etre negatif")
+
+    tenant = (await db.execute(select(Tenant).where(Tenant.id == t_uuid))).scalar_one_or_none()
+    if not tenant:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found")
+
+    # Charge le compte STRICTEMENT sous ce tenant -- empeche qu'un tenant_id/user_id mal
+    # apparies dans l'URL ne modifie le plafond d'un utilisateur d'un autre tenant.
+    user = (
+        await db.execute(select(User).where(User.id == u_uuid, User.tenant_id == t_uuid))
+    ).scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found for this tenant")
+
+    user.monthly_llm_cost_cap_usd = payload.monthly_llm_cost_cap_usd
+    user.updated_at = datetime.utcnow()
+
+    await _record_audit_log(
+        db=db,
+        admin_user=admin_user,
+        action="update_user_cost_cap",
+        entity_type="user",
+        entity_id=u_uuid,
+        tenant_id=t_uuid,
+        details={"monthly_llm_cost_cap_usd": payload.monthly_llm_cost_cap_usd},
+        ip_address=request.client.host if request.client else None,
+    )
+    await db.flush()
+
+    return {
+        "success": True,
+        "user_id": str(u_uuid),
+        "monthly_llm_cost_cap_usd": payload.monthly_llm_cost_cap_usd,
     }
 
 

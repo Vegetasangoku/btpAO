@@ -169,6 +169,9 @@ class TenantLearningOut(BaseModel):
     source_diff: Dict[str, Any] = Field(default_factory=dict)
     source_outcome: str = "manual"
     is_active: bool = True
+    # 15/09 : None = apprentissage collectif (visible/applique a tout le tenant, comportement
+    # historique) ; renseigne = apprentissage personnel, uniquement pour ce compte.
+    created_by_user_id: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 
@@ -183,6 +186,9 @@ class CreateTenantLearningRequest(BaseModel):
     learning_insight: Optional[str] = None
     source_diff: Optional[Dict[str, Any]] = None
     source_outcome: Optional[str] = "manual"
+    # 15/09 : True = enregistre comme apprentissage personnel (created_by_user_id = l'auteur),
+    # False/absent = collectif comme avant (created_by_user_id reste NULL).
+    personal: Optional[bool] = False
 
 
 class TenantLearningUpdate(BaseModel):

@@ -36,6 +36,8 @@ import {
   RefreshCw,
   XCircle,
   AlertCircle,
+  Users,
+  User,
 } from 'lucide-react';
 
 import { TiptapEditor } from '@/components/editor/tiptap-editor';
@@ -80,6 +82,9 @@ function WorkspaceContent() {
   // Learning loop memory state
   const [selectedTextRule, setSelectedTextRule] = useState('');
   const [memorySavedMsg, setMemorySavedMsg] = useState(false);
+  const [newRuleScope, setNewRuleScope] = useState<'type_section' | 'general'>('general');
+  const [newRulePersonal, setNewRulePersonal] = useState(false);
+  const [savingRule, setSavingRule] = useState(false);
 
   // 1. Initial Load of Real Project
   useEffect(() => {
@@ -238,24 +243,32 @@ function WorkspaceContent() {
     }
   }
 
+  // 15/09 : ce bouton appelait /api/update-memory, une route Next.js morte qui n'atteignait
+  // jamais la vraie generation Python (voir audit du meme jour) -- rebranche sur le vrai
+  // service d'apprentissage (le meme que l'onglet "Apprentissages" de la page Entreprise),
+  // avec les deux aspects demandes explicitement : la portee ("pour ce type d'offre" vs "en
+  // general") et la visibilite (collectif vs personnel).
   async function handleAddSelectedToMemory() {
-    if (!selectedTextRule) return;
+    const rule = selectedTextRule.trim();
+    if (!rule) return;
 
+    setSavingRule(true);
     try {
-      const res = await fetch('/api/update-memory', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ newRule: selectedTextRule }),
+      await api.createLearning({
+        title: rule.length > 60 ? rule.slice(0, 57) + '...' : rule,
+        actionable_directive: rule,
+        learned_content: rule,
+        section_type: newRuleScope === 'type_section' ? (currentSection?.section_key || undefined) : undefined,
+        source_outcome: 'manual',
+        personal: newRulePersonal,
       });
-
-      const json = await res.json();
-      if (json.success) {
-        setMemorySavedMsg(true);
-        setSelectedTextRule('');
-        setTimeout(() => setMemorySavedMsg(false), 3000);
-      }
+      setMemorySavedMsg(true);
+      setSelectedTextRule('');
+      setTimeout(() => setMemorySavedMsg(false), 3000);
     } catch (err: any) {
       alert(t('dashboard.workspace.memory_save_error_prefix') + err.message);
+    } finally {
+      setSavingRule(false);
     }
   }
 
@@ -716,32 +729,76 @@ function WorkspaceContent() {
           )}
 
           {/* Floating Learning Loop helper */}
-          <div className="p-4 rounded-2xl card-inset border-hl/20 bg-hl/5 flex flex-wrap items-center justify-between gap-3">
-            <div className="flex items-center gap-2.5">
-              <BrainCircuit className="w-5 h-5 text-hl shrink-0" />
-              <div>
-                <p className="text-[13px] font-bold text-foreground font-heading">{t('dashboard.workspace.learning_loop_title')}</p>
-                <p className="text-[11px] text-muted-foreground">
-                  {t('dashboard.workspace.learning_loop_desc')}
-                </p>
+          <div className="p-4 rounded-2xl card-inset border-hl/20 bg-hl/5 flex flex-col gap-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <BrainCircuit className="w-5 h-5 text-hl shrink-0" />
+                <div>
+                  <p className="text-[13px] font-bold text-foreground font-heading">{t('dashboard.workspace.learning_loop_title')}</p>
+                  <p className="text-[11px] text-muted-foreground">
+                    {t('dashboard.workspace.learning_loop_desc')}
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 w-full sm:w-auto">
+                <input
+                  type="text"
+                  value={selectedTextRule}
+                  onChange={(e) => setSelectedTextRule(e.target.value)}
+                  placeholder={t('dashboard.workspace.rule_placeholder')}
+                  className="input-field !py-1.5 !text-[12px] w-full sm:w-80"
+                />
+                <button
+                  type="button"
+                  onClick={handleAddSelectedToMemory}
+                  disabled={savingRule || !selectedTextRule.trim()}
+                  className="btn-primary !py-1.5 !px-3 !text-[12px] shrink-0 cursor-pointer"
+                >
+                  {savingRule ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : t('dashboard.workspace.add_to_memory_btn')}
+                </button>
               </div>
             </div>
 
-            <div className="flex items-center gap-2 w-full sm:w-auto">
-              <input
-                type="text"
-                value={selectedTextRule}
-                onChange={(e) => setSelectedTextRule(e.target.value)}
-                placeholder={t('dashboard.workspace.rule_placeholder')}
-                className="input-field !py-1.5 !text-[12px] w-full sm:w-80"
-              />
-              <button
-                type="button"
-                onClick={handleAddSelectedToMemory}
-                className="btn-primary !py-1.5 !px-3 !text-[12px] shrink-0 cursor-pointer"
-              >
-                {t('dashboard.workspace.add_to_memory_btn')}
-              </button>
+            <div className="flex flex-wrap items-center gap-2 pl-[30px]">
+              <div className="flex items-center rounded-lg border border-hl/20 overflow-hidden text-[10px] font-semibold">
+                <button
+                  type="button"
+                  onClick={() => setNewRuleScope('general')}
+                  className={`px-2.5 py-1 cursor-pointer transition-colors ${newRuleScope === 'general' ? 'bg-hl text-hl-contrast' : 'text-muted-foreground hover:bg-slate-100 dark:hover:bg-raised'}`}
+                  title="S'applique à tous les prochains dossiers"
+                >
+                  En général
+                </button>
+                <button
+                  type="button"
+                  onClick={() => currentSection && setNewRuleScope('type_section')}
+                  disabled={!currentSection}
+                  className={`px-2.5 py-1 cursor-pointer transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${newRuleScope === 'type_section' ? 'bg-hl text-hl-contrast' : 'text-muted-foreground hover:bg-slate-100 dark:hover:bg-raised'}`}
+                  title="S'applique aux futurs AOs ayant ce même type de section"
+                >
+                  Pour ce type d'offre
+                </button>
+              </div>
+
+              <div className="flex items-center rounded-lg border border-hl/20 overflow-hidden text-[10px] font-semibold">
+                <button
+                  type="button"
+                  onClick={() => setNewRulePersonal(false)}
+                  className={`px-2.5 py-1 flex items-center gap-1 cursor-pointer transition-colors ${!newRulePersonal ? 'bg-hl text-hl-contrast' : 'text-muted-foreground hover:bg-slate-100 dark:hover:bg-raised'}`}
+                  title="Visible par toute l'équipe"
+                >
+                  <Users className="w-3 h-3" /> Collectif
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setNewRulePersonal(true)}
+                  className={`px-2.5 py-1 flex items-center gap-1 cursor-pointer transition-colors ${newRulePersonal ? 'bg-hl text-hl-contrast' : 'text-muted-foreground hover:bg-slate-100 dark:hover:bg-raised'}`}
+                  title="Visible seulement par vous"
+                >
+                  <User className="w-3 h-3" /> Personnel
+                </button>
+              </div>
             </div>
           </div>
 

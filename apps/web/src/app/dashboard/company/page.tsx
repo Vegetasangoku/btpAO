@@ -25,15 +25,21 @@ import {
   Eye,
   Download,
   RefreshCw,
+  Cloud,
+  Brain,
+  Pencil,
+  Save,
+  XCircle,
+  User,
 } from 'lucide-react';
 import { api } from '@/lib/api';
-import { CompanyAsset, TeamMember, TeamInvitation, TeamRole } from '@/lib/types';
+import { CompanyAsset, TeamMember, TeamInvitation, TeamRole, SharePointStatus, TenantLearning } from '@/lib/types';
 import { useTranslation } from '@/components/i18n-provider';
 import { DCEChatSidebar } from '@/components/chat/dce-chat-sidebar';
 
 export default function CompanyUnifiedPage() {
   const { t } = useTranslation();
-  const [activeTab, setActiveTab] = useState<'knowledge' | 'team' | 'web'>('knowledge');
+  const [activeTab, setActiveTab] = useState<'knowledge' | 'team' | 'web' | 'learnings'>('knowledge');
   const [chatOpen, setChatOpen] = useState(false);
 
   // --- TAB 1: KNOWLEDGE / SAVOIR-FAIRE ---
@@ -67,11 +73,44 @@ export default function CompanyUnifiedPage() {
   const [isAddingUrl, setIsAddingUrl] = useState(false);
   const [refreshingUrlId, setRefreshingUrlId] = useState<string | null>(null);
 
+  // --- SHAREPOINT : autre source pour la base de connaissance (14/09) ---
+  const [spStatus, setSpStatus] = useState<SharePointStatus | null>(null);
+  const [loadingSp, setLoadingSp] = useState(false);
+  const [showSpModal, setShowSpModal] = useState(false);
+  const [spForm, setSpForm] = useState({ ms_tenant_id: '', client_id: '', client_secret: '', site_url: '', selected_folder_path: '/' });
+  const [connectingSp, setConnectingSp] = useState(false);
+  const [syncingSp, setSyncingSp] = useState(false);
+  const [spActionError, setSpActionError] = useState<string | null>(null);
+
+  // --- TAB 4: CE QUE L'APPLICATION A APPRIS DE L'ENTREPRISE (14/09) ---
+  const [learnings, setLearnings] = useState<TenantLearning[]>([]);
+  const [loadingLearnings, setLoadingLearnings] = useState(false);
+  const [editingLearningId, setEditingLearningId] = useState<string | null>(null);
+  const [editLearningForm, setEditLearningForm] = useState({ title: '', learning_insight: '', actionable_directive: '' });
+  const [savingLearningId, setSavingLearningId] = useState<string | null>(null);
+  const [learningCategoryFilter, setLearningCategoryFilter] = useState('all');
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [showNewLearningForm, setShowNewLearningForm] = useState(false);
+  const [newLearningForm, setNewLearningForm] = useState({ title: '', actionable_directive: '', category: 'general', personal: false });
+  const [creatingLearning, setCreatingLearning] = useState(false);
+
   useEffect(() => {
     loadAssets();
     loadTeam();
     loadUrls();
+    loadSpStatus();
+    loadLearnings();
+    loadCurrentUser();
   }, []);
+
+  async function loadCurrentUser() {
+    try {
+      const profile = await api.getProfile();
+      setCurrentUserId(profile?.id || null);
+    } catch (err) {
+      console.warn('Erreur chargement profil utilisateur:', err);
+    }
+  }
 
   async function loadAssets() {
     setLoadingAssets(true);
@@ -108,6 +147,30 @@ export default function CompanyUnifiedPage() {
       console.warn('Erreur chargement URLs:', err);
     } finally {
       setLoadingUrls(false);
+    }
+  }
+
+  async function loadSpStatus() {
+    setLoadingSp(true);
+    try {
+      const data = await api.getSharePointStatus().catch(() => null);
+      setSpStatus(data);
+    } catch (err) {
+      console.warn('Erreur chargement statut SharePoint:', err);
+    } finally {
+      setLoadingSp(false);
+    }
+  }
+
+  async function loadLearnings() {
+    setLoadingLearnings(true);
+    try {
+      const data = await api.getTenantLearnings().catch(() => []);
+      setLearnings(data || []);
+    } catch (err) {
+      console.warn('Erreur chargement apprentissages:', err);
+    } finally {
+      setLoadingLearnings(false);
     }
   }
 
@@ -252,6 +315,125 @@ export default function CompanyUnifiedPage() {
     }
   }
 
+  // Handle SharePoint
+  async function handleConnectSharePoint(e: React.FormEvent) {
+    e.preventDefault();
+    setConnectingSp(true);
+    setSpActionError(null);
+    try {
+      const status = await api.connectSharePoint(spForm);
+      setSpStatus(status);
+      setShowSpModal(false);
+      setSpForm({ ms_tenant_id: '', client_id: '', client_secret: '', site_url: '', selected_folder_path: '/' });
+    } catch (err: any) {
+      setSpActionError(err.message || 'Erreur de connexion à SharePoint.');
+    } finally {
+      setConnectingSp(false);
+    }
+  }
+
+  async function handleSyncSharePoint() {
+    setSyncingSp(true);
+    try {
+      const status = await api.syncSharePoint();
+      setSpStatus(status);
+    } catch (err: any) {
+      alert('Erreur synchronisation SharePoint: ' + err.message);
+    } finally {
+      setSyncingSp(false);
+    }
+  }
+
+  async function handleDisconnectSharePoint() {
+    if (!confirm('Déconnecter SharePoint ? Les fichiers déjà indexés restent dans votre base de connaissance.')) return;
+    try {
+      await api.disconnectSharePoint();
+      await loadSpStatus();
+    } catch (err: any) {
+      alert('Erreur déconnexion: ' + err.message);
+    }
+  }
+
+  // Handle Learnings
+  function startEditLearning(l: TenantLearning) {
+    setEditingLearningId(l.id);
+    setEditLearningForm({ title: l.title, learning_insight: l.learning_insight, actionable_directive: l.actionable_directive });
+  }
+
+  async function handleSaveLearning(id: string) {
+    setSavingLearningId(id);
+    try {
+      const updated = await api.updateTenantLearning(id, editLearningForm);
+      setLearnings((prev) => prev.map((l) => (l.id === id ? updated : l)));
+      setEditingLearningId(null);
+    } catch (err: any) {
+      alert('Erreur enregistrement: ' + err.message);
+    } finally {
+      setSavingLearningId(null);
+    }
+  }
+
+  async function handleToggleLearningActive(l: TenantLearning) {
+    try {
+      const updated = await api.updateTenantLearning(l.id, { is_active: !l.is_active });
+      setLearnings((prev) => prev.map((x) => (x.id === l.id ? updated : x)));
+    } catch (err: any) {
+      alert('Erreur: ' + err.message);
+    }
+  }
+
+  async function handleDeleteLearning(id: string) {
+    if (!confirm("Supprimer cet apprentissage ? L'application cessera d'en tenir compte dans les prochains dossiers.")) return;
+    try {
+      await api.deleteTenantLearning(id);
+      setLearnings((prev) => prev.filter((l) => l.id !== id));
+    } catch (err: any) {
+      alert('Erreur suppression: ' + err.message);
+    }
+  }
+
+  // 15/09 : enseignement ajouté explicitement (pas issu d'un retour gagné/perdu) -- l'aspect
+  // "je change explicitement des données à retenir" demandé, en complément de l'aspect
+  // automatique déjà en place (débrief marché + détection d'écart). personal=true le réserve à
+  // l'auteur ; personal=false (défaut) le rend visible par toute l'équipe.
+  async function handleCreateLearning() {
+    if (!newLearningForm.title.trim() || !newLearningForm.actionable_directive.trim()) {
+      alert('Merci de renseigner au moins un titre et la consigne à appliquer.');
+      return;
+    }
+    setCreatingLearning(true);
+    try {
+      const directive = newLearningForm.actionable_directive.trim();
+      const created = await api.createLearning({
+        title: newLearningForm.title.trim(),
+        actionable_directive: directive,
+        // Pas de source distincte pour un ajout manuel : la consigne saisie EST le contenu appris.
+        learned_content: directive,
+        category: newLearningForm.category,
+        source_outcome: 'manual',
+        personal: newLearningForm.personal,
+      });
+      setLearnings((prev) => [created, ...prev]);
+      setNewLearningForm({ title: '', actionable_directive: '', category: 'general', personal: false });
+      setShowNewLearningForm(false);
+    } catch (err: any) {
+      alert("Erreur lors de l'ajout: " + err.message);
+    } finally {
+      setCreatingLearning(false);
+    }
+  }
+
+  function getLearningCategoryLabel(category: string) {
+    switch (category) {
+      case 'planning': return 'Planning';
+      case 'methodology': return 'Méthodologie';
+      case 'qse': return 'QSE / Environnement';
+      case 'safety': return 'Sécurité';
+      case 'pricing': return 'Tarification';
+      default: return 'Général';
+    }
+  }
+
   function getCategoryLabel(category: string) {
     switch (category) {
       case 'fiche_technique':
@@ -281,6 +463,7 @@ export default function CompanyUnifiedPage() {
   const countFiches = assets.filter((a) => a.category === 'fiche_technique').length;
   const countMemoires = assets.filter((a) => a.category === 'memoire_reference').length;
   const countCerts = assets.filter((a) => a.category === 'certification' || a.category === 'qse_securite').length;
+  const filteredLearnings = learnings.filter((l) => learningCategoryFilter === 'all' || l.category === learningCategoryFilter);
 
   return (
     <div className="page-container max-w-7xl mx-auto space-y-6">
@@ -370,6 +553,7 @@ export default function CompanyUnifiedPage() {
               { id: 'knowledge' as const, label: t('company.tab_knowledge'), icon: FolderKanban, count: assets.length },
               { id: 'team' as const, label: t('company.tab_team'), icon: Users, count: team.length },
               { id: 'web' as const, label: t('company.tab_web'), icon: Globe, count: referenceUrls.length },
+              { id: 'learnings' as const, label: t('company.tab_learnings'), icon: Brain, count: learnings.length },
             ].map((tab) => {
               const Icon = tab.icon;
               const isActive = activeTab === tab.id;
@@ -430,7 +614,73 @@ export default function CompanyUnifiedPage() {
         {/* ═══ TAB 1: SAVOIR-FAIRE FILE MANAGER ═══ */}
         {activeTab === 'knowledge' && (
           <div className="p-5 space-y-5 animate-fade-in-up">
-            
+
+            {/* SharePoint : autre source pour la base de connaissance (14/09) */}
+            <div className="border border-line rounded-2xl p-4 sm:p-5 bg-sunken/40 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${spStatus?.connected ? 'bg-positive/10 text-positive' : 'bg-hl/10 text-hl'}`}>
+                    <Cloud className="w-4 h-4" />
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-xs font-bold text-foreground">SharePoint</p>
+                    <p className="text-[11px] text-muted-foreground truncate">
+                      {loadingSp
+                        ? 'Vérification…'
+                        : spStatus?.connected
+                        ? `Connecté — ${spStatus.site_url || ''}`
+                        : "Ajoutez les documents de votre SharePoint d'entreprise à la base de connaissance."}
+                    </p>
+                  </div>
+                </div>
+
+                {!loadingSp && (
+                  spStatus?.connected ? (
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button onClick={handleSyncSharePoint} disabled={syncingSp} className="btn-secondary !py-1.5 !px-3 !text-[11px] cursor-pointer">
+                        {syncingSp ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                        <span>Synchroniser</span>
+                      </button>
+                      <button onClick={handleDisconnectSharePoint} className="p-1.5 rounded-lg text-slate-400 hover:text-danger hover:bg-danger/10 transition-colors cursor-pointer" title="Déconnecter">
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  ) : (
+                    <button onClick={() => setShowSpModal(true)} className="btn-primary !py-1.5 !px-3.5 !text-[11px] cursor-pointer shrink-0">
+                      <Cloud className="w-3.5 h-3.5" />
+                      <span>Connecter SharePoint</span>
+                    </button>
+                  )
+                )}
+              </div>
+
+              {spStatus?.connected && (
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-3 border-t border-line text-[11px]">
+                  <div>
+                    <p className="text-muted-foreground">Dossier suivi</p>
+                    <p className="font-mono font-semibold text-foreground truncate">{spStatus.selected_folder_path || '/'}</p>
+                  </div>
+                  <div>
+                    <p className="text-muted-foreground">Fichiers indexés (mois)</p>
+                    <p className="font-semibold text-foreground">
+                      {spStatus.files_indexed_this_month}{spStatus.files_quota_this_month != null ? ` / ${spStatus.files_quota_this_month}` : ''}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-muted-foreground">Dernière synchro</p>
+                    <p className="font-semibold text-foreground">{spStatus.last_synced_at ? new Date(spStatus.last_synced_at).toLocaleString('fr-FR') : 'Jamais'}</p>
+                  </div>
+                  <div>
+                    <p className="text-muted-foreground">Statut</p>
+                    <p className={`font-semibold ${spStatus.status === 'error' ? 'text-danger' : 'text-positive'}`}>{spStatus.status}</p>
+                  </div>
+                </div>
+              )}
+              {spStatus?.connected && spStatus.last_error && (
+                <p className="text-[11px] text-danger bg-danger/5 border border-danger/20 rounded-lg p-2">{spStatus.last_error}</p>
+              )}
+            </div>
+
             {/* Search and Category Filter Bar */}
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="relative max-w-sm w-full">
@@ -823,6 +1073,223 @@ export default function CompanyUnifiedPage() {
           </div>
         )}
 
+        {/* ═══ TAB 4: CE QUE L'IA A APPRIS DE VOTRE ENTREPRISE ═══ */}
+        {activeTab === 'learnings' && (
+          <div className="p-5 space-y-5 animate-fade-in-up">
+            <div className="space-y-1">
+              <h3 className="text-sm font-bold text-foreground font-heading">Ce que l'application a appris de votre entreprise</h3>
+              <p className="text-xs text-muted-foreground">
+                Chaque fois qu'un marché est gagné ou perdu avec un retour de l'acheteur, ou qu'un ajustement est validé, l'application
+                en tire un enseignement et le réutilise dans vos prochains dossiers. Vous pouvez le corriger ou le retirer si besoin.
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-1.5">
+              {[
+                { id: 'all', label: 'Tous' },
+                { id: 'planning', label: 'Planning' },
+                { id: 'methodology', label: 'Méthodologie' },
+                { id: 'qse', label: 'QSE / Environnement' },
+                { id: 'safety', label: 'Sécurité' },
+                { id: 'pricing', label: 'Tarification' },
+                { id: 'general', label: 'Général' },
+              ].map((cat) => (
+                <button
+                  key={cat.id}
+                  onClick={() => setLearningCategoryFilter(cat.id)}
+                  className={`px-3 py-1.5 rounded-xl text-[11px] font-semibold border transition-all cursor-pointer ${
+                    learningCategoryFilter === cat.id
+                      ? 'bg-hl text-hl-contrast border-hl shadow-xs'
+                      : 'border-line text-muted-foreground hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-raised'
+                  }`}
+                >
+                  {cat.label}
+                </button>
+              ))}
+            </div>
+
+            <div className="flex items-center justify-between">
+              <button
+                onClick={() => setShowNewLearningForm((v) => !v)}
+                className="btn-secondary !py-1.5 !px-3 !text-[11px] cursor-pointer"
+              >
+                {showNewLearningForm ? <XCircle className="w-3.5 h-3.5" /> : <Plus className="w-3.5 h-3.5" />}
+                {showNewLearningForm ? 'Annuler' : 'Nouvel enseignement'}
+              </button>
+            </div>
+
+            {showNewLearningForm && (
+              <div className="border border-line rounded-xl p-4 space-y-2.5 bg-sunken/40">
+                <input
+                  value={newLearningForm.title}
+                  onChange={(e) => setNewLearningForm({ ...newLearningForm, title: e.target.value })}
+                  className="input-field !text-xs !font-bold"
+                  placeholder="Titre bref (ex. : Toujours proposer un béton bas carbone en zone urbaine)"
+                />
+                <textarea
+                  value={newLearningForm.actionable_directive}
+                  onChange={(e) => setNewLearningForm({ ...newLearningForm, actionable_directive: e.target.value })}
+                  className="input-field !text-xs"
+                  rows={2}
+                  placeholder="Consigne à appliquer désormais dans les prochains dossiers"
+                />
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <select
+                    value={newLearningForm.category}
+                    onChange={(e) => setNewLearningForm({ ...newLearningForm, category: e.target.value })}
+                    className="input-field !text-[11px] !py-1.5 !w-auto"
+                  >
+                    <option value="general">Général</option>
+                    <option value="planning">Planning</option>
+                    <option value="methodology">Méthodologie</option>
+                    <option value="qse">QSE / Environnement</option>
+                    <option value="safety">Sécurité</option>
+                    <option value="pricing">Tarification</option>
+                  </select>
+
+                  <div className="flex items-center rounded-lg border border-line overflow-hidden text-[11px] font-semibold">
+                    <button
+                      type="button"
+                      onClick={() => setNewLearningForm({ ...newLearningForm, personal: false })}
+                      className={`px-2.5 py-1.5 flex items-center gap-1 cursor-pointer transition-colors ${!newLearningForm.personal ? 'bg-hl text-hl-contrast' : 'text-muted-foreground hover:bg-slate-100 dark:hover:bg-raised'}`}
+                      title="Visible par toute l'équipe"
+                    >
+                      <Users className="w-3 h-3" /> Collectif
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setNewLearningForm({ ...newLearningForm, personal: true })}
+                      className={`px-2.5 py-1.5 flex items-center gap-1 cursor-pointer transition-colors ${newLearningForm.personal ? 'bg-hl text-hl-contrast' : 'text-muted-foreground hover:bg-slate-100 dark:hover:bg-raised'}`}
+                      title="Visible seulement par vous"
+                    >
+                      <User className="w-3 h-3" /> Personnel
+                    </button>
+                  </div>
+
+                  <button
+                    onClick={handleCreateLearning}
+                    disabled={creatingLearning}
+                    className="btn-primary !py-1.5 !px-3 !text-[11px] cursor-pointer ml-auto"
+                  >
+                    {creatingLearning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />} Enregistrer
+                  </button>
+                </div>
+                <p className="text-[10px] text-muted-foreground">
+                  {newLearningForm.personal
+                    ? "Cet enseignement ne sera appliqué que pour vos propres générations, invisible pour le reste de l'équipe."
+                    : "Cet enseignement s'appliquera à tous les prochains dossiers de toute l'équipe."}
+                </p>
+              </div>
+            )}
+
+            {loadingLearnings ? (
+              <div className="py-12 text-center text-muted-foreground">
+                <Loader2 className="w-5 h-5 animate-spin text-hl mx-auto mb-2" />
+                <span>Chargement…</span>
+              </div>
+            ) : filteredLearnings.length === 0 ? (
+              <div className="py-12 text-center text-muted-foreground space-y-2">
+                <Brain className="w-8 h-8 text-slate-300 dark:text-zinc-600 mx-auto" />
+                <p className="font-semibold text-foreground">Rien appris pour l'instant</p>
+                <p className="text-[11px] max-w-sm mx-auto">
+                  Dès qu'un dossier sera marqué gagné ou perdu avec un retour de l'acheteur, les enseignements apparaîtront ici.
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-2.5">
+                {filteredLearnings.map((l) => (
+                  <div key={l.id} className={`border rounded-xl p-4 space-y-2.5 ${l.is_active ? 'border-line' : 'border-line opacity-60'}`}>
+                    {editingLearningId === l.id ? (
+                      <div className="space-y-2.5">
+                        <input
+                          value={editLearningForm.title}
+                          onChange={(e) => setEditLearningForm({ ...editLearningForm, title: e.target.value })}
+                          className="input-field !text-xs !font-bold"
+                          placeholder="Titre"
+                        />
+                        <textarea
+                          value={editLearningForm.learning_insight}
+                          onChange={(e) => setEditLearningForm({ ...editLearningForm, learning_insight: e.target.value })}
+                          className="input-field !text-xs"
+                          rows={2}
+                          placeholder="Ce qui a été observé"
+                        />
+                        <textarea
+                          value={editLearningForm.actionable_directive}
+                          onChange={(e) => setEditLearningForm({ ...editLearningForm, actionable_directive: e.target.value })}
+                          className="input-field !text-xs"
+                          rows={2}
+                          placeholder="Directive appliquée dans les prochains dossiers"
+                        />
+                        <div className="flex justify-end gap-2">
+                          <button onClick={() => setEditingLearningId(null)} className="btn-secondary !py-1.5 !px-3 !text-[11px] cursor-pointer">
+                            <XCircle className="w-3.5 h-3.5" /> Annuler
+                          </button>
+                          <button
+                            onClick={() => handleSaveLearning(l.id)}
+                            disabled={savingLearningId === l.id}
+                            className="btn-primary !py-1.5 !px-3 !text-[11px] cursor-pointer"
+                          >
+                            {savingLearningId === l.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />} Enregistrer
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="flex items-start gap-2.5 min-w-0">
+                            <Brain className={`w-4 h-4 shrink-0 mt-0.5 ${l.is_active ? 'text-hl' : 'text-muted-foreground'}`} />
+                            <div className="min-w-0">
+                              <p className="text-xs font-bold text-foreground">{l.title}</p>
+                              <div className="flex flex-wrap items-center gap-1.5 mt-1">
+                                <span className="badge-pill text-[10px]">{getLearningCategoryLabel(l.category)}</span>
+                                {l.created_by_user_id ? (
+                                  <span className="badge-pill text-[10px] !bg-hl/10 !text-hl inline-flex items-center gap-1">
+                                    <User className="w-2.5 h-2.5" /> Personnel
+                                  </span>
+                                ) : (
+                                  <span className="badge-pill text-[10px] inline-flex items-center gap-1">
+                                    <Users className="w-2.5 h-2.5" /> Équipe
+                                  </span>
+                                )}
+                                <span className="text-[10px] text-muted-foreground">
+                                  {l.source_outcome === 'won' ? 'Marché gagné' : l.source_outcome === 'lost' ? 'Marché perdu' : l.source_outcome === 'manual' ? 'Ajout manuel' : l.source_outcome}
+                                  {' · '}{new Date(l.created_at).toLocaleDateString('fr-FR')}
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <button
+                              onClick={() => handleToggleLearningActive(l)}
+                              className={`px-2 py-1 rounded-lg text-[10px] font-bold transition-colors cursor-pointer ${
+                                l.is_active ? 'bg-positive/10 text-positive hover:bg-danger/10 hover:text-danger' : 'bg-sunken text-muted-foreground hover:bg-positive/10 hover:text-positive'
+                              }`}
+                              title={l.is_active ? 'Désactiver (ne plus utiliser)' : 'Réactiver'}
+                            >
+                              {l.is_active ? 'Actif' : 'Inactif'}
+                            </button>
+                            <button onClick={() => startEditLearning(l)} className="p-1.5 rounded-lg text-slate-400 hover:text-hl hover:bg-hl/10 transition-colors cursor-pointer" title="Modifier">
+                              <Pencil className="w-3.5 h-3.5" />
+                            </button>
+                            <button onClick={() => handleDeleteLearning(l.id)} className="p-1.5 rounded-lg text-slate-400 hover:text-danger hover:bg-danger/10 transition-colors cursor-pointer" title="Supprimer">
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                        <div className="pl-6 space-y-1">
+                          <p className="text-[11px] text-muted-foreground"><span className="font-semibold text-foreground">Observé :</span> {l.learning_insight}</p>
+                          <p className="text-[11px] text-muted-foreground"><span className="font-semibold text-foreground">Appliqué désormais :</span> {l.actionable_directive}</p>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
       </div>
 
       {/* ─── UPLOAD MODAL (TAILGRIDS STYLE) ─── */}
@@ -905,6 +1372,111 @@ export default function CompanyUnifiedPage() {
                   className="btn-primary !py-2 !px-4 !text-xs cursor-pointer"
                 >
                   {isUploadingAsset ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : 'Importer et Indexer'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ─── SHAREPOINT CONNECT MODAL ─── */}
+      {showSpModal && (
+        <div className="fixed inset-0 bg-slate-950/60 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-in fade-in">
+          <div className="bg-card border border-line p-6 max-w-lg w-full rounded-2xl shadow-2xl space-y-4 animate-scale-in">
+            <div className="flex items-center justify-between pb-3 border-b border-line">
+              <h3 className="text-sm font-bold text-foreground font-heading flex items-center gap-2">
+                <Cloud className="w-4 h-4 text-hl" />
+                <span>Connecter SharePoint</span>
+              </h3>
+              <button
+                type="button"
+                onClick={() => setShowSpModal(false)}
+                className="text-muted-foreground hover:text-foreground text-xs font-bold"
+              >
+                ✕
+              </button>
+            </div>
+
+            <p className="text-[11px] text-muted-foreground -mt-2">
+              Renseignez les identifiants de l'application Azure AD (App Registration) autorisée à lire votre site SharePoint. Ces informations sont chiffrées avant stockage.
+            </p>
+
+            <form onSubmit={handleConnectSharePoint} className="space-y-3">
+              <div className="space-y-1 text-left">
+                <label className="text-xs font-semibold text-foreground">URL du site SharePoint</label>
+                <input
+                  type="url"
+                  required
+                  value={spForm.site_url}
+                  onChange={(e) => setSpForm({ ...spForm, site_url: e.target.value })}
+                  placeholder="https://monentreprise.sharepoint.com/sites/Projets"
+                  className="input-field !text-xs"
+                />
+              </div>
+              <div className="space-y-1 text-left">
+                <label className="text-xs font-semibold text-foreground">Dossier à suivre</label>
+                <input
+                  type="text"
+                  value={spForm.selected_folder_path}
+                  onChange={(e) => setSpForm({ ...spForm, selected_folder_path: e.target.value })}
+                  placeholder="/"
+                  className="input-field !text-xs"
+                />
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="space-y-1 text-left">
+                  <label className="text-xs font-semibold text-foreground">ID de tenant Microsoft</label>
+                  <input
+                    type="text"
+                    required
+                    value={spForm.ms_tenant_id}
+                    onChange={(e) => setSpForm({ ...spForm, ms_tenant_id: e.target.value })}
+                    placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                    className="input-field !text-xs font-mono"
+                  />
+                </div>
+                <div className="space-y-1 text-left">
+                  <label className="text-xs font-semibold text-foreground">ID client (App Registration)</label>
+                  <input
+                    type="text"
+                    required
+                    value={spForm.client_id}
+                    onChange={(e) => setSpForm({ ...spForm, client_id: e.target.value })}
+                    placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                    className="input-field !text-xs font-mono"
+                  />
+                </div>
+              </div>
+              <div className="space-y-1 text-left">
+                <label className="text-xs font-semibold text-foreground">Secret client</label>
+                <input
+                  type="password"
+                  required
+                  value={spForm.client_secret}
+                  onChange={(e) => setSpForm({ ...spForm, client_secret: e.target.value })}
+                  placeholder="••••••••••••••••"
+                  className="input-field !text-xs font-mono"
+                />
+              </div>
+
+              {spActionError && (
+                <p className="text-[11px] text-danger bg-danger/5 border border-danger/20 rounded-lg p-2">{spActionError}</p>
+              )}
+
+              <div className="flex justify-end gap-2 pt-3 border-t border-line">
+                <button
+                  type="button"
+                  onClick={() => setShowSpModal(false)}
+                  className="btn-secondary !py-2 !px-3.5 !text-xs cursor-pointer"
+                >
+                  Annuler
+                </button>
+                <button
+                  type="submit"
+                  disabled={connectingSp}
+                  className="btn-primary !py-2 !px-4 !text-xs cursor-pointer"
+                >
+                  {connectingSp ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : 'Connecter et vérifier'}
                 </button>
               </div>
             </form>

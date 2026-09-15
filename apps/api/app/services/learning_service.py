@@ -369,6 +369,7 @@ class LearningService:
         project_id: Optional[uuid.UUID] = None,
         section_type: Optional[str] = None,
         limit: int = 10,
+        requesting_user_id: Optional[uuid.UUID] = None,
     ) -> List[TenantLearning]:
         """
         Retrieves active continuous learnings for LLM context injection or UI view.
@@ -382,6 +383,15 @@ class LearningService:
         matches when the caller's value equals it. Passing project_id=None /
         section_type=None here (the default) preserves the original
         unrestricted behavior for any caller that doesn't scope its query.
+
+        requesting_user_id implements the personal-vs-collective distinction:
+        a learning with created_by_user_id=NULL is collective (visible to the
+        whole tenant); one with created_by_user_id set is personal and only
+        returned to that same user. Passing requesting_user_id=None (the
+        default) skips this filter entirely, preserving the original
+        behavior for callers that don't have a user in scope (e.g. batch
+        jobs) — they see every active learning, exactly as before this
+        distinction existed.
         """
         stmt = (
             select(TenantLearning)
@@ -396,6 +406,13 @@ class LearningService:
         if section_type:
             stmt = stmt.where(
                 or_(TenantLearning.section_type.is_(None), TenantLearning.section_type == section_type)
+            )
+        if requesting_user_id:
+            stmt = stmt.where(
+                or_(
+                    TenantLearning.created_by_user_id.is_(None),
+                    TenantLearning.created_by_user_id == requesting_user_id,
+                )
             )
 
         stmt = stmt.order_by(TenantLearning.created_at.desc()).limit(limit)

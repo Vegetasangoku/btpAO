@@ -2,6 +2,7 @@
 Administrative Tender Dossiers API Endpoints (DC1, DC2, DUME, Country Regulatory Profiles).
 Strictly scoped by tenant_id under Postgres RLS.
 """
+import re
 import uuid
 from typing import Any, Dict, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
@@ -266,6 +267,67 @@ async def get_project_regulatory_profile_endpoint(
     }
 
 
+@router.get("/{project_id}/piece-declaration")
+async def export_piece_declaration(
+    project_id: str,
+    piece: str,
+    citation: Optional[str] = None,
+    current_user: CurrentTenantUser = Depends(get_current_tenant_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Projet de déclaration/lettre rédigé par l'IA pour une pièce administrative exigée par le
+    dossier de consultation de ce projet, quand aucun formulaire national fixe n'existe pour ce
+    pays (voir pieces_service.GENERABLES, aujourd'hui France/Belgique/Luxembourg seulement) --
+    15/09, en réponse directe au constat que pour les autres pays (ex. Liban) l'application
+    identifiait la pièce manquante et cherchait un lien, sans jamais la rédiger elle-même.
+
+    piece/citation sont les valeurs déjà renvoyées par POST /{project_id}/pieces pour cette même
+    ligne (l'utilisateur les a déjà vues à l'écran avant de cliquer) -- pas ré-analysées ici, au
+    même niveau de confiance que project_id (scopé au tenant de l'utilisateur authentifié).
+
+    TOUJOURS un PROJET à vérifier, compléter et signer -- jamais présenté comme final : voir
+    l'avertissement inséré directement dans le document par generate_declaration_docx, et sa
+    discipline anti-invention (aucun fait non fourni n'est inventé ; aucune déclaration sur
+    l'honneur n'est pré-affirmée comme vraie pour l'entreprise).
+    """
+    tenant, project = await _get_project_and_tenant(project_id, current_user, db)
+    piece = (piece or "").strip()
+    if not piece:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Pièce manquante")
+
+    tenant_dict = {
+        "name": tenant.name,
+        "siret": tenant.siret,
+        "country_code": tenant.country_code or "FR",
+        "city": (tenant.branding_config or {}).get("city"),
+    }
+    project_dict = {
+        "title": project.title,
+        "client_name": _reel(project.client_name),
+        "reference_code": project.reference_code,
+    }
+    langue = getattr(project, "output_language", None) or "fr"
+
+    docx_bytes = await admin_dossier_service.generate_declaration_docx(
+        db, tenant.id, tenant_dict, project_dict,
+        piece[:200], (citation or "").strip()[:400] or None, langue,
+    )
+    if not docx_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Le brouillon n'a pas pu être rédigé pour l'instant (service IA indisponible) — réessayez dans un instant.",
+        )
+
+    safe_name = re.sub(r"[^a-zA-Z0-9]+", "_", piece)[:60].strip("_") or "Piece"
+    filename = f"Declaration_{safe_name}_{project.reference_code or 'AO'}.docx"
+    return Response(
+        content=docx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @router.post("/{project_id}/pieces")
 async def verifier_pieces_et_formulaires(
     project_id: str,
@@ -275,8 +337,21 @@ async def verifier_pieces_et_formulaires(
     db: AsyncSession = Depends(get_db),
 ):
     """Pièces exigées (DCE + pays du marché), ce qui est déjà disponible, et pour ce qui
-    manque, lien vers le formulaire sur les portails officiels du pays (11/09)."""
+    manque, lien vers le formulaire sur les portails officiels du pays (11/09).
+    15/09 : accepte en option un corps JSON {"pieces_confirmees": [...]} -- libellés de
+    recommandations (historique tenant+pays) que l'utilisateur vient de confirmer pour ce
+    dossier ; corps absent ou vide = comportement inchangé (rétrocompatible)."""
     from app.services.pieces_service import analyser_pieces
     tenant, project = await _get_project_and_tenant(project_id, current_user, db)
+    pieces_confirmees = None
+    try:
+        corps = await request.json()
+        if isinstance(corps, dict):
+            brut = corps.get("pieces_confirmees")
+            if isinstance(brut, list):
+                pieces_confirmees = [str(x)[:250] for x in brut if str(x or "").strip()][:30] or None
+    except Exception:
+        pieces_confirmees = None
     return await analyser_pieces(db, tenant.id, project, chercher=chercher,
-                                 langue=request.headers.get("x-ui-language") or "fr")
+                                 langue=request.headers.get("x-ui-language") or "fr",
+                                 pieces_confirmees=pieces_confirmees)

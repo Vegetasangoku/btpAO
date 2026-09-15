@@ -41,6 +41,7 @@ import { CadreAcheteurCard } from '@/components/export/cadre-acheteur-card';
 import { PiecesCard } from '@/components/export/pieces-card';
 import { GoNoGoExplication } from '@/components/gonogo/gonogo-explication';
 import { TransparenceCard } from '@/components/export/transparence-card';
+import { SpecificiteCard } from '@/components/export/specificite-card';
 import { TraductionCard } from '@/components/export/traduction-card';
 
 const MANDATORY_SECTIONS = MEMO_SECTIONS;
@@ -336,6 +337,7 @@ export default function ExportPage() {
 
       {/* Ce que l'application a fait à votre place, faute de données (11/09). */}
       <TransparenceCard projectId={projectId} />
+      <SpecificiteCard projectId={projectId} />
 
       {/* Texte déjà rédigé dans une autre langue que celle demandée (11/09). */}
       <TraductionCard projectId={projectId} />

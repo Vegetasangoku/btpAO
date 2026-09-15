@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional
 from fastapi import HTTPException, status
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.models.entities import SubscriptionPlan, TenantSubscription, TenantUsageCounter, LlmCatalogModel, LlmUsageLog
+from app.models.entities import SubscriptionPlan, TenantSubscription, TenantUsageCounter, LlmCatalogModel, LlmUsageLog, User
 from app.services.llm_reference_catalog import price_for as reference_price_for
 
 
@@ -270,7 +270,56 @@ class BillingService:
         spend = await self.get_tenant_current_month_spend_usd(tenant_id, db)
         return spend >= cap, cap, spend
 
-    async def check_and_enforce_cost_cap(self, tenant_id_str: str, db: AsyncSession) -> Dict[str, Any]:
+    async def get_effective_user_cost_cap_usd(self, user_id: uuid.UUID, db: AsyncSession) -> Optional[float]:
+        """
+        Plafond mensuel de cout LLM effectif pour CET utilisateur (users.monthly_llm_cost_cap_usd),
+        en USD reels estimes. None = aucun plafond individuel configure pour ce compte (le
+        plafond du tenant, voir get_effective_cost_cap_usd, continue de s'appliquer normalement
+        par ailleurs). Mecanisme complementaire au plafond par tenant, pas un remplacement : les
+        deux s'appliquent independamment (15/09, demande explicite de limite par compte cote
+        admin).
+        """
+        stmt = select(User.monthly_llm_cost_cap_usd).where(User.id == user_id)
+        res = await db.execute(stmt)
+        val = res.scalar_one_or_none()
+        return float(val) if val is not None else None
+
+    async def get_user_current_month_spend_usd(self, user_id: uuid.UUID, db: AsyncSession) -> float:
+        """
+        Somme de llm_usage_logs.estimated_cost_usd attribuee a CET utilisateur (colonne
+        llm_usage_logs.user_id) depuis le 1er du mois en cours (UTC). Seule la generation de
+        section (workers/tasks.py::generate_section_task, de loin le principal poste de cout LLM
+        du produit) attribue aujourd'hui son cout a un utilisateur precis -- les autres points
+        d'appel LLM (extraction DCE, bootstrap entreprise, chiffrage) restent comptabilises au
+        niveau tenant uniquement pour l'instant (voir log_llm_usage). Cette somme est donc un
+        sous-ensemble de get_tenant_current_month_spend_usd, jamais superieure. Ne leve jamais
+        d'exception (meme precaution que l'equivalent tenant).
+        """
+        try:
+            month_start, _ = self.get_current_period_bounds()
+            stmt = select(func.coalesce(func.sum(LlmUsageLog.estimated_cost_usd), 0)).where(
+                LlmUsageLog.user_id == user_id,
+                LlmUsageLog.created_at >= month_start,
+            )
+            res = await db.execute(stmt)
+            return float(res.scalar() or 0.0)
+        except Exception as e:
+            print(f"[BillingService] get_user_current_month_spend_usd notice: {e} -- 0.0 par defaut.")
+            return 0.0
+
+    async def is_user_cost_cap_exceeded(self, user_id: uuid.UUID, db: AsyncSession) -> tuple[bool, Optional[float], float]:
+        """Retourne (depasse, plafond, depense_actuelle) pour le plafond individuel de cet
+        utilisateur. Miroir exact de is_cost_cap_exceeded mais par utilisateur plutot que par
+        tenant. Ne leve jamais d'exception."""
+        cap = await self.get_effective_user_cost_cap_usd(user_id, db)
+        if cap is None or cap <= 0:
+            return False, cap, 0.0
+        spend = await self.get_user_current_month_spend_usd(user_id, db)
+        return spend >= cap, cap, spend
+
+    async def check_and_enforce_cost_cap(
+        self, tenant_id_str: str, db: AsyncSession, user_id_str: Optional[str] = None
+    ) -> Dict[str, Any]:
         """
         Bloque (402) tout nouvel appel LLM facturable si le plafond mensuel de cout reel
         configure pour ce tenant (voir get_effective_cost_cap_usd) est atteint ou depasse.
@@ -282,6 +331,13 @@ class BillingService:
         A utiliser dans les points d'appel synchrones cote utilisateur (chat, analyse) ou une
         erreur claire est acceptable ; utiliser is_cost_cap_exceeded pour les points d'appel qui
         doivent degrader silencieusement vers un repli existant a la place.
+
+        user_id_str (15/09, demande explicite de limite par compte cote admin) : si fourni,
+        applique EN PLUS le plafond individuel de ce compte (users.monthly_llm_cost_cap_usd,
+        voir get_effective_user_cost_cap_usd) une fois le plafond tenant verifie. Les deux
+        plafonds sont independants -- soit peut bloquer. Optionnel et retro-compatible : les
+        appelants existants qui ne passent pas user_id_str continuent a ne verifier que le
+        plafond tenant, exactement comme avant.
         """
         try:
             t_uuid = uuid.UUID(tenant_id_str)
@@ -298,7 +354,27 @@ class BillingService:
                     f"l'ajuster si besoin, ou reessayez le mois prochain."
                 ),
             )
-        return {"cost_cap_usd": cap, "current_spend_usd": spend, "cap_enforced": cap is not None}
+        result: Dict[str, Any] = {"cost_cap_usd": cap, "current_spend_usd": spend, "cap_enforced": cap is not None}
+
+        if user_id_str:
+            try:
+                u_uuid = uuid.UUID(user_id_str)
+            except ValueError:
+                return result
+            user_exceeded, user_cap, user_spend = await self.is_user_cost_cap_exceeded(u_uuid, db)
+            if user_exceeded:
+                raise HTTPException(
+                    status_code=status.HTTP_402_PAYMENT_REQUIRED,
+                    detail=(
+                        f"Plafond mensuel de cout IA individuel atteint ({user_spend:.2f} $ US / {user_cap:.2f} $ US "
+                        f"configures pour votre compte). Ce plafond est configure par votre administrateur -- "
+                        f"contactez-le pour l'ajuster si besoin, ou reessayez le mois prochain."
+                    ),
+                )
+            result["user_cost_cap_usd"] = user_cap
+            result["user_current_spend_usd"] = user_spend
+
+        return result
 
     @staticmethod
     async def estimate_llm_cost_usd(
@@ -364,6 +440,7 @@ class BillingService:
         completion_tokens: Optional[int] = None,
         total_tokens: Optional[int] = None,
         was_fallback: bool = False,
+        user_id: Optional[uuid.UUID] = None,
     ) -> None:
         """
         Journalise un appel LLM reel dans llm_usage_logs (tokens + cout estime avec repli de
@@ -373,6 +450,11 @@ class BillingService:
         point d'appel echouait silencieusement -- voir correctif d'import manquant du meme jour
         -- ce qui explique les 0 lignes constatees en base malgre un usage LLM reel quotidien).
         Ne doit jamais faire echouer l'appelant : toute erreur est absorbee silencieusement.
+
+        user_id (15/09) : optionnel, attribue ce cout a un compte precis pour le plafond
+        individuel (voir get_user_current_month_spend_usd / check_and_enforce_cost_cap). Les
+        appelants qui ne le passent pas continuent a journaliser un cout tenant-only, exactement
+        comme avant -- ce cout reste compte dans le plafond tenant dans tous les cas.
         """
         try:
             estimated_cost = await BillingService.estimate_llm_cost_usd(
@@ -388,6 +470,7 @@ class BillingService:
                 total_tokens=total_tokens,
                 estimated_cost_usd=estimated_cost,
                 was_fallback=was_fallback,
+                user_id=user_id,
             ))
         except Exception as e:
             print(f"[BillingService] log_llm_usage notice: {e} -- generation non affectee.")

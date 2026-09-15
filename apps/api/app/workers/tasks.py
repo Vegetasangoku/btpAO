@@ -180,9 +180,17 @@ def parse_dce_task(
 
                 doc.status = "completed"
                 doc.pages_count = len(pages)
+                # 14/09 : ocr_stats["pages_illisibles"] (pages restees sans texte exploitable
+                # meme apres tentative Azure -- voir ocr_service.py) etait calcule puis jete :
+                # rien, nulle part, ne lisait cette cle. Un document a moitie scanne s'affichait
+                # donc comme un succes plein sans que personne ne sache qu'une partie n'avait
+                # rien apporte a la redaction. On la persiste desormais pour que l'endpoint
+                # GET /dce/documents/{project_id} puisse le dire clairement (app/api/dce.py).
                 doc.metadata_json = {
                     "summary": f"Document analysé avec succès ({len(chunks)} fragments indexés).",
                     "chunks_count": len(chunks),
+                    "pages_illisibles": ocr_stats.get("pages_illisibles", 0),
+                    "pages_total": pages_count,
                 }
                 await billing_service.increment_usage(tenant_id, "page", db, amount=pages_count)
                 await db.commit()
@@ -304,12 +312,21 @@ def generate_section_task(
     project_id: str,
     section_key: str,
     custom_instructions: Optional[str] = None,
+    requested_by_user_id: Optional[str] = None,
 ):
     """
     Asynchronously generates a technical memo section in the background:
     1. Loads project, decisions, DCE embeddings, and company assets under tenant_id + RLS.
     2. Calls LLM with isolated tenant RAG context.
     3. Upserts GeneratedSection with status='generated' (or 'failed' on error).
+
+    requested_by_user_id (15/09, optionnel) : identifiant de l'utilisateur qui a declenche
+    cette generation, quand connu (absent pour la generation proactive au tout premier appel
+    ou tout appelant plus ancien). Utilise pour (a) scoper les apprentissages personnels vs
+    collectifs consultes (voir learning_service.get_active_tenant_learnings), (b) appliquer le
+    plafond de cout individuel de ce compte en plus du plafond tenant (voir
+    billing_service.check_and_enforce_cost_cap), et (c) attribuer le cout LLM reel de cette
+    generation a ce compte dans llm_usage_logs.user_id.
     """
     async def _async_generate():
         # 29/08 (confirmation redemarrage) : `custom_instructions` est un parametre de la
@@ -329,7 +346,7 @@ def generate_section_task(
             # 1. Enforce quota (nombre de dossiers) + plafond de cout LLM reel (02/09,
             # protection de marge parametrable par forfait/tenant)
             await billing_service.check_and_enforce_quota(tenant_id, action="section", db=db)
-            await billing_service.check_and_enforce_cost_cap(tenant_id, db=db)
+            await billing_service.check_and_enforce_cost_cap(tenant_id, db=db, user_id_str=requested_by_user_id)
 
             # 2. Fetch project
             proj_stmt = select(Project).where(Project.id == proj_uuid, Project.tenant_id == tenant_uuid)
@@ -530,6 +547,7 @@ def generate_section_task(
                     project_id=proj_uuid,
                     section_type=section_key,
                     limit=5,
+                    requesting_user_id=uuid.UUID(requested_by_user_id) if requested_by_user_id else None,
                 )
                 tenant_learnings_payload = [
                     {
@@ -815,6 +833,7 @@ def generate_section_task(
                             total_tokens=usage.get("total_tokens"),
                             estimated_cost_usd=estimated_cost,
                             was_fallback=used_fallback,
+                            user_id=uuid.UUID(requested_by_user_id) if requested_by_user_id else None,
                         ))
                 except Exception as e:
                     print(f"[Tasks] Journal consommation LLM notice: {e} -- generation non affectee.")

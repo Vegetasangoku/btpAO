@@ -27,6 +27,12 @@ import { AUTO_FILL_KEYS } from '@/lib/sections';
 import { MemoOverview } from '@/components/editor/memo-overview';
 import { WorkerHealthBanner, useWorkerHealth } from '@/components/editor/worker-health-banner';
 
+// 14/09 : plafond cote client, en miroir de MAX_DCE_FILE_SIZE_BYTES dans apps/api/app/api/dce.py.
+// Sert a rejeter immediatement un depot trop volumineux (message clair) plutot que de lancer
+// un upload voue a l'echec cote serveur. Valeur mesuree le 14/09 : un CCTP de 300 pages scanne
+// en niveaux de gris a 200 DPI pese environ 110 Mo ; 250 Mo laisse une marge confortable.
+const MAX_DCE_FILE_SIZE_BYTES = 250 * 1024 * 1024; // 250 Mo
+
 function ResponseWizardContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -427,7 +433,20 @@ function ResponseWizardContent() {
                 className="hidden"
                 onChange={(e) => {
                   if (e.target.files) {
-                    setFiles(Array.from(e.target.files));
+                    const selectionnes = Array.from(e.target.files);
+                    const tropVolumineux = selectionnes.filter((f) => f.size > MAX_DCE_FILE_SIZE_BYTES);
+                    const acceptes = selectionnes.filter((f) => f.size <= MAX_DCE_FILE_SIZE_BYTES);
+                    if (tropVolumineux.length > 0) {
+                      const noms = tropVolumineux
+                        .map((f) => `${f.name} (${(f.size / (1024 * 1024)).toFixed(0)} Mo)`)
+                        .join(', ');
+                      setUploadError(
+                        `Fichier(s) trop volumineux, non ajouté(s) : ${noms}. Taille maximale acceptée : 250 Mo par fichier.`
+                      );
+                    } else {
+                      setUploadError(null);
+                    }
+                    setFiles(acceptes);
                   }
                 }}
               />

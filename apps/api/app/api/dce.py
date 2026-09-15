@@ -24,6 +24,16 @@ from app.services.ocr_service import ocr_service
 
 router = APIRouter(prefix="/dce", tags=["DCE Ingestion & Criteria"])
 
+# 14/09 : aucune limite de taille n'etait appliquee sur le depot d'un DCE (a la
+# difference de la base de connaissance, plafonnee a 50 Mo). Le texte affiche au
+# client ("jusqu'a 50 Mo") n'etait donc qu'une indication, jamais verifiee -- ni
+# cote navigateur ni cote API. Mesure reelle (14/09) : un CCTP de 300 pages
+# scanne en niveaux de gris a 200 DPI pese environ 110 Mo ; ce plafond laisse une
+# marge confortable (plus haute resolution, dossier plus volumineux) tout en
+# bornant la memoire du service API, qui lit le fichier entierement avant de le
+# stocker.
+MAX_DCE_FILE_SIZE_BYTES = 250 * 1024 * 1024  # 250 Mo
+
 
 @router.post("/upload", response_model=DCEUploadResponse)
 async def upload_dce_document(
@@ -43,6 +53,17 @@ async def upload_dce_document(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid project or tenant UUID")
 
     file_bytes = await file.read()
+
+    if len(file_bytes) > MAX_DCE_FILE_SIZE_BYTES:
+        size_mb = round(len(file_bytes) / (1024 * 1024), 1)
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=(
+                f"Fichier trop volumineux ({size_mb} Mo). Taille maximale acceptee pour une "
+                f"piece de marche : 250 Mo."
+            ),
+        )
+
     filename = file.filename or "dce_document.pdf"
     doc_id = uuid.uuid4()
 
@@ -128,17 +149,20 @@ MSG_PIECES = {
            "vide": "Analyse déclarée terminée mais aucun fragment indexé : cette pièce n'apporte rien à la rédaction. Relancez l'analyse.",
            "ok": "{n} fragment(s) indexé(s) et exploitables par la rédaction.",
            "echec": "Analyse en échec.", "en_cours": "Analyse en cours.",
-           "aucune": "Aucune pièce du marché n'est exploitable sur ce dossier : la rédaction se fera sans le CCTP ni le règlement de consultation."},
+           "aucune": "Aucune pièce du marché n'est exploitable sur ce dossier : la rédaction se fera sans le CCTP ni le règlement de consultation.",
+           "partiel": " {n_illisibles} page(s) sur {n_total} n'ont pas pu être lues (probablement scannées en mauvaise qualité) et ne contribuent pas à la rédaction."},
     "en": {"abandon": "Analysis never finished (the background processing stopped). Click “Rerun analysis”: it will run right away.",
            "vide": "Analysis reported as finished but no passage was indexed: this document adds nothing to the writing. Rerun the analysis.",
            "ok": "{n} passage(s) indexed and usable for writing.",
            "echec": "Analysis failed.", "en_cours": "Analysis in progress.",
-           "aucune": "No tender document is usable on this project: writing will proceed without the specifications or the tender regulations."},
+           "aucune": "No tender document is usable on this project: writing will proceed without the specifications or the tender regulations.",
+           "partiel": " {n_illisibles} page(s) out of {n_total} could not be read (likely a low-quality scan) and do not contribute to the writing."},
     "ar": {"abandon": "لم يكتمل التحليل (توقفت المعالجة في الخلفية). انقر على «إعادة التحليل»: سيتم فورًا.",
            "vide": "أُعلن انتهاء التحليل دون فهرسة أي مقطع: لا تفيد هذه الوثيقة التحرير. أعد التحليل.",
            "ok": "{n} مقطع مفهرس وقابل للاستخدام في التحرير.",
            "echec": "فشل التحليل.", "en_cours": "التحليل جارٍ.",
-           "aucune": "لا توجد وثيقة مناقصة قابلة للاستخدام في هذا المشروع: سيتم التحرير دون دفتر الشروط الفنية ولا نظام المناقصة."},
+           "aucune": "لا توجد وثيقة مناقصة قابلة للاستخدام في هذا المشروع: سيتم التحرير دون دفتر الشروط الفنية ولا نظام المناقصة.",
+           "partiel": " تعذّرت قراءة {n_illisibles} صفحة من أصل {n_total} (على الأرجح مسح ضوئي رديء الجودة) ولا تُستخدم في التحرير."},
 }
 
 
@@ -217,6 +241,15 @@ async def list_dce_documents(
             message = M["vide"]
         elif statut == "completed":
             message = M["ok"].format(n=nb)
+            # 14/09 : le nombre de pages illisibles (scan de mauvaise qualite, meme
+            # apres tentative Azure) etait calcule dans ocr_service.py mais jamais lu
+            # nulle part ailleurs -- un document a moitie scanne s'affichait comme un
+            # succes plein, sans que rien ne dise que des pages n'avaient rien apporte.
+            meta = d.raw_metadata or {}
+            n_illisibles = meta.get("pages_illisibles") or 0
+            n_total = meta.get("pages_total") or 0
+            if n_illisibles > 0 and n_total > 0:
+                message += M["partiel"].format(n_illisibles=n_illisibles, n_total=n_total)
         elif statut == "failed":
             message = (d.raw_metadata or {}).get("error") or M["echec"]
         else:
@@ -232,6 +265,8 @@ async def list_dce_documents(
             "message": message,
             "taille_octets": d.file_size_bytes,
             "created_at": d.created_at,
+            "pages_illisibles": (d.raw_metadata or {}).get("pages_illisibles") or 0,
+            "pages_total": (d.raw_metadata or {}).get("pages_total") or 0,
         })
 
     total_fragments = sum(x["fragments_indexes"] for x in sortie)

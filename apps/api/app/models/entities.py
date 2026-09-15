@@ -92,6 +92,10 @@ class User(Base):
     avatar_url = Column(Text, nullable=True)
     deletion_requested_at = Column(DateTime(timezone=True), nullable=True)
     scheduled_purge_at = Column(DateTime(timezone=True), nullable=True)
+    # 15/09 : plafond de cout LLM mensuel (USD) PAR COMPTE, en plus du plafond tenant deja
+    # existant (TenantSubscription.custom_llm_cost_cap_usd). NULL = pas de plafond individuel
+    # (comportement par defaut, inchange) -- voir billing_service.get_effective_user_cost_cap_usd.
+    monthly_llm_cost_cap_usd = Column(Numeric(10, 2), nullable=True)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
@@ -158,7 +162,35 @@ class TenantLearning(Base):
     section_type = Column(Text, nullable=True)
     learned_content = Column(Text, nullable=True)
     source_diff = Column(JSONB, default=dict)
+    # 15/09 : NULL = apprentissage collectif (comportement historique, applique a tous les
+    # comptes du tenant) ; renseigne = apprentissage "personnel" a ce compte uniquement
+    # (voir learning_service.get_active_tenant_learnings pour le filtre de lecture).
+    created_by_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class TenantPieceHistory(Base):
+    """
+    15/09 : historique des pieces administratives deja vues (citees dans un vrai RC/DCE) par
+    tenant + pays -- alimente la recommandation "meme pays, dossier similaire : proposer les
+    memes pieces" dans services/pieces_service.py. Alimentee automatiquement a chaque analyse
+    reelle ; seen_count incremente aussi quand l'utilisateur confirme explicitement une
+    recommandation pour un nouveau dossier (boucle "on fait les reco et on apprend").
+    """
+    __tablename__ = "tenant_piece_history"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    country_code = Column(Text, nullable=False)
+    piece_key = Column(Text, nullable=False)
+    piece_label = Column(Text, nullable=False)
+    piece_type = Column(Text, nullable=True)
+    piece_citation = Column(Text, nullable=True)
+    seen_count = Column(Integer, nullable=False, default=1)
+    last_seen_project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="SET NULL"), nullable=True)
+    last_seen_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
@@ -547,6 +579,9 @@ class LlmUsageLog(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
     project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="SET NULL"), nullable=True)
+    # 15/09 : compte a l'origine de l'appel, quand connu -- NULL pour les lignes anterieures et
+    # tout point d'appel qui ne le transmet pas encore (voir billing_service.log_llm_usage).
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     provider_id = Column(Text, nullable=True)
     model_string = Column(Text, nullable=False)
     prompt_tokens = Column(Integer, nullable=True)

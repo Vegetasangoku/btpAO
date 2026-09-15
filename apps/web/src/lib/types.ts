@@ -291,6 +291,36 @@ export interface GeneratedSection {
   updated_at: string;
 }
 
+export interface SharePointStatus {
+  connected: boolean;
+  status: string;
+  site_url: string | null;
+  client_id_masked: string | null;
+  selected_folder_path: string | null;
+  allowed_extensions: string[];
+  last_synced_at: string | null;
+  last_error: string | null;
+  files_indexed_this_month: number;
+  files_quota_this_month: number | null;
+}
+
+export interface TenantLearning {
+  id: string;
+  tenant_id: string;
+  project_id: string | null;
+  category: string;
+  title: string;
+  learning_insight: string;
+  actionable_directive: string;
+  source_outcome: string;
+  // 15/09 : null = apprentissage collectif (visible par tout le tenant) ; sinon l'id de
+  // l'utilisateur auquel cet apprentissage personnel appartient (lui seul le voit/l'edite).
+  created_by_user_id?: string | null;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface CompanyAsset {
   id: string;
   tenant_id: string;
@@ -501,6 +531,32 @@ export interface TransparenceRapport {
   resume: { a_completer: number; a_verifier: number; info: number };
 }
 
+export interface SpecificiteParagrapheGenerique {
+  extrait: string;
+  raison: string;
+}
+
+export interface SpecificiteSection {
+  section_key: string;
+  title: string;
+  score: number;
+  verdict: 'excellent' | 'correct' | 'insuffisant';
+  marqueurs_distincts: number;
+  total_paragraphes: number;
+  paragraphes_specifiques: number;
+  paragraphes_generiques: SpecificiteParagrapheGenerique[];
+}
+
+export interface SpecificiteRapport {
+  langue: string;
+  score_global: number | null;
+  verdict_global: 'excellent' | 'correct' | 'insuffisant' | null;
+  nb_faits_disponibles: number;
+  sections: SpecificiteSection[];
+  resume: { excellent: number; correct: number; insuffisant: number };
+  libelles_verdict: { excellent: string; correct: string; insuffisant: string };
+}
+
 export interface PiecesRapport {
   pays: string;
   pays_nom: string;
@@ -510,18 +566,26 @@ export interface PiecesRapport {
   rc_absent?: boolean;
   lecture_simple?: boolean;
   avertissement: string | null;
-  resume: { fourni: number; generable: number; manquant: number };
+  resume: { fourni: number; generable: number; redigeable: number; manquant: number };
   pieces: {
     piece: string;
     origine: string;
     citation: string | null;
-    statut: 'fourni' | 'generable' | 'manquant';
+    statut: 'fourni' | 'generable' | 'redigeable' | 'manquant';
     fourni_par: string | null;
     generable: string | null;
-    telechargements?: { code: string; libelle: string; chemin: string }[];
+    // 15/09 : brouillon rédigé par l'IA (pays sans formulaire national fixe) — voir "redigeable".
+    redigeable: string | null;
+    // 15/09 : true si "citation" vient d'un dossier précédent confirmé par l'utilisateur
+    // (recommandation acceptée), pas du DCE de CE dossier -- distingue l'affichage des deux.
+    historique?: boolean;
+    telechargements?: { code: string; libelle: string; chemin: string; type?: 'template' | 'draft' }[];
     recherche: string | null;
     liens: { titre: string; url: string; format: string; verifie: boolean; extrait: string; erreur: string | null }[];
   }[];
+  // 15/09 : pièces vues dans un dossier précédent (même tenant, même pays) mais absentes de
+  // celui-ci -- proposées en option ; confirmer une recommandation la fait rejoindre "pieces".
+  recommandations?: { piece: string; type: string | null; vu_fois: number; dernier_dossier_le: string | null }[];
 }
 
 export interface CadreRapport {

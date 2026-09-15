@@ -27,6 +27,9 @@ import {
   CadreRapport,
   PiecesRapport,
   TransparenceRapport,
+  SpecificiteRapport,
+  SharePointStatus,
+  TenantLearning,
   OrganigrammeNode,
   ProjectCountryState,
 } from './types';
@@ -497,6 +500,9 @@ export const api = {
     learning_insight?: string;
     source_diff?: Record<string, any>;
     source_outcome?: string;
+    // 15/09 : true = visible seulement par l'auteur (ajustement personnel) ; false/absent =
+    // collectif, visible par tout le tenant. Voir CreateTenantLearningRequest cote API.
+    personal?: boolean;
   }) =>
     fetcher<any>('/generate/learnings', {
       method: 'POST',
@@ -578,8 +584,21 @@ export const api = {
     ),
   getTransparence: (projectId: string) =>
     fetcher<TransparenceRapport>(`/projects/${projectId}/transparence`),
-  verifierPieces: (projectId: string) =>
-    fetcher<PiecesRapport>(`/dossiers/${projectId}/pieces`, { method: 'POST' }),
+
+  // Detecteur de specificite avant export (14/09) : repere les paragraphes qui
+  // pourraient etre copies dans n'importe quel dossier BTP.
+  getSpecificite: (projectId: string) =>
+    fetcher<SpecificiteRapport>(`/projects/${projectId}/specificite`),
+  // 15/09 : piecesConfirmees -- libelles de recommandations (historique tenant+pays,
+  // cf. rapport.recommandations) que l'utilisateur vient d'accepter pour ce dossier ;
+  // omis ou vide = comportement inchange (pas de corps envoye).
+  verifierPieces: (projectId: string, piecesConfirmees?: string[]) =>
+    fetcher<PiecesRapport>(`/dossiers/${projectId}/pieces`, {
+      method: 'POST',
+      ...(piecesConfirmees && piecesConfirmees.length
+        ? { body: JSON.stringify({ pieces_confirmees: piecesConfirmees }) }
+        : {}),
+    }),
   analyserCadreAcheteur: (projectId: string, fichier: File) => {
     const fd = new FormData();
     fd.append('file', fichier);
@@ -1048,6 +1067,30 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ tenant_id: tenantId, system_prompt: systemPrompt }),
     }),
+  // 15/09 : liste les comptes d'un tenant avec leur plafond de cout LLM individuel actuel et
+  // leur depense reelle du mois en cours (demande explicite : limite par compte cote admin).
+  getTenantUsers: (tenantId: string) =>
+    fetcher<{
+      tenant_id: string;
+      users: Array<{
+        id: string;
+        email: string;
+        full_name: string | null;
+        role: string;
+        status: string;
+        monthly_llm_cost_cap_usd: number | null;
+        current_month_spend_usd: number;
+        created_at: string;
+      }>;
+    }>(`/admin/tenants/${tenantId}/users`),
+  updateUserCostCap: (tenantId: string, userId: string, monthlyLlmCostCapUsd: number | null) =>
+    fetcher<{ success: boolean; user_id: string; monthly_llm_cost_cap_usd: number | null }>(
+      `/admin/tenants/${tenantId}/users/${userId}/cost-cap`,
+      {
+        method: 'PUT',
+        body: JSON.stringify({ monthly_llm_cost_cap_usd: monthlyLlmCostCapUsd }),
+      }
+    ),
   updateTenantModelRouting: (payload: { tenant_id: string; extraction_gonogo?: any; redaction_memoire?: any; analyse_prix?: any }) =>
     fetcher<{ success: boolean; message: string }>('/admin/model-routing', {
       method: 'POST',
@@ -1105,6 +1148,25 @@ export const api = {
     }),
   getReferenceUrls: () =>
     fetcher<Array<{ id: string; url: string; label?: string; added_at: string; status: string; last_fetched_at?: string; last_fetch_error?: string | null }>>('/company/reference-urls'),
+  // SharePoint (14/09) : la base de connaissance client peut aussi se nourrir
+  // d'un espace SharePoint, en plus des documents deposes a la main.
+  getSharePointStatus: () => fetcher<SharePointStatus>('/sharepoint/status'),
+  connectSharePoint: (payload: { ms_tenant_id: string; client_id: string; client_secret: string; site_url: string; selected_folder_path?: string }) =>
+    fetcher<SharePointStatus>('/sharepoint/connect', { method: 'POST', body: JSON.stringify(payload) }),
+  syncSharePoint: () => fetcher<SharePointStatus>('/sharepoint/sync', { method: 'POST' }),
+  disconnectSharePoint: () => fetcher<any>('/sharepoint/disconnect', { method: 'DELETE' }),
+
+  // Ce que l'application a appris de l'entreprise (14/09) : liste/edite/supprime
+  // les enseignements accumules (retour acheteur ou ajustement manuel). Le
+  // backend expose deux jeux d'endpoints (generate.py et projects.py, voir
+  // audit du 14/09) ; celui de projects.py est utilise ici car seul lui
+  // propose la mise a jour (PUT).
+  getTenantLearnings: () => fetcher<TenantLearning[]>('/projects/learnings'),
+  updateTenantLearning: (id: string, payload: { title?: string; category?: string; learning_insight?: string; actionable_directive?: string; is_active?: boolean }) =>
+    fetcher<TenantLearning>(`/projects/learnings/${id}`, { method: 'PUT', body: JSON.stringify(payload) }),
+  deleteTenantLearning: (id: string) =>
+    fetcher<any>(`/projects/learnings/${id}`, { method: 'DELETE' }),
+
   addReferenceUrl: (payload: { url: string; label?: string }) =>
     fetcher<{ id: string; url: string; label?: string; status: string }>('/company/reference-urls', {
       method: 'POST',

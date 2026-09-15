@@ -89,7 +89,7 @@ export default function TenantDetailPage() {
 
   const tenantId = Array.isArray(rawId) ? rawId[0] : (rawId as string);
 
-  const [activeTab, setActiveTab] = useState<'info' | 'routing' | 'rag' | 'memory' | 'economic'>('routing');
+  const [activeTab, setActiveTab] = useState<'info' | 'routing' | 'rag' | 'memory' | 'economic' | 'users'>('routing');
   const [tenant, setTenant] = useState<TenantDetail | null>(null);
   const [settings, setSettings] = useState<TenantSettings | null>(null);
   const [modelTier, setModelTier] = useState<string>('inherit');
@@ -104,6 +104,21 @@ export default function TenantDetailPage() {
   const [openingDocId, setOpeningDocId] = useState<string | null>(null);
   const [previewDoc, setPreviewDoc] = useState<{ title: string; url: string; isPdf: boolean } | null>(null);
   const [notice, setNotice] = useState<{ message: string; detail?: string; variant?: 'error' | 'success' } | null>(null);
+  // 15/09 : comptes du tenant + plafond de cout IA individuel par compte (demande explicite :
+  // "rajouter une limite par compte cote admin").
+  const [tenantUsers, setTenantUsers] = useState<Array<{
+    id: string;
+    email: string;
+    full_name: string | null;
+    role: string;
+    status: string;
+    monthly_llm_cost_cap_usd: number | null;
+    current_month_spend_usd: number;
+    created_at: string;
+  }>>([]);
+  const [loadingUsers, setLoadingUsers] = useState(false);
+  const [editCapDrafts, setEditCapDrafts] = useState<Record<string, string>>({});
+  const [savingCapUserId, setSavingCapUserId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Visualiser / Aperçu immédiat d'un document
@@ -271,6 +286,46 @@ export default function TenantDetailPage() {
 
     if (tenantId) loadData();
   }, [tenantId]);
+
+  async function loadTenantUsers() {
+    if (!tenantId) return;
+    setLoadingUsers(true);
+    try {
+      const res = await api.getTenantUsers(tenantId);
+      setTenantUsers(res?.users || []);
+    } catch (err) {
+      console.warn('Erreur chargement comptes du tenant:', err);
+    } finally {
+      setLoadingUsers(false);
+    }
+  }
+
+  useEffect(() => {
+    if (tenantId) loadTenantUsers();
+  }, [tenantId]);
+
+  async function handleSaveUserCap(userId: string) {
+    const raw = editCapDrafts[userId];
+    const capValue = raw === undefined || raw.trim() === '' ? null : parseFloat(raw);
+    if (capValue !== null && (isNaN(capValue) || capValue < 0)) {
+      alert('Le plafond doit être un nombre positif, ou vide pour aucun plafond.');
+      return;
+    }
+    setSavingCapUserId(userId);
+    try {
+      await api.updateUserCostCap(tenantId, userId, capValue);
+      setTenantUsers((prev) => prev.map((u) => (u.id === userId ? { ...u, monthly_llm_cost_cap_usd: capValue } : u)));
+      setEditCapDrafts((prev) => {
+        const next = { ...prev };
+        delete next[userId];
+        return next;
+      });
+    } catch (err: any) {
+      alert('Erreur lors de l\'enregistrement du plafond : ' + err.message);
+    } finally {
+      setSavingCapUserId(null);
+    }
+  }
 
 
   async function handleAdminFileUpload(files: FileList | null) {
@@ -534,6 +589,7 @@ export default function TenantDetailPage() {
           { id: 'memory', label: t('admin.tenant_detail.tab_memory'), icon: BrainCircuit },
           { id: 'routing', label: t('admin.tenant_detail.tab_routing'), icon: Cpu },
           { id: 'economic', label: t('admin.tenant_detail.tab_economic'), icon: Sliders },
+          { id: 'users', label: 'Comptes', icon: Users },
           { id: 'info', label: t('admin.tenant_detail.tab_info'), icon: Building2 },
         ].map((tab) => {
           const Icon = tab.icon;
@@ -887,6 +943,94 @@ export default function TenantDetailPage() {
             </button>
           </div>
         </form>
+      )}
+
+      {/* TAB : COMPTES & PLAFONDS INDIVIDUELS (15/09) -- demande explicite : "comment on
+          ajoute des utilisateur au meme tenant et rajouter une limite par compte cote admin".
+          L'ajout de comptes reste en libre-service cote client (Entreprise > Equipe, invitation
+          par e-mail, deja fonctionnel -- voir api/team.py) ; cet onglet est le levier operateur
+          complementaire : lister les comptes et plafonner le cout IA individuel de l'un d'eux. */}
+      {activeTab === 'users' && (
+        <div className="space-y-4">
+          <div>
+            <h2 className="text-sm font-bold text-foreground font-heading">Comptes de ce tenant</h2>
+            <p className="text-xs text-muted-foreground max-w-2xl">
+              Les comptes sont ajoutés en libre-service par le client lui-même, depuis « Entreprise › Équipe »
+              (invitation par e-mail). Vous pouvez ici fixer, en plus du plafond de coût IA global du tenant
+              (onglet Abonnement), un plafond de coût IA mensuel individuel par compte — laissez le champ vide
+              pour aucun plafond. Ce plafond individuel n'est aujourd'hui réellement appliqué que sur la
+              génération de section (le principal poste de coût IA du produit).
+            </p>
+          </div>
+
+          {loadingUsers ? (
+            <div className="py-10 text-center text-muted-foreground">
+              <Loader2 className="w-5 h-5 animate-spin text-hl mx-auto mb-2" />
+              <span>Chargement…</span>
+            </div>
+          ) : tenantUsers.length === 0 ? (
+            <div className="py-10 text-center text-muted-foreground">
+              <Users className="w-8 h-8 text-slate-300 dark:text-zinc-600 mx-auto mb-2" />
+              <p>Aucun compte pour ce tenant pour l'instant.</p>
+            </div>
+          ) : (
+            <div className="overflow-x-auto rounded-2xl border border-line">
+              <table className="w-full text-xs border-collapse">
+                <thead>
+                  <tr className="border-b border-line text-left text-muted-foreground bg-sunken">
+                    <th className="py-2.5 px-3 font-semibold">Compte</th>
+                    <th className="py-2.5 px-3 font-semibold">Rôle</th>
+                    <th className="py-2.5 px-3 font-semibold">Dépense IA ce mois-ci</th>
+                    <th className="py-2.5 px-3 font-semibold">Plafond IA mensuel individuel</th>
+                    <th className="py-2.5 px-3 font-semibold"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {tenantUsers.map((u) => {
+                    const draft = editCapDrafts[u.id];
+                    const inputValue = draft !== undefined ? draft : (u.monthly_llm_cost_cap_usd ?? '');
+                    return (
+                      <tr key={u.id} className="border-b border-line/60 last:border-b-0">
+                        <td className="py-2.5 px-3">
+                          <p className="font-semibold text-foreground">{u.full_name || u.email}</p>
+                          {u.full_name && <p className="text-[11px] text-muted-foreground">{u.email}</p>}
+                        </td>
+                        <td className="py-2.5 px-3">
+                          <span className="badge-pill text-[10px]">{u.role}</span>
+                        </td>
+                        <td className="py-2.5 px-3 font-mono">{u.current_month_spend_usd.toFixed(2)} $</td>
+                        <td className="py-2.5 px-3">
+                          <div className="relative w-28">
+                            <input
+                              type="number"
+                              step="0.01"
+                              min="0"
+                              value={inputValue}
+                              onChange={(e) => setEditCapDrafts((prev) => ({ ...prev, [u.id]: e.target.value }))}
+                              placeholder="Aucun"
+                              className="w-full pl-2 pr-6 py-1.5 rounded-lg bg-sunken border border-line text-foreground font-mono text-xs focus:border-hl focus:outline-none"
+                            />
+                            <DollarSign className="w-3 h-3 text-muted-foreground absolute right-2 top-2" />
+                          </div>
+                        </td>
+                        <td className="py-2.5 px-3">
+                          <button
+                            onClick={() => handleSaveUserCap(u.id)}
+                            disabled={savingCapUserId === u.id}
+                            className="btn-secondary !py-1.5 !px-2.5 !text-[11px] cursor-pointer"
+                            title="Enregistrer le plafond"
+                          >
+                            {savingCapUserId === u.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
       )}
 
       {/* TAB 5: COMPANY INFO */}

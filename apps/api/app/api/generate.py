@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.db import get_db
@@ -268,6 +268,7 @@ async def generate_single_section(
         project_id=payload.project_id,
         section_key=payload.section_key,
         custom_instructions=payload.custom_instructions,
+        requested_by_user_id=current_user.user_id,
     )
 
     return GeneratedSectionOut(
@@ -801,6 +802,7 @@ async def create_tenant_learning_endpoint(
         actionable_directive=payload.actionable_directive or f"Directive : Appliquer l'ajustement '{payload.title}'.",
         source_diff=payload.source_diff or {},
         source_outcome=payload.source_outcome or "manual",
+        created_by_user_id=uuid.UUID(current_user.user_id) if payload.personal else None,
         is_active=True,
         created_at=now,
         updated_at=now,
@@ -820,6 +822,7 @@ async def create_tenant_learning_endpoint(
         learned_content=learning.learned_content,
         source_diff=learning.source_diff or {},
         source_outcome=learning.source_outcome or "manual",
+        created_by_user_id=str(learning.created_by_user_id) if learning.created_by_user_id else None,
         is_active=learning.is_active,
         created_at=learning.created_at,
         updated_at=learning.updated_at,
@@ -835,7 +838,15 @@ async def list_tenant_learnings_endpoint(
     Lists active continuous learnings for the authenticated tenant.
     """
     t_uuid = uuid.UUID(current_user.tenant_id)
-    stmt = select(TenantLearning).where(TenantLearning.tenant_id == t_uuid).order_by(TenantLearning.created_at.desc())
+    u_uuid = uuid.UUID(current_user.user_id)
+    stmt = (
+        select(TenantLearning)
+        .where(
+            TenantLearning.tenant_id == t_uuid,
+            or_(TenantLearning.created_by_user_id.is_(None), TenantLearning.created_by_user_id == u_uuid),
+        )
+        .order_by(TenantLearning.created_at.desc())
+    )
     res = await db.execute(stmt)
     learnings = res.scalars().all()
 
@@ -852,6 +863,7 @@ async def list_tenant_learnings_endpoint(
             learned_content=l.learned_content,
             source_diff=l.source_diff or {},
             source_outcome=l.source_outcome or "manual",
+            created_by_user_id=str(l.created_by_user_id) if l.created_by_user_id else None,
             is_active=l.is_active,
             created_at=l.created_at,
             updated_at=l.updated_at,

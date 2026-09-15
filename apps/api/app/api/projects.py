@@ -239,6 +239,7 @@ async def create_project(
                 project_id=str(new_project.id),
                 section_key=proactive_key,
                 custom_instructions=None,
+                requested_by_user_id=current_user.user_id,
             )
     except HTTPException as e:
         logger.warning(f"Génération proactive ignorée à la création (quota/abonnement) : {e.detail}")
@@ -347,6 +348,7 @@ async def list_tenant_learnings(
         tenant_id=t_uuid,
         category=category,
         limit=50,
+        requesting_user_id=uuid.UUID(current_user.user_id),
     )
 
     return [
@@ -359,6 +361,7 @@ async def list_tenant_learnings(
             learning_insight=l.learning_insight,
             actionable_directive=l.actionable_directive,
             source_outcome=l.source_outcome,
+            created_by_user_id=str(l.created_by_user_id) if l.created_by_user_id else None,
             is_active=bool(l.is_active),
             created_at=l.created_at,
             updated_at=l.updated_at,
@@ -390,6 +393,16 @@ async def update_tenant_learning(
     if not learning:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Learning item not found")
 
+    if (
+        learning.created_by_user_id is not None
+        and str(learning.created_by_user_id) != current_user.user_id
+        and current_user.role != "owner"
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Cet apprentissage est personnel a un autre utilisateur.",
+        )
+
     if payload.title is not None:
         learning.title = payload.title
     if payload.category is not None:
@@ -413,6 +426,7 @@ async def update_tenant_learning(
         learning_insight=learning.learning_insight,
         actionable_directive=learning.actionable_directive,
         source_outcome=learning.source_outcome,
+        created_by_user_id=str(learning.created_by_user_id) if learning.created_by_user_id else None,
         is_active=bool(learning.is_active),
         created_at=learning.created_at,
         updated_at=learning.updated_at,
@@ -440,6 +454,16 @@ async def delete_tenant_learning(
 
     if not learning:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Learning item not found")
+
+    if (
+        learning.created_by_user_id is not None
+        and str(learning.created_by_user_id) != current_user.user_id
+        and current_user.role != "owner"
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Cet apprentissage est personnel a un autre utilisateur.",
+        )
 
     await db.delete(learning)
     await db.flush()
@@ -1440,3 +1464,28 @@ async def transparence_projet(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Projet introuvable")
     langue = request.headers.get("x-ui-language") or request.query_params.get("lang") or "fr"
     return await rapport_transparence(db, t_uuid, project, langue)
+
+
+@router.get("/{project_id}/specificite")
+async def specificite_projet(
+    project_id: str,
+    request: Request,
+    current_user: CurrentTenantUser = Depends(get_current_tenant_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Détecteur de spécificité avant export (14/09, demande Charbel) : repère les
+    paragraphes qui pourraient être copiés-collés dans n'importe quel dossier BTP,
+    faute de reprendre un fait réel de ce marché ou de l'entreprise. Voir
+    app/services/specificite_service.py pour la méthode (mécanique, pas une note
+    auto-déclarée par le LLM)."""
+    from app.services.specificite_service import rapport_specificite
+    try:
+        p_uuid = uuid.UUID(project_id)
+        t_uuid = uuid.UUID(current_user.tenant_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Identifiant invalide")
+    project = (await db.execute(select(Project).where(Project.id == p_uuid, Project.tenant_id == t_uuid))).scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Projet introuvable")
+    langue = request.headers.get("x-ui-language") or request.query_params.get("lang") or "fr"
+    return await rapport_specificite(db, t_uuid, project, langue)
